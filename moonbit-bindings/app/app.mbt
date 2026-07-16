@@ -21,11 +21,11 @@ const BTN_INCREMENT_10 : Int = 4
 
 // Event kinds — must match the EVENT_* constants in gpui-sys/src/lib.rs.
 const EV_CLICK : Int = 1
-const EV_KEY : Int = 2 // 予約: まだ Rust 側から発火しない(payload 拡張の例)
+const EV_KEY : Int = 2 // キーイベント: Rust が単一文字キーの codepoint を a に載せて発火
 
 priv enum Event {
   Click(Int) // click_id
-  Key(Int, Int) // keycode, modifiers(予約)
+  Key(Int, Int) // codepoint, modifier bits
   Unknown
 }
 

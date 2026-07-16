@@ -22,6 +22,7 @@ gpui/
 │   └── cmd/main/              # デモアプリケーション
 │
 └── docs/
+    ├── architecture.md        # 現行アーキテクチャ(AI向け・具体的な参照先)
     ├── roadmap.md             # ロードマップと進捗
     ├── troubleshooting.md     # 遭遇した不具合と原因・修正の記録
     └── moonbit-native-notes.md # MoonBit native の低レベル仕様メモ(実測・随時追記)
