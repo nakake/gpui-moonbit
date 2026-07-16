@@ -1,0 +1,16 @@
+[package]
+name = "gpui-sys"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+# staticlib only: the archive references `mb_dispatch` (provided by the MoonBit
+# `app` package) as an undefined external, resolved at the final executable link.
+# A cdylib would fail to build on that undefined symbol.
+crate-type = ["staticlib"]
+
+[dependencies]
+gpui = "0.2"
+
+[build-dependencies]
+cbindgen = "0.28"

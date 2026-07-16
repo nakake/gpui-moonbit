@@ -1,0 +1,8 @@
+# Build artifacts
+target/
+_build/
+dist/
+mb_symbol.txt
+
+# macOS
+.DS_Store
