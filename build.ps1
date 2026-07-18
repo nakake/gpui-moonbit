@@ -75,6 +75,7 @@ $extraPaths = @($extraPaths) + @($winLibPaths)
 $nativeLibs = ($extraPaths + $nativeLibs) -join ' '
 if ($extraPaths) { Write-Host "    extra lib paths: $($extraPaths -join ' ')" }
 
+# /MD keeps moon's cl compile on Rust's dynamic CRT (msvcrt), avoiding LNK4098 against LIBCMT.
 Write-Host '==> [4/4] Final MoonBit build (real moon.pkg + forced relink)'
 Write-MoonPkg $nativeLibs
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $MB '_build\native\debug\build\cmd\main\main.exe')
