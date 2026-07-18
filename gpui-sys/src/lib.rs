@@ -24,6 +24,7 @@ include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
 const EVENT_CLICK: i32 = 1;
 const EVENT_KEY: i32 = 2;
 
+#[derive(Clone)]
 enum UiNode {
     Div {
         width: f32,
@@ -48,7 +49,7 @@ fn with_nodes<F, R>(f: F) -> R
 where
     F: FnOnce(&mut Vec<Option<UiNode>>) -> R,
 {
-    f(&mut NODES.lock().unwrap())
+    f(&mut NODES.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 #[unsafe(no_mangle)]
@@ -210,13 +211,14 @@ struct FfiView {
 
 impl Render for FfiView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let nodes = NODES.lock().unwrap();
+        let nodes = {
+            let guard = NODES.lock().unwrap_or_else(|e| e.into_inner());
+            guard.iter().flatten().cloned().collect::<Vec<_>>()
+        };
         let mut children = Vec::new();
-        for node in nodes.iter() {
-            if let Some(n) = node {
-                if let Some(el) = render_node(n, cx, true) {
-                    children.push(el);
-                }
+        for node in &nodes {
+            if let Some(el) = render_node(node, cx, true) {
+                children.push(el);
             }
         }
         let mut d = div()
