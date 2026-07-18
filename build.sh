@@ -82,4 +82,7 @@ rm -f "$MB"/_build/native/debug/build/cmd/main/main.exe \
       "$MB"/_build/native/debug/build/cmd/main/__moonbit_link_core__/main.o 2>/dev/null || true
 ( cd "$MB" && moon build )
 
-echo "Done. Run:  (cd $MB && moon run cmd/main)"
+case "$OS_PKG" in
+  macos) echo "Done. Run:  ./bundle.sh && open dist/Counter.app  (keyboard needs the bundle)" ;;
+  linux) echo 'Done. Run:  (cd moonbit-bindings && env -u WAYLAND_DISPLAY LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug/build/cmd/main/main.exe)' ;;
+esac
