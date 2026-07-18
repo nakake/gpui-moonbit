@@ -214,7 +214,7 @@ impl Render for FfiView {
         let mut children = Vec::new();
         for node in nodes.iter() {
             if let Some(n) = node {
-                if let Some(el) = render_node(n, cx) {
+                if let Some(el) = render_node(n, cx, true) {
                     children.push(el);
                 }
             }
@@ -258,7 +258,11 @@ fn mods_bits(m: &Modifiers) -> i32 {
         | ((m.function as i32) << 4)
 }
 
-fn render_node(node: &UiNode, cx: &mut Context<FfiView>) -> Option<AnyElement> {
+fn render_node(
+    node: &UiNode,
+    cx: &mut Context<FfiView>,
+    fill_available_space: bool,
+) -> Option<AnyElement> {
     match node {
         UiNode::Div {
             width,
@@ -277,11 +281,14 @@ fn render_node(node: &UiNode, cx: &mut Context<FfiView>) -> Option<AnyElement> {
             // aliasing borrow.
             let mut child_elements: Vec<AnyElement> = Vec::new();
             for child in children {
-                if let Some(el) = render_node(child, cx) {
+                if let Some(el) = render_node(child, cx, false) {
                     child_elements.push(el);
                 }
             }
             let mut d = div();
+            if fill_available_space {
+                d = d.size_full();
+            }
             if *width > 0.0 && *height > 0.0 {
                 d = d.w(px(*width)).h(px(*height));
             }

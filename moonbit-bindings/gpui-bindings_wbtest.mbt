@@ -2,6 +2,14 @@
 // Use them to validate internal helpers or invariants.
 // Keep them focused; public behavior belongs in `_test.mbt`.
 
+test "clamp_color_component: clamps to the byte range" {
+  assert_eq(clamp_color_component(-1), 0)
+  assert_eq(clamp_color_component(0), 0)
+  assert_eq(clamp_color_component(128), 128)
+  assert_eq(clamp_color_component(255), 255)
+  assert_eq(clamp_color_component(300), 255)
+}
+
 test "to_cstring_bytes: ascii is full utf8 with trailing NUL" {
   let b = to_cstring_bytes("GPUI + MoonBit")
   // 14 code units + 1 NUL terminator (the old String FFI truncated to 1 char).
