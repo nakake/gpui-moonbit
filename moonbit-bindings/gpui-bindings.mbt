@@ -3,6 +3,16 @@
 
 pub type NodeHandle = Int
 
+fn clamp_color_component(value : Int) -> Int {
+  if value < 0 {
+    0
+  } else if value > 255 {
+    255
+  } else {
+    value
+  }
+}
+
 pub fn create_div() -> NodeHandle {
   gpui_create_div_ffi()
 }
@@ -12,8 +22,14 @@ pub fn set_size(handle : NodeHandle, w : Float, h : Float) -> NodeHandle {
   handle
 }
 
+/// Sets the background color, clamping each RGB component to the 0-255 range.
 pub fn set_bg(handle : NodeHandle, r : Int, g : Int, b : Int) -> NodeHandle {
-  gpui_set_bg_ffi(handle, r, g, b)
+  gpui_set_bg_ffi(
+    handle,
+    clamp_color_component(r),
+    clamp_color_component(g),
+    clamp_color_component(b),
+  )
   handle
 }
 
@@ -55,8 +71,15 @@ fn to_cstring_bytes(text : String) -> Bytes {
   buf.to_bytes()
 }
 
+/// Creates text with each RGB color component clamped to the 0-255 range.
 pub fn create_text(text : String, r : Int, g : Int, b : Int, size : Float) -> NodeHandle {
-  gpui_create_text_ffi(to_cstring_bytes(text), r, g, b, size)
+  gpui_create_text_ffi(
+    to_cstring_bytes(text),
+    clamp_color_component(r),
+    clamp_color_component(g),
+    clamp_color_component(b),
+    size,
+  )
 }
 
 pub fn add_child(parent : NodeHandle, child : NodeHandle) -> NodeHandle {
