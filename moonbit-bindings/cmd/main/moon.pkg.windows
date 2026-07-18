@@ -1,0 +1,14 @@
+import {
+  "username/gpui-bindings",
+  "username/gpui-bindings/app",
+}
+
+options(
+  "is-main": true,
+  link: {
+    "native": {
+      "cc-flags": "-I../gpui-sys/include",
+      "cc-link-flags": "/link /LIBPATH:../gpui-sys/target/debug gpui_sys.lib @NATIVE_LIBS@",
+    },
+  },
+)

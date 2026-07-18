@@ -6,3 +6,6 @@ mb_symbol.txt
 
 # macOS
 .DS_Store
+
+# Local runtime libs extracted without sudo (see moon.pkg.linux)
+.linux-libs/
