@@ -1,9 +1,20 @@
 use gpui::*;
-use std::ffi::CStr;
-use std::os::raw::c_char;
+use std::any::Any;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
 static NODES: Mutex<Vec<Option<UiNode>>> = Mutex::new(Vec::new());
+
+/// Operation completed successfully.
+pub const GPUI_STATUS_OK: i32 = 0;
+/// A handle was negative, out of range, duplicated, or could not be allocated.
+pub const GPUI_STATUS_INVALID_HANDLE: i32 = -1;
+/// The handle refers to the wrong kind of node for the requested operation.
+pub const GPUI_STATUS_WRONG_NODE_KIND: i32 = -2;
+/// The node was already moved into another node by `gpui_add_child`.
+pub const GPUI_STATUS_NODE_ABSENT: i32 = -3;
+/// An internal panic was caught before it could cross the C boundary.
+pub const GPUI_STATUS_INTERNAL_PANIC: i32 = -4;
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
 // symbol for an executable build, so we bind directly to the compiled MoonBit
@@ -24,6 +35,7 @@ include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
 const EVENT_CLICK: i32 = 1;
 const EVENT_KEY: i32 = 2;
 
+#[derive(Clone)]
 enum UiNode {
     Div {
         width: f32,
@@ -48,138 +60,256 @@ fn with_nodes<F, R>(f: F) -> R
 where
     F: FnOnce(&mut Vec<Option<UiNode>>) -> R,
 {
-    f(&mut NODES.lock().unwrap())
+    f(&mut NODES.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+fn report_panic(context: &str, payload: &(dyn Any + Send)) {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    eprintln!("gpui-sys: panic in {context}: {message}");
+}
+
+fn ffi_export<F>(name: &str, f: F) -> i32
+where
+    F: FnOnce() -> i32,
+{
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(status) => status,
+        Err(payload) => {
+            report_panic(name, payload.as_ref());
+            GPUI_STATUS_INTERNAL_PANIC
+        }
+    }
+}
+
+fn div_mut(nodes: &mut [Option<UiNode>], handle: i32) -> Result<&mut UiNode, i32> {
+    if handle < 0 {
+        return Err(GPUI_STATUS_INVALID_HANDLE);
+    }
+    match nodes.get_mut(handle as usize) {
+        None => Err(GPUI_STATUS_INVALID_HANDLE),
+        Some(None) => Err(GPUI_STATUS_NODE_ABSENT),
+        Some(Some(node @ UiNode::Div { .. })) => Ok(node),
+        Some(Some(UiNode::Text { .. })) => Err(GPUI_STATUS_WRONG_NODE_KIND),
+    }
+}
+
+fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
+    let Ok(id) = i32::try_from(nodes.len()) else {
+        return GPUI_STATUS_INVALID_HANDLE;
+    };
+    nodes.push(Some(node));
+    id
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_create_div() -> i32 {
-    with_nodes(|nodes| {
-        let id = nodes.len() as i32;
-        nodes.push(Some(UiNode::Div {
-            width: 0.0,
-            height: 0.0,
-            bg: None,
-            flex: false,
-            flex_col: false,
-            center: false,
-            gap: 0.0,
-            rounded: 0.0,
-            on_click: None,
-            children: Vec::new(),
-        }));
-        id
+    ffi_export("gpui_create_div", || {
+        with_nodes(|nodes| {
+            push_node(
+                nodes,
+                UiNode::Div {
+                    width: 0.0,
+                    height: 0.0,
+                    bg: None,
+                    flex: false,
+                    flex_col: false,
+                    center: false,
+                    gap: 0.0,
+                    rounded: 0.0,
+                    on_click: None,
+                    children: Vec::new(),
+                },
+            )
+        })
     })
 }
 
 /// Mark a div as clickable. `click_id` is passed back to MoonBit's `dispatch`
 /// when the div is clicked.
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_set_on_click(handle: i32, click_id: i32) {
-    with_nodes(|nodes| {
-        if let Some(Some(UiNode::Div { on_click, .. })) = nodes.get_mut(handle as usize) {
-            *on_click = Some(click_id);
-        }
-    });
+pub extern "C" fn gpui_set_on_click(handle: i32, click_id: i32) -> i32 {
+    ffi_export("gpui_set_on_click", || {
+        with_nodes(|nodes| match div_mut(nodes, handle) {
+            Ok(UiNode::Div { on_click, .. }) => {
+                *on_click = Some(click_id);
+                GPUI_STATUS_OK
+            }
+            Ok(_) => unreachable!(),
+            Err(status) => status,
+        })
+    })
 }
 
 /// Clear the whole node tree so MoonBit can rebuild it from scratch (used on
 /// re-render after a click).
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_reset() {
-    with_nodes(|nodes| nodes.clear());
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gpui_set_size(handle: i32, w: f32, h: f32) {
-    with_nodes(|nodes| {
-        if let Some(Some(UiNode::Div { width, height, .. })) = nodes.get_mut(handle as usize) {
-            *width = w;
-            *height = h;
-        }
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gpui_set_bg(handle: i32, r: u8, g: u8, b: u8) {
-    with_nodes(|nodes| {
-        if let Some(Some(UiNode::Div { bg, .. })) = nodes.get_mut(handle as usize) {
-            *bg = Some((r, g, b));
-        }
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gpui_set_flex(handle: i32, col: i32) {
-    with_nodes(|nodes| {
-        if let Some(Some(UiNode::Div { flex, flex_col, .. })) = nodes.get_mut(handle as usize) {
-            *flex = true;
-            *flex_col = col != 0;
-        }
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gpui_set_center(handle: i32) {
-    with_nodes(|nodes| {
-        if let Some(Some(UiNode::Div { center, .. })) = nodes.get_mut(handle as usize) {
-            *center = true;
-        }
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gpui_set_gap(handle: i32, gap: f32) {
-    with_nodes(|nodes| {
-        if let Some(Some(UiNode::Div { gap: g, .. })) = nodes.get_mut(handle as usize) {
-            *g = gap;
-        }
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gpui_set_rounded(handle: i32, radius: f32) {
-    with_nodes(|nodes| {
-        if let Some(Some(UiNode::Div { rounded, .. })) = nodes.get_mut(handle as usize) {
-            *rounded = radius;
-        }
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gpui_create_text(text: *const c_char, r: u8, g: u8, b: u8, size: f32) -> i32 {
-    let content = if text.is_null() {
-        String::new()
-    } else {
-        unsafe { CStr::from_ptr(text) }
-            .to_str()
-            .unwrap_or("")
-            .to_string()
-    };
-    with_nodes(|nodes| {
-        let id = nodes.len() as i32;
-        nodes.push(Some(UiNode::Text {
-            content,
-            color: (r, g, b),
-            size,
-        }));
-        id
+pub extern "C" fn gpui_reset() -> i32 {
+    ffi_export("gpui_reset", || {
+        with_nodes(|nodes| nodes.clear());
+        GPUI_STATUS_OK
     })
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_add_child(parent: i32, child: i32) {
-    with_nodes(|nodes| {
-        let child_node = nodes[child as usize].take();
-        if let Some(c) = child_node {
-            if let Some(Some(UiNode::Div { children, .. })) = nodes.get_mut(parent as usize) {
-                children.push(c);
+pub extern "C" fn gpui_set_size(handle: i32, w: f32, h: f32) -> i32 {
+    ffi_export("gpui_set_size", || {
+        with_nodes(|nodes| match div_mut(nodes, handle) {
+            Ok(UiNode::Div { width, height, .. }) => {
+                *width = w;
+                *height = h;
+                GPUI_STATUS_OK
             }
-        }
-    });
+            Ok(_) => unreachable!(),
+            Err(status) => status,
+        })
+    })
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_run_window(width: f32, height: f32) {
+pub extern "C" fn gpui_set_bg(handle: i32, r: u8, g: u8, b: u8) -> i32 {
+    ffi_export("gpui_set_bg", || {
+        with_nodes(|nodes| match div_mut(nodes, handle) {
+            Ok(UiNode::Div { bg, .. }) => {
+                *bg = Some((r, g, b));
+                GPUI_STATUS_OK
+            }
+            Ok(_) => unreachable!(),
+            Err(status) => status,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_set_flex(handle: i32, col: i32) -> i32 {
+    ffi_export("gpui_set_flex", || {
+        with_nodes(|nodes| match div_mut(nodes, handle) {
+            Ok(UiNode::Div { flex, flex_col, .. }) => {
+                *flex = true;
+                *flex_col = col != 0;
+                GPUI_STATUS_OK
+            }
+            Ok(_) => unreachable!(),
+            Err(status) => status,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_set_center(handle: i32) -> i32 {
+    ffi_export("gpui_set_center", || {
+        with_nodes(|nodes| match div_mut(nodes, handle) {
+            Ok(UiNode::Div { center, .. }) => {
+                *center = true;
+                GPUI_STATUS_OK
+            }
+            Ok(_) => unreachable!(),
+            Err(status) => status,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_set_gap(handle: i32, gap: f32) -> i32 {
+    ffi_export("gpui_set_gap", || {
+        with_nodes(|nodes| match div_mut(nodes, handle) {
+            Ok(UiNode::Div { gap: value, .. }) => {
+                *value = gap;
+                GPUI_STATUS_OK
+            }
+            Ok(_) => unreachable!(),
+            Err(status) => status,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_set_rounded(handle: i32, radius: f32) -> i32 {
+    ffi_export("gpui_set_rounded", || {
+        with_nodes(|nodes| match div_mut(nodes, handle) {
+            Ok(UiNode::Div { rounded, .. }) => {
+                *rounded = radius;
+                GPUI_STATUS_OK
+            }
+            Ok(_) => unreachable!(),
+            Err(status) => status,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_create_text(
+    ptr: *const u8,
+    len: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+    size: f32,
+) -> i32 {
+    ffi_export("gpui_create_text", || {
+        let content = if ptr.is_null() || len <= 0 {
+            String::new()
+        } else {
+            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
+                .into_owned()
+        };
+        with_nodes(|nodes| {
+            push_node(
+                nodes,
+                UiNode::Text {
+                    content,
+                    color: (r, g, b),
+                    size,
+                },
+            )
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_add_child(parent: i32, child: i32) -> i32 {
+    ffi_export("gpui_add_child", || {
+        with_nodes(|nodes| {
+            if parent < 0 || child < 0 || parent == child {
+                return GPUI_STATUS_INVALID_HANDLE;
+            }
+            let parent_index = parent as usize;
+            let child_index = child as usize;
+            if parent_index >= nodes.len() || child_index >= nodes.len() {
+                return GPUI_STATUS_INVALID_HANDLE;
+            }
+            match &nodes[parent_index] {
+                None => return GPUI_STATUS_NODE_ABSENT,
+                Some(UiNode::Text { .. }) => return GPUI_STATUS_WRONG_NODE_KIND,
+                Some(UiNode::Div { .. }) => {}
+            }
+            if nodes[child_index].is_none() {
+                return GPUI_STATUS_NODE_ABSENT;
+            }
+
+            let child_node = nodes[child_index]
+                .take()
+                .expect("child presence was validated");
+            let Some(UiNode::Div { children, .. }) = nodes[parent_index].as_mut() else {
+                unreachable!("parent kind was validated");
+            };
+            children.push(child_node);
+            GPUI_STATUS_OK
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_run_window(width: f32, height: f32) -> i32 {
+    ffi_export("gpui_run_window", || {
+        run_window_with_fallback(width, height)
+    })
+}
+
+fn run_window(width: f32, height: f32) {
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         cx.open_window(
@@ -204,19 +334,48 @@ pub extern "C" fn gpui_run_window(width: f32, height: f32) {
     });
 }
 
+fn run_window_with_fallback(width: f32, height: f32) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| run_window(width, height))) {
+        Ok(()) => GPUI_STATUS_OK,
+        Err(first_panic) => {
+            #[cfg(target_os = "linux")]
+            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                report_panic("gpui_run_window (Wayland attempt)", first_panic.as_ref());
+                eprintln!(
+                    "gpui-sys: Wayland startup failed; unsetting WAYLAND_DISPLAY and retrying with X11"
+                );
+                // SAFETY: window startup is single-threaded and happens before GPUI
+                // creates worker threads that could concurrently read the environment.
+                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+                return match catch_unwind(AssertUnwindSafe(|| run_window(width, height))) {
+                    Ok(()) => GPUI_STATUS_OK,
+                    Err(second_panic) => {
+                        report_panic("gpui_run_window (X11 retry)", second_panic.as_ref());
+                        GPUI_STATUS_INTERNAL_PANIC
+                    }
+                };
+            }
+
+            report_panic("gpui_run_window", first_panic.as_ref());
+            GPUI_STATUS_INTERNAL_PANIC
+        }
+    }
+}
+
 struct FfiView {
     focus: FocusHandle,
 }
 
 impl Render for FfiView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let nodes = NODES.lock().unwrap();
+        let nodes = {
+            let guard = NODES.lock().unwrap_or_else(|e| e.into_inner());
+            guard.iter().flatten().cloned().collect::<Vec<_>>()
+        };
         let mut children = Vec::new();
-        for node in nodes.iter() {
-            if let Some(n) = node {
-                if let Some(el) = render_node(n, cx, true) {
-                    children.push(el);
-                }
+        for node in &nodes {
+            if let Some(el) = render_node(node, cx, true) {
+                children.push(el);
             }
         }
         let mut d = div()

@@ -8,36 +8,66 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/**
+ * Operation completed successfully.
+ */
+#define gpui_GPUI_STATUS_OK 0
+
+/**
+ * A handle was negative, out of range, duplicated, or could not be allocated.
+ */
+#define gpui_GPUI_STATUS_INVALID_HANDLE -1
+
+/**
+ * The handle refers to the wrong kind of node for the requested operation.
+ */
+#define gpui_GPUI_STATUS_WRONG_NODE_KIND -2
+
+/**
+ * The node was already moved into another node by `gpui_add_child`.
+ */
+#define gpui_GPUI_STATUS_NODE_ABSENT -3
+
+/**
+ * An internal panic was caught before it could cross the C boundary.
+ */
+#define gpui_GPUI_STATUS_INTERNAL_PANIC -4
+
 int32_t gpui_create_div(void);
 
 /**
  * Mark a div as clickable. `click_id` is passed back to MoonBit's `dispatch`
  * when the div is clicked.
  */
-void gpui_set_on_click(int32_t handle, int32_t click_id);
+int32_t gpui_set_on_click(int32_t handle, int32_t click_id);
 
 /**
  * Clear the whole node tree so MoonBit can rebuild it from scratch (used on
  * re-render after a click).
  */
-void gpui_reset(void);
+int32_t gpui_reset(void);
 
-void gpui_set_size(int32_t handle, float w, float h);
+int32_t gpui_set_size(int32_t handle, float w, float h);
 
-void gpui_set_bg(int32_t handle, uint8_t r, uint8_t g, uint8_t b);
+int32_t gpui_set_bg(int32_t handle, uint8_t r, uint8_t g, uint8_t b);
 
-void gpui_set_flex(int32_t handle, int32_t col);
+int32_t gpui_set_flex(int32_t handle, int32_t col);
 
-void gpui_set_center(int32_t handle);
+int32_t gpui_set_center(int32_t handle);
 
-void gpui_set_gap(int32_t handle, float gap);
+int32_t gpui_set_gap(int32_t handle, float gap);
 
-void gpui_set_rounded(int32_t handle, float radius);
+int32_t gpui_set_rounded(int32_t handle, float radius);
 
-int32_t gpui_create_text(const char *text, uint8_t r, uint8_t g, uint8_t b, float size);
+int32_t gpui_create_text(const uint8_t *ptr,
+                         int32_t len,
+                         uint8_t r,
+                         uint8_t g,
+                         uint8_t b,
+                         float size);
 
-void gpui_add_child(int32_t parent, int32_t child);
+int32_t gpui_add_child(int32_t parent, int32_t child);
 
-void gpui_run_window(float width, float height);
+int32_t gpui_run_window(float width, float height);
 
 #endif  /* GPUI_SYS_H */
