@@ -11,35 +11,43 @@
 // (MoonBit mangling excludes types), so the Rust `extern` must be kept in sync —
 // it is generated from a template in `gpui-sys/build.rs`.
 
+///|
 let count : Array[Int] = [0]
 
 // Button click ids (each clickable div carries one; routed in `on_click`).
+
+///|
 const BTN_DECREMENT : Int = 1
+
+///|
 const BTN_RESET : Int = 2
+
+///|
 const BTN_INCREMENT : Int = 3
+
+///|
 const BTN_INCREMENT_10 : Int = 4
 
-// Event kinds — must match the EVENT_* constants in gpui-sys/src/lib.rs.
-const EV_CLICK : Int = 1
-const EV_KEY : Int = 2 // キーイベント: Rust が単一文字キーの codepoint を a に載せて発火
-
+///|
 priv enum Event {
   Click(Int) // click_id
   Key(Int, Int) // codepoint, modifier bits
   Unknown
 }
 
+///|
 fn decode(kind : Int, id : Int, a : Int, b : Int) -> Event {
   // Int 定数の比較。const 名を match のパターンにすると束縛と紛れるので if で比較。
-  if kind == EV_CLICK {
+  if kind == @username/gpui-bindings.EVENT_CLICK {
     Click(id)
-  } else if kind == EV_KEY {
+  } else if kind == @username/gpui-bindings.EVENT_KEY {
     Key(a, b)
   } else {
     Unknown
   }
 }
 
+///|
 pub fn dispatch(kind : Int, id : Int, a : Int, b : Int) -> Unit {
   match decode(kind, id, a, b) {
     Click(click_id) => on_click(click_id)
@@ -49,6 +57,7 @@ pub fn dispatch(kind : Int, id : Int, a : Int, b : Int) -> Unit {
   build_tree()
 }
 
+///|
 fn on_click(click_id : Int) -> Unit {
   if click_id == BTN_DECREMENT {
     count[0] = count[0] - 1
@@ -62,10 +71,17 @@ fn on_click(click_id : Int) -> Unit {
 }
 
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
+
+///|
 const KEY_K : Int = 107 // 'k' → +1
+
+///|
 const KEY_J : Int = 106 // 'j' → -1
+
+///|
 const KEY_R : Int = 114 // 'r' → reset
 
+///|
 fn on_key(code : Int, _mods : Int) -> Unit {
   if code == KEY_K {
     count[0] = count[0] + 1
@@ -77,6 +93,8 @@ fn on_key(code : Int, _mods : Int) -> Unit {
 }
 
 // Build one labelled, clickable button and return its handle.
+
+///|
 fn make_button(
   label : String,
   click_id : Int,
@@ -96,6 +114,7 @@ fn make_button(
   btn
 }
 
+///|
 pub fn build_tree() -> Unit {
   @username/gpui-bindings.reset()
   let root = @username/gpui-bindings.create_div()
@@ -103,10 +122,16 @@ pub fn build_tree() -> Unit {
   ignore(@username/gpui-bindings.set_flex_col(root))
   ignore(@username/gpui-bindings.set_center(root))
   ignore(@username/gpui-bindings.set_gap(root, 28.0))
-  let title = @username/gpui-bindings.create_text("Counter", 236, 239, 245, 30.0)
+  let title = @username/gpui-bindings.create_text(
+    "Counter", 236, 239, 245, 30.0,
+  )
   ignore(@username/gpui-bindings.add_child(root, title))
   let value = @username/gpui-bindings.create_text(
-    "Count: \{count[0]}", 120, 200, 255, 44.0,
+    "Count: \{count[0]}",
+    120,
+    200,
+    255,
+    44.0,
   )
   ignore(@username/gpui-bindings.add_child(root, value))
 
@@ -116,22 +141,26 @@ pub fn build_tree() -> Unit {
   ignore(@username/gpui-bindings.set_gap(row, 12.0))
   ignore(
     @username/gpui-bindings.add_child(
-      row, make_button("-1", BTN_DECREMENT, 200, 80, 80),
+      row,
+      make_button("-1", BTN_DECREMENT, 200, 80, 80),
     ),
   )
   ignore(
     @username/gpui-bindings.add_child(
-      row, make_button("Reset", BTN_RESET, 92, 98, 110),
+      row,
+      make_button("Reset", BTN_RESET, 92, 98, 110),
     ),
   )
   ignore(
     @username/gpui-bindings.add_child(
-      row, make_button("+1", BTN_INCREMENT, 70, 160, 95),
+      row,
+      make_button("+1", BTN_INCREMENT, 70, 160, 95),
     ),
   )
   ignore(
     @username/gpui-bindings.add_child(
-      row, make_button("+10", BTN_INCREMENT_10, 70, 110, 230),
+      row,
+      make_button("+10", BTN_INCREMENT_10, 70, 110, 230),
     ),
   )
   ignore(@username/gpui-bindings.add_child(root, row))

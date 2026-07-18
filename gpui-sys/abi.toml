@@ -1,0 +1,16 @@
+abi_version = 1
+
+[events]
+EVENT_CLICK = 1
+EVENT_KEY = 2
+
+[modifiers]
+MOD_CTRL = 1
+MOD_ALT = 2
+MOD_SHIFT = 4
+MOD_PLATFORM = 8
+MOD_FUNCTION = 16
+
+[callback]
+name = "dispatch"
+params = ["i32", "i32", "i32", "i32"]
