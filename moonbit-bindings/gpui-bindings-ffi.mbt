@@ -3,26 +3,26 @@
 
 extern "C" fn gpui_create_div_ffi() -> Int = "gpui_create_div"
 
-extern "C" fn gpui_set_on_click_ffi(handle : Int, click_id : Int) -> Unit = "gpui_set_on_click"
+extern "C" fn gpui_set_on_click_ffi(handle : Int, click_id : Int) -> Int = "gpui_set_on_click"
 
-extern "C" fn gpui_reset_ffi() -> Unit = "gpui_reset"
+extern "C" fn gpui_reset_ffi() -> Int = "gpui_reset"
 
-extern "C" fn gpui_set_size_ffi(handle : Int, w : Float, h : Float) -> Unit = "gpui_set_size"
+extern "C" fn gpui_set_size_ffi(handle : Int, w : Float, h : Float) -> Int = "gpui_set_size"
 
-extern "C" fn gpui_set_bg_ffi(handle : Int, r : Int, g : Int, b : Int) -> Unit = "gpui_set_bg"
+extern "C" fn gpui_set_bg_ffi(handle : Int, r : Int, g : Int, b : Int) -> Int = "gpui_set_bg"
 
-extern "C" fn gpui_set_flex_ffi(handle : Int, col : Int) -> Unit = "gpui_set_flex"
+extern "C" fn gpui_set_flex_ffi(handle : Int, col : Int) -> Int = "gpui_set_flex"
 
-extern "C" fn gpui_set_center_ffi(handle : Int) -> Unit = "gpui_set_center"
+extern "C" fn gpui_set_center_ffi(handle : Int) -> Int = "gpui_set_center"
 
-extern "C" fn gpui_set_gap_ffi(handle : Int, gap : Float) -> Unit = "gpui_set_gap"
+extern "C" fn gpui_set_gap_ffi(handle : Int, gap : Float) -> Int = "gpui_set_gap"
 
-extern "C" fn gpui_set_rounded_ffi(handle : Int, radius : Float) -> Unit = "gpui_set_rounded"
+extern "C" fn gpui_set_rounded_ffi(handle : Int, radius : Float) -> Int = "gpui_set_rounded"
 
 #borrow(ptr)
 extern "C" fn gpui_create_text_ffi(ptr : Bytes, len : Int, r : Int, g : Int, b : Int, size : Float) -> Int = "gpui_create_text"
 
-extern "C" fn gpui_add_child_ffi(parent : Int, child : Int) -> Unit = "gpui_add_child"
+extern "C" fn gpui_add_child_ffi(parent : Int, child : Int) -> Int = "gpui_add_child"
 
-extern "C" fn gpui_run_window_ffi(width : Float, height : Float) -> Unit = "gpui_run_window"
+extern "C" fn gpui_run_window_ffi(width : Float, height : Float) -> Int = "gpui_run_window"
 

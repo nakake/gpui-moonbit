@@ -51,12 +51,12 @@ open dist/Counter.app                                  # GUI 起動
 ```bash
 ./build.sh
 cd moonbit-bindings
-env -u WAYLAND_DISPLAY LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug/build/cmd/main/main.exe
+LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug/build/cmd/main/main.exe
 ```
 
 **既知の問題 (WSLg)**: GPUI 0.2.2 の Wayland バックエンドは、WSLg では
-`UnsupportedVersion` で panic する。上記のように `WAYLAND_DISPLAY` を unset し、
-X11 (XWayland) バックエンドで起動すること。詳細は
+`UnsupportedVersion` で panic する。起動時にこの panic を検出すると、
+`WAYLAND_DISPLAY` を自動で unset して X11 (XWayland) で一度だけ再試行する。詳細は
 [`docs/troubleshooting.md`](docs/troubleshooting.md#3-wslg-で起動すると-wayland-の-unsupportedversion-で-abort-する)を参照。
 
 `build.sh` は次を自動で行う:
