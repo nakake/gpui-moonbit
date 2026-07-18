@@ -1,6 +1,4 @@
 use gpui::*;
-use std::ffi::CStr;
-use std::os::raw::c_char;
 use std::sync::Mutex;
 
 static NODES: Mutex<Vec<Option<UiNode>>> = Mutex::new(Vec::new());
@@ -147,14 +145,19 @@ pub extern "C" fn gpui_set_rounded(handle: i32, radius: f32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_create_text(text: *const c_char, r: u8, g: u8, b: u8, size: f32) -> i32 {
-    let content = if text.is_null() {
+pub extern "C" fn gpui_create_text(
+    ptr: *const u8,
+    len: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+    size: f32,
+) -> i32 {
+    let content = if ptr.is_null() || len <= 0 {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(text) }
-            .to_str()
-            .unwrap_or("")
-            .to_string()
+        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
+            .into_owned()
     };
     with_nodes(|nodes| {
         let id = nodes.len() as i32;

@@ -58,23 +58,18 @@ pub fn set_rounded(handle : NodeHandle, radius : Float) -> NodeHandle {
   handle
 }
 
-// MoonBit's native `String` is UTF-16 and not NUL-terminated, so it cannot be
-// passed directly where C expects `const char *` (the first embedded NUL byte of
-// an ASCII code unit would truncate it to a single character). Encode to UTF-8
-// and append a NUL terminator so the Rust side can read the whole string via
-// `CStr::from_ptr`.
-fn to_cstring_bytes(text : String) -> Bytes {
-  let utf8 = @utf8.encode(text)
-  let buf = Buffer(size_hint=utf8.length() + 1)
-  buf.write_bytes(utf8)
-  buf.write_byte(0)
-  buf.to_bytes()
+// MoonBit's native `String` is UTF-16, so encode it to UTF-8 for the byte-based
+// Rust FFI. The explicit byte length means no NUL terminator is needed.
+fn to_utf8_bytes(text : String) -> Bytes {
+  @utf8.encode(text)
 }
 
 /// Creates text with each RGB color component clamped to the 0-255 range.
 pub fn create_text(text : String, r : Int, g : Int, b : Int, size : Float) -> NodeHandle {
+  let utf8 = to_utf8_bytes(text)
   gpui_create_text_ffi(
-    to_cstring_bytes(text),
+    utf8,
+    utf8.length(),
     clamp_color_component(r),
     clamp_color_component(g),
     clamp_color_component(b),

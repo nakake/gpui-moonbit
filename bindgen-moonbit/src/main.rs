@@ -9,10 +9,12 @@ fn c_type_to_moonbit(c_type: &str) -> String {
         ("float", "Float"),
         ("double", "Double"),
         ("void", "Unit"),
-        // C strings map to `Bytes`, not `String`: MoonBit's native `String` is
-        // UTF-16 and not NUL-terminated, so passing it where C expects
-        // `const char *` truncates at the first embedded NUL. The high-level
-        // wrapper is responsible for producing NUL-terminated UTF-8 `Bytes`.
+        // C byte pointers map to `Bytes`, not `String`: MoonBit's native
+        // `String` is UTF-16, so the high-level wrapper encodes it as UTF-8.
+        ("const uint8_t *", "Bytes"),
+        ("const uint8_t*", "Bytes"),
+        ("uint8_t *", "Bytes"),
+        ("uint8_t*", "Bytes"),
         ("const char *", "Bytes"),
         ("const char*", "Bytes"),
         ("char *", "Bytes"),
@@ -57,7 +59,7 @@ fn parse_c_header(content: &str) -> Vec<Function> {
                 .split(',')
                 .map(|p| {
                     let p = p.trim();
-                    
+
                     // Handle pointer types specially
                     if p.contains('*') {
                         // Find the last * and split after it

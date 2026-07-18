@@ -19,8 +19,8 @@ extern "C" fn gpui_set_gap_ffi(handle : Int, gap : Float) -> Unit = "gpui_set_ga
 
 extern "C" fn gpui_set_rounded_ffi(handle : Int, radius : Float) -> Unit = "gpui_set_rounded"
 
-#borrow(text)
-extern "C" fn gpui_create_text_ffi(text : Bytes, r : Int, g : Int, b : Int, size : Float) -> Int = "gpui_create_text"
+#borrow(ptr)
+extern "C" fn gpui_create_text_ffi(ptr : Bytes, len : Int, r : Int, g : Int, b : Int, size : Float) -> Int = "gpui_create_text"
 
 extern "C" fn gpui_add_child_ffi(parent : Int, child : Int) -> Unit = "gpui_add_child"
 

@@ -34,7 +34,12 @@ void gpui_set_gap(int32_t handle, float gap);
 
 void gpui_set_rounded(int32_t handle, float radius);
 
-int32_t gpui_create_text(const char *text, uint8_t r, uint8_t g, uint8_t b, float size);
+int32_t gpui_create_text(const uint8_t *ptr,
+                         int32_t len,
+                         uint8_t r,
+                         uint8_t g,
+                         uint8_t b,
+                         float size);
 
 void gpui_add_child(int32_t parent, int32_t child);
 
