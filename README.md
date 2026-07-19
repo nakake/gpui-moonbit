@@ -1,129 +1,110 @@
 # GPUI + MoonBit
 
-MoonBitからGPUI（ZedのGPUアクセラレーションUIフレームワーク）を呼び出すプロジェクト。
+MoonBit native から Rust/GPUI を C FFI 越しに呼ぶ、ローカル向けの実験的プロジェクトです。安定した汎用 UI API ではありません。現在のデモは interactive Counter で、`-1` / `Reset` / `+1` / `+10` のボタン、ならびに `j` / `k` / `r` キーで値を操作します。
 
 ## プロジェクト構造
 
-```
-gpui/
-├── gpui-sys/              # Rust C FFI ラッパー
-│   ├── src/lib.rs         # GPUIのAPIをC ABIで公開
-│   ├── include/gpui_sys.h # 自動生成されたCヘッダー
-│   └── Cargo.toml         # gpui v0.2.2 依存
-│
-├── bindgen-moonbit/       # Cヘッダー → MoonBit FFI 自動生成ツール
-│   ├── src/main.rs        # パーサーとコード生成
-│   └── README.md          # ツールの使い方
-│
-├── moonbit-bindings/      # MoonBit プロジェクト
-│   ├── gpui-bindings-ffi.mbt  # 自動生成されたFFI宣言
-│   ├── gpui-bindings.mbt      # 高レベルAPI（手動）
-│   ├── moon.mod               # モジュール設定
-│   └── cmd/main/              # デモアプリケーション
-│
-└── docs/
-    ├── architecture.md        # 現行アーキテクチャ(AI向け・具体的な参照先)
-    ├── roadmap.md             # ロードマップと進捗
-    ├── troubleshooting.md     # 遭遇した不具合と原因・修正の記録
-    └── moonbit-native-notes.md # MoonBit native の低レベル仕様メモ(実測・随時追記)
+```text
+.
+├── gpui-sys/                         # Rust の staticlib と C ABI
+│   ├── abi.toml                       # ABI 定数の手編集する正本
+│   ├── src/lib.rs                     # ノード保持、描画、イベント、C export
+│   ├── include/gpui_sys.h             # cbindgen による tracked な生成ヘッダー
+│   └── mb_symbol.txt                  # build driver がローカル生成（ignored）
+├── bindgen-moonbit/                   # C ヘッダーから MoonBit FFI 宣言を生成
+├── moonbit-bindings/                  # native 専用 MoonBit モジュール
+│   ├── gpui-bindings.mbt              # 手編集する高水準 API
+│   ├── gpui-bindings-ffi.mbt          # bindgen による tracked な生成 FFI
+│   ├── abi_constants.mbt              # abi.toml からの tracked な生成定数
+│   └── app/app.mbt                    # Counter の状態・イベント・UI 構築
+├── build.sh                           # macOS / Linux 用 build driver
+├── build.ps1                          # Windows 用 build driver
+├── bundle.sh                          # macOS Counter.app の作成
+└── docs/architecture.md               # 現行実装の詳細
 ```
 
-## ビルド手順
+`moonbit-bindings/cmd/main/moon.pkg` は OS 別の `moon.pkg.macos` /
+`moon.pkg.linux` /
+`moon.pkg.windows` テンプレートから build driver が作る ignored なローカルファイルです。`_build/`、`target/`、`dist/` もローカル生成物です。`.linux-libs/` は、システムにない Linux runtime library を手動で展開する場合の ignored な fallback です。C ABI を変えた場合は、正本を更新して root の build driver を実行し、生成済みの tracked ファイルを確認してください。生成物を手編集しません。
 
-### 推奨: ワンショットビルド
+## 必要条件
+
+- Rust と MoonBit native toolchain
+- macOS: Xcode と macOS の GPUI/Metal 用フレームワーク
+- Linux: Linux native toolchain と、`moon.pkg.linux` がリンクする X11/XKB 系ライブラリ。システムの XCB/XKB runtime library が使えない場合は、ignored なローカル fallback `.linux-libs/` を `LD_LIBRARY_PATH` に追加できます
+- Windows: Rust/MoonBit と MSVC x64 C++ build tools。`build.ps1` は `cl.exe` が未設定なら Visual Studio の x64 開発シェルを探して設定します
+
+最低バージョンは固定していません。現在の `Cargo.toml` とローカルで使用する MoonBit toolchain を基準にしてください。
+
+## ビルドと実行
+
+build driver を使用してください。裸の `cargo build` は `gpui-sys/mb_symbol.txt` がないと失敗し、裸の `moon build` は Rust static library 更新後に実行ファイルを再リンクしないことがあります。
+
+### macOS
 
 ```bash
-./build.sh                       # ビルド(+ 必ず再リンク)
-cd moonbit-bindings && moon run cmd/main   # マウス操作のみ確認したい場合
-```
-
-**キーボード入力を使う場合は `.app` バンドルが必要**(非バンドルのターミナル起動バイナリには macOS がキーボードイベントを配送しない。マウスは届く):
-
-```bash
-./build.sh && ./bundle.sh
-open dist/Counter.app                                  # GUI 起動
-# または（stderr をターミナルで見たいとき）:
+./build.sh
+./bundle.sh
+open dist/Counter.app
+# stderr をターミナルで確認する場合
 ./dist/Counter.app/Contents/MacOS/Counter
 ```
 
-### Linux
+macOS ではキーボード入力のために `.app` バンドルが必要です。これは macOS 固有の要件であり、他 OS に一般化しません。
+
+### Linux / WSLg
 
 ```bash
 ./build.sh
 cd moonbit-bindings
-LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug/build/cmd/main/main.exe
+# WSLg では X11 経路を明示する起動方法
+env -u WAYLAND_DISPLAY \
+  ./_build/native/debug/build/cmd/main/main.exe
+# システムの XCB/XKB runtime library が見つからない場合だけ:
+LD_LIBRARY_PATH=$PWD/../.linux-libs env -u WAYLAND_DISPLAY \
+  ./_build/native/debug/build/cmd/main/main.exe
 ```
 
-**既知の問題 (WSLg)**: GPUI 0.2.2 の Wayland バックエンドは、WSLg では
-`UnsupportedVersion` で panic する。起動時にこの panic を検出すると、
-`WAYLAND_DISPLAY` を自動で unset して X11 (XWayland) で一度だけ再試行する。詳細は
-[`docs/troubleshooting.md`](docs/troubleshooting.md#3-wslg-で起動すると-wayland-の-unsupportedversion-で-abort-する)を参照。
+`gpui_run_window` は Wayland 側の panic を C 境界内で捕捉し、`WAYLAND_DISPLAY` を外した X11 で一度だけ再試行します。WSLg では上記の `env -u WAYLAND_DISPLAY` による明示的な起動を推奨します。
 
-`build.sh` は次を自動で行う:
-1. MoonBit をコンパイル(`app.dispatch` のマングルシンボルを生成)
-2. そのシンボルを `nm` で抽出し `gpui-sys/mb_symbol.txt` に書き出し
-3. `gpui-sys` をビルド(`build.rs` が抽出済みシンボルから Rust→MoonBit コールバックの `extern` を生成 + cbindgen でヘッダ生成)
-4. 最終リンク(`libgpui_sys.a` + フレームワーク群をリンクし、コールバックを解決)
+### Windows
 
-Rust→MoonBit コールバックは MoonBit のマングル名を参照するため、関数改名やツールチェーンのマングル変更に**自動追従**する(手書き不要)。詳細は [`docs/moonbit-native-notes.md`](docs/moonbit-native-notes.md)。
+PowerShell を MSVC x64 環境で開く（または build driver に検出させる）:
 
-### 個別ステップ(参考)
-
-- **C API を変更したとき**は FFI を再生成: `cd bindgen-moonbit && cargo run -- ../gpui-sys/include/gpui_sys.h ../moonbit-bindings/gpui-bindings-ffi.mbt`
-- **依存フレームワークが変わったとき**(gpui 更新等)はリンク列を再生成して `moonbit-bindings/cmd/main/moon.pkg` の `cc-link-flags` を更新:
-  `cd gpui-sys && cargo rustc --lib --crate-type staticlib -- --print native-static-libs`
-- 素の `cargo build`(gpui-sys 単体)は `mb_symbol.txt` が未生成だと停止する。`./build.sh` を使うこと。
-
-## アーキテクチャ
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  MoonBit コード (gpui-bindings)                              │
-│  - create_div(), set_bg(), add_child() などのAPI             │
-│  - extern "C" でRustの関数を呼び出す                          │
-└────────────────────┬────────────────────────────────────────┘
-                     │ MoonBit C FFI
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Rust ライブラリ (gpui-sys)                                  │
-│  - #[no_mangle] pub extern "C" fn gpui_create_div() {...}   │
-│  - GPUIのAPIを呼び出すラッパー                                │
-└────────────────────┬────────────────────────────────────────┘
-                     │ Rust FFI
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│  GPUI (ZedのUIフレームワーク)                                │
-│  - Metal/Vulkan でGPUレンダリング                            │
-│  - ウィンドウ管理、イベント処理                               │
-└─────────────────────────────────────────────────────────────┘
+```powershell
+.\build.ps1
+.\moonbit-bindings\_build\native\debug\build\cmd\main\main.exe
 ```
 
-## 型マッピング
+## build driver が行うこと
 
-| C型 | MoonBit型 |
-|-----|-----------|
-| `int32_t` | `Int` |
-| `uint8_t` | `Int` |
-| `float` | `Float` |
-| `double` | `Double` |
-| `void` | `Unit` |
-| `const char *` | `String` |
+`build.sh` と `build.ps1` は OS ごとの link template を選んだうえで、次を実行します。
 
-## デモ
+1. `gpui-sys/abi.toml` から ABI 定数を、C ヘッダーから MoonBit FFI 宣言を生成する。
+2. `moon check` を必須ゲートとして実行し、MoonBit を一度 build する。この段階では callback/static library 未解決による想定内の cold-link failure だけを許容する。
+3. `app.dispatch` の実マングルシンボルを抽出し、生成 C がある環境では callback が 4 個の `int32_t` 引数であることも検証する。
+4. `mb_symbol.txt` を読む `gpui-sys` を Rust で build し、MoonBit を強制再リンクする。
+5. callback の最終リンクを検証する。macOS/Linux は最終バイナリ上で定義を検査し、Windows は COFF の事情から MoonBit object の定義、Rust archive の未解決参照、最終リンク成功を検査する。
 
-600x500のウィンドウに以下を表示:
-- タイトル: "GPUI + MoonBit" (32px)
-- サブタイトル: "Native GPU-accelerated UI from MoonBit"
-- 5色のカラーボックス (Red, Green, Blue, Yellow, Purple)
-- フッター: "Powered by GPUI v0.2.2 | Rendered with Metal"
+callback のパッケージ/関数は `app.dispatch`、4 個の `i32` 引数という固定契約です。現在の実マングル表記は抽出により追従しますが、`app` package または `dispatch` を改名する場合は、両 build driver の `PKG_FN_SUFFIX` / `$PkgFnSuffix` と ABI 方針も更新する必要があります。
 
-全てMetal GPUレンダリングで動作。
+## FFI と実行モデル
 
-## 必要条件
+MoonBit は Rust 側に retained node tree を組み立て、GPUI が描画します。クリックまたはキーイベントは Rust から MoonBit の `app.dispatch(kind, id, a, b)` に戻り、Counter の状態を変更して tree 全体を再構築します。
 
-- Rust 1.97.0+
-- MoonBit toolchain
-- Xcode (macOSの場合、Metalレンダリングに必要)
+テキスト ABI は `const uint8_t *ptr, int32_t len` です。FFI 宣言の `Bytes` は `#borrow(ptr)` で渡され、高水準の `create_text(String, ...)` が `@utf8.encode` で UTF-8 に変換して明示長とともに渡します。NUL 終端は不要です。
+
+C export の成功 status は `GPUI_STATUS_OK` (0) です。負値は無効 handle、ノード種別違い、移動済みノード、または C 境界内で捕捉した panic を表します。一方、現在の高水準 MoonBit API は setter、`reset`、`run_window` の status を `ignore` しており、呼び出し元へエラーを公開していません。詳細は [`docs/architecture.md`](docs/architecture.md) を参照してください。
+
+## テストと検証
+
+```bash
+cd moonbit-bindings
+moon check
+moon test
+```
+
+`moon test` は高水準 MoonBit bindings の限定的な単体テストです。クロス言語 ABI、callback、最終リンクの統合検証は root の build driver が担います。root のアクティブな CI はありません。2026-07-19 時点では Windows と WSL/Linux の build を手動確認済みで、macOS は今回再確認していません。
 
 ## ライセンス
 
