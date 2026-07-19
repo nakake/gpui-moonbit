@@ -8,6 +8,7 @@ use abi_constants::{
     ABI_VERSION, EVENT_CLICK, EVENT_KEY, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT,
 };
 
+// Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
 const _: () = assert!(ABI_VERSION > 0);
 
 static NODES: Mutex<Vec<Option<UiNode>>> = Mutex::new(Vec::new());

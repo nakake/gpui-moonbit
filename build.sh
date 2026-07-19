@@ -42,19 +42,36 @@ PKG_FN_SUFFIX="3app8dispatch"   # …/app :: dispatch  (see notes for the scheme
 echo "==> [0/5] Regenerate ABI constants and C FFI bindings"
 awk '
   BEGIN { print "// Auto-generated from gpui-sys/abi.toml. Do not edit manually." }
-  /^\[/ { section=$0; next }
-  /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[0-9]+$/ && section != "[callback]" {
-    name=$1
+  # Grammar: [section] headers or key = non-negative-integer, with whitespace/comments.
+  {
+    original=$0
+    sub(/[[:space:]]*#.*/, "")
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+    if ($0 == "") next
+    if ($0 ~ /^\[[A-Za-z_][A-Za-z0-9_]*\]$/) { section=$0; next }
+    if (section == "[callback]") next
+    if ($0 !~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[0-9]+$/) {
+      print "ERROR: invalid ABI constant at " FNR ": " original > "/dev/stderr"
+      failed=1
+      next
+    }
+    split($0, assignment, "=")
+    name=assignment[1]
+    value=assignment[2]
+    gsub(/[[:space:]]/, "", name)
+    gsub(/[[:space:]]/, "", value)
     if (name == "abi_version") name="ABI_VERSION"
     print "\n///|"
-    print "pub const " name " : Int = " $3
+    print "pub const " name " : Int = " value
   }
+  END { if (failed) exit 1 }
 ' "$GSYS/abi.toml" > "$MB/abi_constants.mbt"
 ( cd "$MB" && moon fmt abi_constants.mbt )
 ( cd "$ROOT/bindgen-moonbit" && cargo run -- "$GSYS/include/gpui_sys.h" "$MB/gpui-bindings-ffi.mbt" )
 ( cd "$MB" && moon fmt gpui-bindings-ffi.mbt )
-if ! git -C "$ROOT" diff --quiet -- moonbit-bindings/gpui-bindings-ffi.mbt; then
-  echo "WARNING: gpui-bindings-ffi.mbt changed after bindgen. Commit the update if intentional."
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && \
+   ! git -C "$ROOT" diff --quiet -- moonbit-bindings/gpui-bindings-ffi.mbt moonbit-bindings/abi_constants.mbt; then
+  echo "WARNING: generated MoonBit bindings changed. Commit the update if intentional."
 fi
 
 echo "==> [1a/5] MoonBit typecheck"
@@ -87,6 +104,24 @@ SYM_COUNT="$(printf '%s\n' "$SYM" | sed '/^$/d' | wc -l)"
 if [ "$SYM_COUNT" -ne 1 ]; then
   echo "ERROR: expected exactly 1 app.dispatch symbol (…${PKG_FN_SUFFIX}), found $SYM_COUNT." >&2
   exit 1
+fi
+# The mangled name does not encode types. Validate the actual generated C
+# declaration when it is available (Linux/Windows generate main.c; macOS may not).
+MAIN_C="$(find "$MB/_build/native" -path '*/build/cmd/main/*' -name 'main.c' -print -quit)"
+if [ -n "$MAIN_C" ]; then
+  PROTOTYPES="$(tr '\r\n\t' '   ' < "$MAIN_C" \
+    | grep -oE "int32_t[[:space:]]+${SYM}[[:space:]]*\([^)]*\)" \
+    | sed -E 's/^[^(]*\((.*)\)$/\1/; s/[[:space:]]+//g' \
+    | sed -E 's/int32_t[A-Za-z_][A-Za-z0-9_]*/int32_t/g' \
+    | sort -u || true)"
+  PROTOTYPE_COUNT="$(printf '%s\n' "$PROTOTYPES" | sed '/^$/d' | wc -l)"
+  if [ "$PROTOTYPE_COUNT" -ne 1 ] || [ "$PROTOTYPES" != "int32_t,int32_t,int32_t,int32_t" ]; then
+    echo "ERROR: generated MoonBit callback must be int32_t ${SYM}(int32_t, int32_t, int32_t, int32_t); found: ${PROTOTYPES:-none}" >&2
+    exit 1
+  fi
+  echo "    signature : int32_t(int32_t, int32_t, int32_t, int32_t)"
+else
+  echo "    signature : skipped (generated main.c is unavailable on this platform)"
 fi
 # `#[link_name]` on Mach-O gets one leading underscore added by the linker, so we
 # store the symbol with one underscore stripped. ELF nm output and names taken
