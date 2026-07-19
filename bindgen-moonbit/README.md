@@ -37,29 +37,35 @@ bindgen-moonbit gpui_sys.h gpui-bindings.mbt
 | `float` | `Float` |
 | `double` | `Double` |
 | `void` | `Unit` |
-| `const char *` | `String` |
-| `char *` | `String` |
+| `const char *`, `char *` | `Bytes` |
+| `const uint8_t *`, `uint8_t *` | `Bytes` |
+
+`char *` 系と `uint8_t *` 系の引数は borrowed `Bytes` として生成され、生成される宣言には `#borrow` が付きます。
 
 ## 入力例
 
 ```c
 int32_t gpui_create_div(void);
-void gpui_set_size(int32_t handle, float w, float h);
-int32_t gpui_create_text(const char *text, uint8_t r, uint8_t g, uint8_t b, float size);
+int32_t gpui_set_size(int32_t handle, float w, float h);
+int32_t gpui_create_text(const uint8_t *ptr, int32_t len,
+                         uint8_t r, uint8_t g, uint8_t b, float size);
 ```
 
 ## 出力例
 
 ```moonbit
-extern "C" fn gpui_create_div_ffi -> Int = "gpui_create_div"
-extern "C" fn gpui_set_size_ffi(handle : Int, w : Float, h : Float) -> Unit = "gpui_set_size"
-extern "C" fn gpui_create_text_ffi(text : String, r : Int, g : Int, b : Int, size : Float) -> Int = "gpui_create_text"
+extern "C" fn gpui_create_div_ffi() -> Int = "gpui_create_div"
+extern "C" fn gpui_set_size_ffi(handle : Int, w : Float, h : Float) -> Int = "gpui_set_size"
+#borrow(ptr)
+extern "C" fn gpui_create_text_ffi(ptr : Bytes, len : Int, r : Int, g : Int, b : Int, size : Float) -> Int = "gpui_create_text"
 ```
+
+このツールが生成するのは低水準の FFI 宣言だけです。`String` の UTF-8 `Bytes` への変換は `moonbit-bindings/gpui-bindings.mbt` の高水準ラッパーが担い、このツールはエンコードを行いません。
 
 ## 制限事項
 
-- 関数宣言のみ対応（構造体、列挙型、マクロは未対応）
-- ポインタ型は `char *` のみ対応（他のポインタ型は `/* type */` として出力）
+- 関数宣言のみ対応（構造体、列挙体、マクロは未対応）
+- `char *` 系と `uint8_t *` 系以外のポインタ型は未対応で、`/* type */` として出力
 - 関数ポインタ（コールバック）は未対応
 
 ## 今後の拡張予定
