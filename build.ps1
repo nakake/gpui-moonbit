@@ -101,15 +101,17 @@ Write-MoonPkg ''
 Push-Location $MB
 $coldOutput = cmd /c "moon build 2>&1"
 $ec = $LASTEXITCODE
-$coldOutput | Out-Host
 Pop-Location
-if ($ec -ne 0) {
+if ($ec -eq 0) {
+  $coldOutput | Out-Host
+} else {
   $coldText = $coldOutput -join "`n"
   # MSVC reports a missing input lib as LNK1181 and an unresolved external as
   # LNK2019/1120 (locale-independent codes; messages are localized).
   if ($coldText -match '(?i)undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|3app8dispatch|LNK1104|LNK1181|LNK2019|LNK1120') {
-    Write-Host '    (expected cold-link failure; continuing)'
+    Write-Host '    Expected cold-link failure: gpui_sys.lib or callback is not available yet; continuing.'
   } else {
+    $coldOutput | Out-Host
     throw 'MoonBit build failed for a non-link reason'
   }
 }
@@ -180,10 +182,14 @@ Write-Host '==> [4/5] Final MoonBit build (real moon.pkg + forced relink)'
 Write-MoonPkg $nativeLibs
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $MB '_build\native\debug\build\cmd\main\main.exe')
 Push-Location $MB
-cmd /c "moon build 2>&1" | Out-Host
+$finalOutput = cmd /c "moon build 2>&1"
 $ec = $LASTEXITCODE
 Pop-Location
-if ($ec -ne 0) { throw 'final moon build failed' }
+if ($ec -ne 0) {
+  $finalOutput | Out-Host
+  throw 'final moon build failed'
+}
+Write-Host '    Final MoonBit build succeeded.'
 
 Write-Host '==> [5/5] Verify the callback definition/reference contract'
 $exe = Join-Path $MB '_build\native\debug\build\cmd\main\main.exe'
