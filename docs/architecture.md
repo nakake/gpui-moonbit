@@ -119,8 +119,10 @@ GPUI re-invokes `render` which reads the fresh `NODES`.
 2. Extract exactly one real `app.dispatch` mangled symbol → `gpui-sys/mb_symbol.txt`. When generated `main.c`
    is available, also assert MoonBit emitted exactly four `int32_t` callback parameters (types are not mangled).
 3. `cargo build` gpui-sys — `build.rs` reads `mb_symbol.txt`, generates the `mb_dispatch` `extern`, runs cbindgen.
-4. Remove `main.exe` + linked-core `.o`, then `moon build` for a **forced relink**, and verify the final binary
-   contains exactly one callback definition (moon does not track changes to the external `.a`).
+4. Remove `main.exe` + linked-core `.o`, then `moon build` for a **forced relink** (moon does not track changes
+   to the external archive). Unix verifies one callback definition in the final binary. Windows, whose linked PE
+   normally omits the COFF symbol table, verifies one definition in `main.obj`, one unresolved reference in
+   `gpui_sys.lib`, and a successful final link.
 
 `bundle.sh` — wrap the binary in `dist/Counter.app` (minimal `Info.plist`). **Keyboard input requires this**;
 a bare terminal binary gets mouse but not keyboard. Run: `open dist/Counter.app` or the inner binary directly.

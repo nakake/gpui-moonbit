@@ -7,8 +7,8 @@ options(
   "is-main": true,
   link: {
     "native": {
-      "cc-flags": "/MD -I../gpui-sys/include",
-      "cc-link-flags": "/link /LIBPATH:../gpui-sys/target/debug gpui_sys.lib @NATIVE_LIBS@",
+      "cc-flags": "/utf-8 -I../gpui-sys/include",
+      "cc-link-flags": "gpui_sys.lib @NATIVE_LIBS@",
     },
   },
 )
