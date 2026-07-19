@@ -3,6 +3,14 @@ use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
+mod abi_constants;
+use abi_constants::{
+    ABI_VERSION, EVENT_CLICK, EVENT_KEY, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT,
+};
+
+// Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
+const _: () = assert!(ABI_VERSION > 0);
+
 static NODES: Mutex<Vec<Option<UiNode>>> = Mutex::new(Vec::new());
 
 /// Operation completed successfully.
@@ -28,12 +36,6 @@ pub const GPUI_STATUS_INTERNAL_PANIC: i32 = -4;
 //
 // Generates: `unsafe extern "C" { #[link_name = "_M0FP…3app8dispatch"] fn mb_dispatch(kind: i32, id: i32, a: i32, b: i32); }`
 include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
-
-// Event kinds passed to MoonBit's `dispatch` — must match the EV_* constants in
-// moonbit-bindings/app/app.mbt. The FFI carries a scalar payload (kind, id, a, b)
-// so new event types don't grow the FFI surface — only the MoonBit `Event` enum.
-const EVENT_CLICK: i32 = 1;
-const EVENT_KEY: i32 = 2;
 
 #[derive(Clone)]
 enum UiNode {
@@ -410,11 +412,11 @@ fn key_code(ev: &KeyDownEvent) -> i32 {
 /// Pack modifier flags into the `b` payload slot (bit0 ctrl, 1 alt, 2 shift,
 /// 3 platform/cmd, 4 fn). Unused by the demo but kept for completeness.
 fn mods_bits(m: &Modifiers) -> i32 {
-    (m.control as i32)
-        | ((m.alt as i32) << 1)
-        | ((m.shift as i32) << 2)
-        | ((m.platform as i32) << 3)
-        | ((m.function as i32) << 4)
+    (m.control as i32) * MOD_CTRL
+        | (m.alt as i32) * MOD_ALT
+        | (m.shift as i32) * MOD_SHIFT
+        | (m.platform as i32) * MOD_PLATFORM
+        | (m.function as i32) * MOD_FUNCTION
 }
 
 fn render_node(

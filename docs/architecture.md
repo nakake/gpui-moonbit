@@ -100,8 +100,8 @@ GPUI re-invokes `render` which reads the fresh `NODES`.
 
 ## 6. Event model
 
-- **Kinds** (must match on both sides): `EVENT_CLICK=1`, `EVENT_KEY=2` in `gpui-sys/src/lib.rs`
-  ↔ `EV_CLICK=1`, `EV_KEY=2` in `app/app.mbt`.
+- **Kinds**: `EVENT_CLICK=1`, `EVENT_KEY=2` come from `gpui-sys/abi.toml`; the build generates
+  constants for both Rust and MoonBit, so the two sides share one source of truth.
 - **Click**: `set_on_click(div, click_id)` stores `click_id` on the Div node. `render_node` attaches
   `.on_click(|_,_,_,cx| { mb_dispatch(EVENT_CLICK, click_id, 0, 0); cx.notify() })`.
   `app.on_click(click_id)` routes: `BTN_DECREMENT=1`/`BTN_RESET=2`/`BTN_INCREMENT=3`/`BTN_INCREMENT_10=4`.
@@ -113,12 +113,16 @@ GPUI re-invokes `render` which reads the fresh `NODES`.
 ## 7. Build & run pipeline
 
 `build.sh` (root) — the correct way to build:
-1. `moon build` — compile MoonBit so `app.dispatch`'s mangled symbol exists. **This step's failure is ignored
-   entirely** (`|| true`) because the final cc link fails on a cold build (no `libgpui_sys.a` yet); note this
-   also masks genuine MoonBit compile errors here — they resurface loudly at step 4 (not `|| true`).
-2. `nm` extract the real `app.dispatch` mangled symbol → strip one leading `_` → `gpui-sys/mb_symbol.txt`.
+0. Regenerate Rust/MoonBit ABI constants from `gpui-sys/abi.toml` and regenerate the C FFI bindings.
+1. `moon check` is a fatal compile/typecheck gate; then `moon build` produces `app.dispatch`'s symbol. Only an
+   expected cold native-link failure (missing callback or `gpui_sys`) is tolerated; all other failures stop.
+2. Extract exactly one real `app.dispatch` mangled symbol → `gpui-sys/mb_symbol.txt`. When generated `main.c`
+   is available, also assert MoonBit emitted exactly four `int32_t` callback parameters (types are not mangled).
 3. `cargo build` gpui-sys — `build.rs` reads `mb_symbol.txt`, generates the `mb_dispatch` `extern`, runs cbindgen.
-4. Remove `main.exe` + linked-core `.o`, then `moon build` — **forced relink** (moon doesn't track the external `.a`).
+4. Remove `main.exe` + linked-core `.o`, then `moon build` for a **forced relink** (moon does not track changes
+   to the external archive). Unix verifies one callback definition in the final binary. Windows, whose linked PE
+   normally omits the COFF symbol table, verifies one definition in `main.obj`, one unresolved reference in
+   `gpui_sys.lib`, and a successful final link.
 
 `bundle.sh` — wrap the binary in `dist/Counter.app` (minimal `Info.plist`). **Keyboard input requires this**;
 a bare terminal binary gets mouse but not keyboard. Run: `open dist/Counter.app` or the inner binary directly.
@@ -133,16 +137,15 @@ Framework list: `cmd/main/moon.pkg` `cc-link-flags` carries gpui's transitive na
   toolchain mangling change that keeps the same package/function is picked up automatically. **But** the
   extraction grep hard-codes the package+function suffix (`PKG_FN_SUFFIX="3app8dispatch"` in `build.sh`), so
   **renaming `dispatch` or the `app` package requires updating `PKG_FN_SUFFIX`** (otherwise `build.sh` fails
-  loudly at extraction — a good failure, but not automatic). And changing `dispatch`'s arg count/types is NOT
-  caught by the linker (types aren't mangled): update the template in `gpui-sys/build.rs` and the call sites in
-  `lib.rs`. notes §3.
+  loudly at extraction — a good failure, but not automatic). Types aren't mangled, so the build separately checks
+  the generated C prototype against the four-`int32_t` Rust template. notes §3.
 - **Relink**: after any gpui-sys change, use `build.sh` (or `moon clean && moon build`); a bare `moon build`
   keeps a stale exe. notes §7.
 - **DCE**: `app.dispatch` is only called from Rust, so `cmd/main/main.mbt` binds it (`let _keep = ...dispatch`)
   to keep MoonBit from stripping it. notes §5.
 - **Keyboard**: (a) run as a `.app` bundle; (b) focus the view **at construction** (in the `open_window`
   closure), not in `render`.
-- **Event kind constants** must stay equal across `lib.rs` (`EVENT_*`) and `app.mbt` (`EV_*`).
+- **ABI constants**: edit `gpui-sys/abi.toml` only; never hand-edit generated `abi_constants.rs`/`.mbt`.
 - **Rebuild strategy**: every `dispatch` does full `gpui_reset()` + rebuild (no diffing). Don't hold the
   `NODES` lock across `mb_dispatch`.
 - **`gpui-sys` crate-type is `["staticlib"]`** (not cdylib): the `.a` references `mb_dispatch` as an undefined
@@ -155,8 +158,8 @@ Framework list: `cmd/main/moon.pkg` `cc-link-flags` carries gpui's transitive na
   `gpui-bindings.mbt`. (Adds a C symbol — that's fine; only the *callback* direction is the fragile one.)
 - **New button/action**: MoonBit only — add a `BTN_*` const, a branch in `on_click`, a `make_button(...)`
   in `build_tree`. No Rust change.
-- **New event kind** (e.g. hover, mouse move): add `EVENT_X` (lib.rs) = `EV_X` (app.mbt), wire the GPUI
-  handler in `render_node`/`FfiView` to call `mb_dispatch(EVENT_X, ...)`, add an `Event` variant + `decode`
+- **New event kind** (e.g. hover, mouse move): add `EVENT_X` under `[events]` in `gpui-sys/abi.toml`, wire the
+  GPUI handler in `render_node`/`FfiView` to call `mb_dispatch(EVENT_X, ...)`, add an `Event` variant + `decode`
   branch + handler in `app.mbt`. **No new FFI symbol** (payload is reused).
 
 ## 10. File → concern map

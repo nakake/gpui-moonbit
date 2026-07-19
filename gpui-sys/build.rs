@@ -1,6 +1,86 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
+
+fn parse_abi(abi: &str) -> (Vec<(&str, i32)>, HashMap<&str, &str>) {
+    // Grammar: [section] headers or key = non-negative-integer, with whitespace/comments.
+    let mut section = "";
+    let mut constants = Vec::new();
+    let mut callback = HashMap::new();
+    for (index, raw_line) in abi.lines().enumerate() {
+        let line = raw_line.split('#').next().unwrap().trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = &line[1..line.len() - 1];
+            if name.is_empty()
+                || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                panic!("invalid ABI section at line {}: {raw_line}", index + 1);
+            }
+            section = name;
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .unwrap_or_else(|| panic!("invalid ABI assignment at line {}: {raw_line}", index + 1));
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty()
+            || !key.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            panic!("invalid ABI key at line {}: {raw_line}", index + 1);
+        }
+        if section == "callback" {
+            callback.insert(key, value);
+            continue;
+        }
+        if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit()) {
+            panic!(
+                "ABI constant at line {} must be a non-negative integer: {raw_line}",
+                index + 1
+            );
+        }
+        let value = value
+            .parse::<i32>()
+            .unwrap_or_else(|_| panic!("ABI constant at line {} exceeds i32", index + 1));
+        constants.push((key, value));
+    }
+    (constants, callback)
+}
 
 fn main() {
+    // --- Shared Rust/MoonBit ABI ---
+    println!("cargo:rerun-if-changed=abi.toml");
+    let abi = std::fs::read_to_string("abi.toml").expect("read abi.toml");
+    let (constants, callback) = parse_abi(&abi);
+    let mut rust_constants =
+        String::from("// Auto-generated from abi.toml by build.rs. Do not edit manually.\n\n");
+    for (key, value) in constants {
+        let rust_name = key.to_ascii_uppercase();
+        rust_constants.push_str(&format!("pub(crate) const {rust_name}: i32 = {};\n", value));
+    }
+    std::fs::write("src/abi_constants.rs", rust_constants).expect("write src/abi_constants.rs");
+
+    let callback_name = callback
+        .get("name")
+        .unwrap_or_else(|| panic!("missing callback `name` in abi.toml"))
+        .trim_matches('"');
+    if callback_name != "dispatch" {
+        panic!("abi.toml callback name must be `dispatch`");
+    }
+    let params = callback
+        .get("params")
+        .unwrap_or_else(|| panic!("missing callback `params` in abi.toml"))
+        .trim_matches(['[', ']'])
+        .split(',')
+        .map(|param| param.trim().trim_matches('"'))
+        .collect::<Vec<_>>();
+    if params != ["i32", "i32", "i32", "i32"] {
+        panic!("abi.toml callback must be dispatch(i32, i32, i32, i32)");
+    }
+
     // --- Rust -> MoonBit callback symbol ---
     // `mb_symbol.txt` holds the MoonBit `app.dispatch` mangled symbol (with the
     // Mach-O leading underscore already stripped for `#[link_name]`). It is
@@ -19,9 +99,8 @@ fn main() {
              `cargo build`."
         );
     }
-    // Scalar event payload: (kind, id, a, b). Keep in sync with MoonBit's
-    // `app.dispatch` — its arg types are NOT part of the mangled symbol, so a
-    // signature change is only caught here / at call sites, not by the linker.
+    // This declaration is generated only after validating callback arity and
+    // fixed-width types from abi.toml above.
     let extern_code = format!(
         "unsafe extern \"C\" {{\n    #[link_name = \"{link_name}\"]\n    fn mb_dispatch(kind: i32, id: i32, a: i32, b: i32);\n}}\n"
     );
