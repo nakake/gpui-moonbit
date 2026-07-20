@@ -23,17 +23,133 @@ trap 'rm -f "$BUILD_OUTPUT"' EXIT
 # `#[link_name]` must be written with a single `_` (the linker adds the other).
 # ELF has no ABI underscore: nm shows `_M0FP…` and link_name takes it verbatim.
 # moon.pkg cannot branch per-OS, so cmd/main keeps per-OS templates
-# (moon.pkg.macos / moon.pkg.linux) and we copy the right one into place.
+# (moon.pkg.macos / moon.pkg.linux) and generates the active package from one.
 case "$(uname -s)" in
-  Darwin) SYM_RE='^__M0FP'; OS_PKG=macos ;;
-  Linux)  SYM_RE='^_M0FP';  OS_PKG=linux ;;
+  Darwin)
+    if [ "$(uname -m)" != "arm64" ] && [ "$(uname -m)" != "x86_64" ]; then
+      echo "ERROR: unsupported macOS architecture: $(uname -m) (supported: arm64, x86_64)" >&2
+      exit 1
+    fi
+    SYM_RE='^__M0FP'
+    OS_PKG=macos
+    ;;
+  Linux)
+    if [ "$(uname -m)" != "x86_64" ]; then
+      echo "ERROR: unsupported Linux architecture: $(uname -m) (supported: x86_64)" >&2
+      exit 1
+    fi
+    SYM_RE='^_M0FP'
+    OS_PKG=linux
+    ;;
   *) echo "ERROR: unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
 PKG_TMPL="$MB/cmd/main/moon.pkg.$OS_PKG"
-if ! cmp -s "$PKG_TMPL" "$MB/cmd/main/moon.pkg"; then
-  cp "$PKG_TMPL" "$MB/cmd/main/moon.pkg"
-  echo "==> Selected $PKG_TMPL -> cmd/main/moon.pkg"
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "ERROR: required command not found: $1" >&2
+    exit 1
+  fi
+}
+
+normalize_native_libs() {
+  local native_libs="$1"
+  local lib
+  local normalized=""
+
+  if [ "$OS_PKG" = linux ]; then
+    for lib in $native_libs; do
+      case "$lib" in
+        -lxcb)          lib=-l:libxcb.so.1 ;;
+        -lxcb-xkb)      lib=-l:libxcb-xkb.so.1 ;;
+        -lxkbcommon)    lib=-l:libxkbcommon.so.0 ;;
+        -lxkbcommon-x11) lib=-l:libxkbcommon-x11.so.0 ;;
+      esac
+      if [ "$lib" = -l:libxcb-xkb.so.1 ] && [[ " $normalized " == *" $lib "* ]]; then
+        continue
+      fi
+      normalized="${normalized:+$normalized }$lib"
+    done
+    case " $normalized " in
+      *' -l:libxcb-xkb.so.1 '*) ;;
+      *) normalized="$normalized -l:libxcb-xkb.so.1" ;;
+    esac
+    printf '%s\n' "$normalized"
+  else
+    printf '%s\n' "$native_libs"
+  fi
+}
+
+write_moon_pkg() {
+  local native_libs="$1"
+  local destination="$MB/cmd/main/moon.pkg"
+  local output
+  output="$(while IFS= read -r line || [ -n "$line" ]; do
+    line="${line//@RUST_LIB_DIR@/$RUST_LIB_DIR}"
+    printf '%s\n' "${line//@NATIVE_LIBS@/$native_libs}"
+  done < "$PKG_TMPL")"
+  if [ ! -f "$destination" ] || ! cmp -s "$PKG_TMPL" "$destination" || grep -q '@NATIVE_LIBS@' "$destination" ||
+     [ "$(cat "$destination")" != "$output" ]; then
+    printf '%s\n' "$output" > "$destination"
+    echo "==> wrote cmd/main/moon.pkg ($OS_PKG)"
+  fi
+}
+
+# Do this before writing generated files so unsupported hosts fail without
+# modifying the checkout.
+echo "==> Preflight ($OS_PKG $(uname -m))"
+require_command moon
+require_command cargo
+require_command rustc
+require_command nm
+case "$OS_PKG" in
+  macos)
+    require_command xcrun
+    if ! xcrun --sdk macosx --show-sdk-path >/dev/null 2>&1; then
+      echo "ERROR: macOS SDK not found; install Xcode or the Command Line Tools." >&2
+      exit 1
+    fi
+    if ! xcrun --sdk macosx --find clang >/dev/null 2>&1; then
+      echo "ERROR: macOS clang not found; install Xcode or the Command Line Tools." >&2
+      exit 1
+    fi
+    if ! xcrun --sdk macosx --find ld >/dev/null 2>&1; then
+      echo "ERROR: macOS linker not found; install Xcode or the Command Line Tools." >&2
+      exit 1
+    fi
+    ;;
+  linux)
+    require_command cc
+    require_command c++
+    LINK_PROBE="$(mktemp)"
+    if ! printf 'int main(void) { return 0; }\n' \
+        | cc -x c - -o "$LINK_PROBE" -L"$ROOT/.linux-libs" -Wl,--no-as-needed \
+            -l:libxcb.so.1 -l:libxcb-xkb.so.1 -l:libxkbcommon.so.0 \
+            -l:libxkbcommon-x11.so.0 2>"$BUILD_OUTPUT"; then
+      cat "$BUILD_OUTPUT" >&2
+      rm -f "$LINK_PROBE"
+      echo "ERROR: the Linux linker could not resolve the required XCB/XKB libraries; install them or add them to .linux-libs/." >&2
+      exit 1
+    fi
+    rm -f "$LINK_PROBE"
+    ;;
+esac
+moon --version
+cargo --version
+rustc --version
+if command -v rustup >/dev/null 2>&1; then
+  rustup show active-toolchain
 fi
+RUST_TARGET="$(rustc -vV | awk '/^host:/ { print $2 }')"
+CARGO_TARGET_ROOT="$(cd "$GSYS" && cargo metadata --no-deps --format-version 1 \
+  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+if [ -z "$RUST_TARGET" ] || [ -z "$CARGO_TARGET_ROOT" ]; then
+  echo "ERROR: could not determine the native Rust target or Cargo target directory." >&2
+  exit 1
+fi
+RUST_LIB_DIR="$CARGO_TARGET_ROOT/$RUST_TARGET/debug"
+echo "    Rust target: $RUST_TARGET"
+echo "    Rust library dir: $RUST_LIB_DIR"
 
 # The MoonBit function whose mangled symbol Rust needs. Its package path suffix
 # + name determine the symbol; keep in sync if you rename the callback.
@@ -77,10 +193,11 @@ fi
 echo "==> [1a/5] MoonBit typecheck"
 ( cd "$MB" && moon check ) || { echo "ERROR: MoonBit compilation failed" >&2; exit 1; }
 
-echo "==> [1b/5] MoonBit build (only a missing native callback/library is tolerated)"
+echo "==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)"
+write_moon_pkg ""
 if ! ( cd "$MB" && moon build ) 2>&1 | tee "$BUILD_OUTPUT"; then
   if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|${PKG_FN_SUFFIX}" "$BUILD_OUTPUT"; then
-    echo "    (expected cold-link failure — continuing)"
+    echo "    (expected bootstrap native-link failure — final link remains strict)"
   else
     echo "ERROR: MoonBit build failed for a non-link reason." >&2
     exit 1
@@ -135,11 +252,28 @@ echo "    nm symbol : ${SYM}"
 echo "    link_name : ${LINK_NAME}  -> ${GSYS}/mb_symbol.txt"
 
 echo "==> [3/5] Build gpui-sys (build.rs reads mb_symbol.txt and generates the extern)"
-( cd "$GSYS" && cargo build )
-rm -f "${GSYS}/target/debug/libgpui_sys.dylib" \
-      "${GSYS}/target/debug/libgpui_sys.so" 2>/dev/null || true  # staticlib only; drop any stale dylib/so
+( cd "$GSYS" && cargo build --target "$RUST_TARGET" )
+NATIVE_LIBS="$(cd "$GSYS" && cargo rustc --target "$RUST_TARGET" --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
+  | awk '/native-static-libs:/ && !found {
+      line=$0
+      sub(/^.*native-static-libs:[[:space:]]*/, "", line)
+      gsub(/[[:space:]]+/, " ", line)
+      sub(/^ /, "", line)
+      sub(/ $/, "", line)
+      found=1
+    }
+    END { if (found) print line }')"
+if [ -z "$NATIVE_LIBS" ]; then
+  echo "ERROR: cargo rustc did not report native-static-libs." >&2
+  exit 1
+fi
+NATIVE_LIBS="$(normalize_native_libs "$NATIVE_LIBS")"
+echo "    native libs: $NATIVE_LIBS"
+rm -f "$RUST_LIB_DIR/libgpui_sys.dylib" \
+      "$RUST_LIB_DIR/libgpui_sys.so" 2>/dev/null || true  # staticlib only; drop any stale dylib/so
 
 echo "==> [4/5] Final MoonBit build (links libgpui_sys.a + resolves the callback)"
+write_moon_pkg "$NATIVE_LIBS"
 # moon does not track the external libgpui_sys.a, so a gpui-sys-only change would
 # NOT trigger a relink of the executable (it would silently keep a stale exe).
 # Remove the linked outputs so moon re-links against the freshly built .a.

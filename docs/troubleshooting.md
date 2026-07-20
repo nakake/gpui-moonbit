@@ -197,6 +197,20 @@ env -u WAYLAND_DISPLAY LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug
 
 ---
 
+## 4. build driver が preflight で終了する
+
+root の `build.sh` / `build.ps1` は、生成済み ABI や `moon.pkg` を書き換える前に native host/target と必要ツールを検査する。対応範囲は macOS arm64・x86_64、Linux x86_64、Windows MSVC x64 で、cross compile は対象外。
+
+まず driver が表示する `moon` / `cargo` / `rustc` のバージョンと、最初の `ERROR` を確認する。最低バージョンは固定していないため、version 表示自体は診断情報であり、コマンド不在・architecture 不一致・compiler/linker 不在が停止条件になる。
+
+- macOS: Xcode Command Line Tools / Xcode と SDK が必要。`xcrun --show-sdk-path` と `xcrun --find clang` を確認する。
+- Linux: `cc` / `c++` / `nm` と XCB/XKB runtime library が必要。システムで見つからない場合だけ、README の `.linux-libs/` fallback を使う。
+- Windows: MSVC x64 の `cl.exe` / `link.exe` / `dumpbin.exe` が必要。通常は `build.ps1` が `vswhere` から x64 developer shell を初期化する。
+
+preflight を迂回して生成ファイルを手編集しない。環境を修正して root driver を再実行する。
+
+---
+
 ## 計測メモ(再現手順)
 
 macOS の Metal ウィンドウは `screencapture -l<windowID>` で撮れないことがある(`could not

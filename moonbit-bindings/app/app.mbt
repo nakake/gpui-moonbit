@@ -48,25 +48,42 @@ fn decode(kind : Int, id : Int, a : Int, b : Int) -> Event {
 }
 
 ///|
-pub fn dispatch(kind : Int, id : Int, a : Int, b : Int) -> Unit {
-  match decode(kind, id, a, b) {
-    Click(click_id) => on_click(click_id)
-    Key(code, mods) => on_key(code, mods)
-    Unknown => ()
-  }
-  build_tree()
+pub fn dispatch(kind : Int, id : Int, a : Int, b : Int) -> Int {
+  rebuild_if_changed(apply_event(decode(kind, id, a, b)), build_tree)
 }
 
 ///|
-fn on_click(click_id : Int) -> Unit {
+fn apply_event(event : Event) -> Int {
+  match event {
+    Click(click_id) => on_click(click_id)
+    Key(code, mods) => on_key(code, mods)
+    Unknown => 0
+  }
+}
+
+///|
+fn rebuild_if_changed(changed : Int, rebuild : () -> Unit) -> Int {
+  if changed == 1 {
+    rebuild()
+  }
+  changed
+}
+
+///|
+fn on_click(click_id : Int) -> Int {
   if click_id == BTN_DECREMENT {
     count[0] = count[0] - 1
+    1
   } else if click_id == BTN_RESET {
-    count[0] = 0
+    reset_count()
   } else if click_id == BTN_INCREMENT {
     count[0] = count[0] + 1
+    1
   } else if click_id == BTN_INCREMENT_10 {
     count[0] = count[0] + 10
+    1
+  } else {
+    0
   }
 }
 
@@ -82,13 +99,27 @@ const KEY_J : Int = 106 // 'j' → -1
 const KEY_R : Int = 114 // 'r' → reset
 
 ///|
-fn on_key(code : Int, _mods : Int) -> Unit {
+fn reset_count() -> Int {
+  if count[0] == 0 {
+    0
+  } else {
+    count[0] = 0
+    1
+  }
+}
+
+///|
+fn on_key(code : Int, _mods : Int) -> Int {
   if code == KEY_K {
     count[0] = count[0] + 1
+    1
   } else if code == KEY_J {
     count[0] = count[0] - 1
+    1
   } else if code == KEY_R {
-    count[0] = 0
+    reset_count()
+  } else {
+    0
   }
 }
 

@@ -9,7 +9,7 @@ Related docs: [`README.md`](../README.md) (build/run), [`moonbit-bindings/README
 Call **Zed's GPUI** (Rust, GPU-accelerated UI) from **MoonBit** through a Rust/C FFI layer. The current demo is an interactive Counter: buttons `-1`, `Reset`, `+1`, and `+10`; keys `j`, `k`, and `r`. UI description and Counter logic live in MoonBit; retained-tree storage, rendering, the GPUI event loop, and the bridge live in Rust.
 
 - **`main` is owned by MoonBit** (`moon run` / the bundled binary). Rust is a static library linked into that executable.
-- The model is **retained + reactive**: MoonBit builds a node tree stored in Rust, GPUI renders it, and events call back into MoonBit. MoonBit mutates state, rebuilds the whole tree, and asks GPUI to render again.
+- The model is **retained + reactive**: MoonBit builds a node tree stored in Rust, GPUI renders it, and events call back into MoonBit. A callback that changes state rebuilds the whole tree and returns `1`; a no-op returns `0`. Rust notifies GPUI only for `1`.
 
 ## 2. Components
 
@@ -20,7 +20,7 @@ Call **Zed's GPUI** (Rust, GPU-accelerated UI) from **MoonBit** through a Rust/C
 | `moonbit-bindings/` | MoonBit | High-level API, Counter state/logic, and MoonBit `main` | `gpui-bindings.mbt`, generated `gpui-bindings-ffi.mbt`, `app/app.mbt`, `cmd/main/main.mbt` |
 | root | shell / PowerShell | Cross-language build orchestration and platform setup | `build.sh`, `build.ps1`, `bundle.sh` |
 
-The target is MoonBit `native`, with build paths for macOS, Linux (including WSLg), and Windows. Toolchain minimum versions are not pinned by this repository.
+The target is MoonBit `native`. Supported host/target pairs are macOS arm64 or x86_64, Linux x86_64 (including WSLg), and Windows MSVC x64; cross compilation is outside the supported path. Toolchain minimum versions are not pinned by this repository. Build drivers print the observed versions and Cargo.lock fixes the dependency resolution, currently including GPUI 0.2.2.
 
 ## 3. Runtime model (retained tree)
 
@@ -30,7 +30,7 @@ The target is MoonBit `native`, with build paths for macOS, Linux (including WSL
 - `add_child(parent, child)` moves the child node into the parent's `children`, leaving the child's slot absent.
 - `FfiView::render` snapshots `NODES` by cloning the present nodes while the mutex is held, releases the mutex, and only then builds GPUI elements/listeners. This keeps the lock out of listener and callback paths.
 - The outer Rust render container (not the MoonBit-created root node) is a full-size flex column that tracks `FfiView.focus` and receives `on_key_down`. Each clickable div is assigned `.id(("gpui_click", click_id))` and an `on_click` listener.
-- `gpui_reset()` clears `NODES`, allowing MoonBit to rebuild from scratch after each event.
+- `gpui_reset()` clears `NODES`, allowing MoonBit to rebuild from scratch after a state-changing event. No-op events skip reset and rebuilding.
 
 ## 4. FFI contract (two directions)
 
@@ -69,12 +69,13 @@ Setters, `gpui_reset`, and `gpui_run_window` return these statuses. Current high
 
 ### 4b. Rust → MoonBit (event callback)
 
-- One callback: MoonBit `app.dispatch(kind, id, a, b)` in `moonbit-bindings/app/app.mbt`.
-- Rust's generated extern calls it as `mb_dispatch(kind, id, a, b)`. `gpui-sys/build.rs` reads `gpui-sys/mb_symbol.txt` and emits the `#[link_name]` declaration.
-- The payload is fixed at four `i32` values. Event kinds and modifier bits come from `gpui-sys/abi.toml`, which both drivers use to generate Rust and MoonBit constants.
+- One callback: MoonBit `app.dispatch(kind, id, a, b) -> Int` in `moonbit-bindings/app/app.mbt`.
+- Rust's generated extern calls it as `mb_dispatch(kind, id, a, b) -> i32`. `gpui-sys/build.rs` reads `gpui-sys/mb_symbol.txt` and emits the `#[link_name]` declaration.
+- The payload is fixed at four `i32` values. A return value of `1` means state changed and the tree was rebuilt; `0` means unchanged. Rust calls `cx.notify()` only for `1`.
+- Event kinds, modifier bits, callback parameters, and callback return type come from `gpui-sys/abi.toml`; the drivers generate constants and validate the signature.
 - `cmd/main/main.mbt` binds `app.dispatch` to `_keep`, preventing dead-code elimination of a function referenced only from Rust.
 
-The drivers extract the real current mangled spelling for fixed `app.dispatch`, so a toolchain mangling change is followed. This is not automatic package/function rename support: changing `app` or `dispatch` requires updating `PKG_FN_SUFFIX` in `build.sh`, `$PkgFnSuffix` in `build.ps1`, and the callback ABI policy/template in `gpui-sys/build.rs`. Since MoonBit's mangled spelling excludes types, the drivers separately validate four `int32_t` parameters from generated C when `main.c` is available.
+The drivers extract the real current mangled spelling for fixed `app.dispatch`, so a toolchain mangling change is followed. This is not automatic package/function rename support: changing `app` or `dispatch` requires updating `PKG_FN_SUFFIX` in `build.sh`, `$PkgFnSuffix` in `build.ps1`, and the callback ABI policy/template in `gpui-sys/build.rs`. Since MoonBit's mangled spelling excludes types, the drivers separately validate an `int32_t` return and four `int32_t` parameters from generated C when `main.c` is available.
 
 ## 5. Data flow
 
@@ -90,11 +91,15 @@ sequenceDiagram
   G->>S: FfiView::render snapshots NODES and wires listeners
   Note over G: click or key
   G->>A: mb_dispatch(kind, id, a, b)
-  A->>A: mutate count
-  A->>S: gpui_reset + rebuild tree
-  A-->>G: return
-  G->>G: cx.notify()
-  G->>S: FfiView::render again
+  alt state changed
+    A->>A: mutate count
+    A->>S: gpui_reset + rebuild tree
+    A-->>G: return 1
+    G->>G: cx.notify()
+    G->>S: FfiView::render again
+  else no-op / unknown event
+    A-->>G: return 0
+  end
 ```
 
 `EVENT_CLICK=1` and `EVENT_KEY=2` come from `abi.toml`. A click listener supplies `(EVENT_CLICK, click_id, 0, 0)`. The outer focused container maps a single-character key to its Unicode codepoint and sends `(EVENT_KEY, 0, codepoint, mods_bits)`; named or multi-character keys are ignored. MoonBit decides semantics: `BTN_DECREMENT=1`, `BTN_RESET=2`, `BTN_INCREMENT=3`, `BTN_INCREMENT_10=4`; `j=106`, `k=107`, and `r=114`.
@@ -103,25 +108,26 @@ sequenceDiagram
 
 Use a root build driver. A bare `cargo build` lacks the locally generated `gpui-sys/mb_symbol.txt`. A bare `moon build` can leave a stale executable because MoonBit does not track a changed external static archive.
 
-`build.sh` supports macOS and Linux; it chooses `moon.pkg.macos` or `moon.pkg.linux`. `build.ps1` supports Windows, initializes an MSVC x64 environment when necessary, captures Rust's native static libraries, and uses `moon.pkg.windows`.
+`build.sh` supports macOS arm64/x86_64 and Linux x86_64; `build.ps1` supports Windows MSVC x64. Each driver runs a prerequisite/architecture preflight before changing generated files. The selected `moon.pkg.*` template receives Cargo's native static-library list as its base. Linux normalizes XCB/XKB flags to versioned SONAMEs for runtime-only and `.linux-libs` environments and adds the required `libxcb-xkb` compatibility dependency.
 
 Both drivers perform this order:
 
-1. Generate MoonBit ABI constants from `gpui-sys/abi.toml`. Run `bindgen-moonbit` against the **currently generated** `gpui-sys/include/gpui_sys.h`, then format the generated MoonBit files.
-2. Run fatal `moon check`, then a cold `moon build`. Only the expected missing callback/static-library native-link failure is tolerated.
-3. Extract exactly one `app.dispatch` mangled symbol; validate the generated C prototype as four `int32_t` parameters where `main.c` exists.
-4. Run `cargo build` in `gpui-sys`. Its `build.rs` reads `mb_symbol.txt`, generates the callback extern, regenerates Rust ABI constants, and regenerates `include/gpui_sys.h` with cbindgen.
-5. Remove MoonBit linked output and build again, forcing relink against the fresh Rust static library.
-6. Validate linkage: macOS/Linux inspect the final binary for exactly one callback definition. Windows verifies one callback definition in MoonBit's `main.obj`, one unresolved reference in `gpui_sys.lib`, and successful final linking because a linked PE normally omits its COFF symbol table.
+1. Validate the native host/target and required MoonBit, Rust, compiler/linker, and symbol tools; print toolchain versions and derive the native Rust host plus actual Cargo target directory for diagnostics and linking.
+2. Generate MoonBit ABI constants from `gpui-sys/abi.toml`. Run `bindgen-moonbit` against the **currently generated** `gpui-sys/include/gpui_sys.h`, then format the generated MoonBit files.
+3. Run fatal `moon check`, then a cold `moon build` with no Cargo-derived native libraries yet. A native-link failure is expected at this bootstrap stage; the later build with the complete Cargo list is the strict link gate.
+4. Extract exactly one `app.dispatch` mangled symbol; validate the generated C prototype as an `int32_t` return with four `int32_t` parameters where `main.c` exists. The explicit `_keep` type in `cmd/main/main.mbt` is the MoonBit compile-time signature anchor on every platform.
+5. Build `gpui-sys` for the detected native Rust host, capture `cargo rustc --lib --crate-type staticlib -- --print native-static-libs`, and generate the final platform `moon.pkg` using the target directory reported by Cargo metadata. `build.rs` reads `mb_symbol.txt`, generates the callback extern, regenerates Rust ABI constants, and regenerates `include/gpui_sys.h` with cbindgen.
+6. Remove MoonBit linked output and build again, forcing relink against the fresh Rust static library and Cargo-derived native dependencies.
+7. Validate linkage: macOS/Linux inspect the final binary for exactly one callback definition. Windows verifies one callback definition in MoonBit's `main.obj`, one unresolved reference in `gpui_sys.lib`, and successful final linking because a linked PE normally omits its COFF symbol table.
 
 The initial bindgen step necessarily sees the header from the prior Rust build. Therefore, after changing Rust C exports, run/review the driver again as needed so the newly regenerated header and tracked `gpui-bindings-ffi.mbt` are synchronized; do not assume the one initial bindgen invocation consumed a header regenerated later in the same driver run.
 
-`gpui-sys` is a `staticlib`: its unresolved `mb_dispatch` reference is resolved only at the final MoonBit executable link. The platform templates carry GPUI's native link flags. On macOS, `bundle.sh` creates `dist/Counter.app`, and that bundle is required for keyboard delivery. On Linux, use the executable directly; `.linux-libs` is an ignored local fallback for unavailable system XCB/XKB runtime libraries. In WSLg, `env -u WAYLAND_DISPLAY` is the reliable explicit X11 launch. Rust catches a Wayland startup panic and retries once with that variable removed. Windows uses the MSVC x64 setup prepared by `build.ps1`.
+`gpui-sys` is a `staticlib`: its unresolved `mb_dispatch` reference is resolved only at the final MoonBit executable link. The platform templates carry placeholders for the detected Rust library directory and Cargo-derived native link flags; Linux applies the SONAME compatibility normalization described above. On macOS, `bundle.sh` creates `dist/Counter.app`, and that bundle is required for keyboard delivery. On Linux, use the executable directly; `.linux-libs` is an ignored local fallback for unavailable system XCB/XKB runtime libraries. In WSLg, `env -u WAYLAND_DISPLAY` is the reliable explicit X11 launch. Rust catches a Wayland startup panic and retries once with that variable removed. Windows uses the MSVC x64 setup prepared by `build.ps1`.
 
 ## 7. Invariants and gotchas
 
 - **Text:** pass borrowed UTF-8 `Bytes` plus length, never a MoonBit `String` as a C pointer and never a NUL-terminated C-string contract.
-- **Callback:** the current mangled spelling is extracted, but fixed `app.dispatch(kind, id, a, b)` and its four `i32` ABI are checked. Renaming the package/function requires both driver suffix updates.
+- **Callback:** the current mangled spelling is extracted, but fixed `app.dispatch(kind, id, a, b) -> i32`, its four `i32` parameters, and `0`/`1` result policy are checked. Renaming the package/function requires both driver suffix updates.
 - **Relink:** after changing `gpui-sys`, use a root driver or explicitly clean MoonBit linked output before `moon build`.
 - **Locking:** render must snapshot and release `NODES` before listeners can invoke MoonBit callbacks.
 - **Keyboard:** on macOS run the `.app`; focus is assigned when the GPUI view is constructed, not during `render`.
@@ -141,7 +147,7 @@ The initial bindgen step necessarily sees the header from the prior Rust build. 
 
 ## 9. Validation scope
 
-From `moonbit-bindings/`, `moon check` typechecks the MoonBit module and `moon test` runs limited high-level binding tests. They do not validate Rust compilation, callback extraction, or final cross-language linkage; root drivers perform those integration checks. Generated FFI freshness after a Rust C-export change still requires the rerun/review described in §6 because bindgen runs before Cargo regenerates the header. There is no active root CI configuration. As of 2026-07-19, Windows and WSL/Linux builds were manually checked; macOS was not rechecked then.
+`GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` in `gpui-sys/` fixes the node-store handle, status, setter, move-on-attach, and notification-gate behavior without requiring a linked MoonBit callback. The extra environment opt-in prevents an accidental `--all-features` production build from silently replacing the real callback. From `moonbit-bindings/`, `moon check` typechecks the MoonBit module and `moon test` validates high-level bindings plus event changed/unchanged transitions. They do not validate callback extraction or final cross-language linkage; root drivers perform those integration checks. Issue #8 still retains broader automation work for a fully clean `_build`/`target` build and non-ASCII/embedded-NUL text traversing the complete MoonBit→C→Rust boundary; current tests cover MoonBit UTF-8 encoding and Rust pointer/length decoding separately. Generated FFI freshness after a Rust C-export change still requires the rerun/review described in §6 because bindgen runs before Cargo regenerates the header. There is no active root CI configuration. WSL/Linux was rechecked on 2026-07-20 with a full build, a Rust-only forced relink, and a GUI `+1` interaction. The latest Windows check is 2026-07-19; macOS was not rechecked.
 
 ## 10. File → concern map
 

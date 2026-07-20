@@ -1,7 +1,9 @@
+///|
 fn main {
   // `dispatch` is only ever called from Rust (via its mangled symbol), which
-  // MoonBit's dead-code elimination cannot see. Bind it once so it is retained.
-  let _keep : (Int, Int, Int, Int) -> Unit = @username/gpui-bindings/app.dispatch
+  // MoonBit's dead-code elimination cannot see. The explicit function type both
+  // retains it and anchors the four-Int / Int callback ABI during `moon check`.
+  let _keep : (Int, Int, Int, Int) -> Int = @username/gpui-bindings/app.dispatch
   ignore(_keep)
 
   @username/gpui-bindings/app.build_tree()

@@ -8,7 +8,7 @@ options(
   link: {
     "native": {
       "cc-flags": "-I../gpui-sys/include",
-      "cc-link-flags": "-L../gpui-sys/target/debug -L../.linux-libs -lgpui_sys -lstdc++ -l:libxcb.so.1 -l:libxcb-xkb.so.1 -l:libxkbcommon.so.0 -l:libxkbcommon-x11.so.0 -ldl -lgcc_s -lutil -lrt -lpthread -lm -lc",
+      "cc-link-flags": "-L@RUST_LIB_DIR@ -L../.linux-libs -lgpui_sys @NATIVE_LIBS@",
     },
   },
 )

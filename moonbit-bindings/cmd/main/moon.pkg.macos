@@ -8,7 +8,7 @@ options(
   link: {
     "native": {
       "cc-flags": "-I../gpui-sys/include",
-      "cc-link-flags": "-L../gpui-sys/target/debug -lgpui_sys -framework Cocoa -framework AppKit -framework Foundation -framework ApplicationServices -framework CoreFoundation -framework CoreGraphics -framework CoreText -framework CoreVideo -framework QuartzCore -framework Metal -framework Carbon -framework Security -framework SystemConfiguration -framework OpenGL -lobjc -liconv",
+      "cc-link-flags": "-L@RUST_LIB_DIR@ -lgpui_sys @NATIVE_LIBS@",
     },
   },
 )

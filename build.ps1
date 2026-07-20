@@ -1,7 +1,7 @@
 # Build driver for GPUI + MoonBit on Windows. Mirrors build.sh:
 #   [0] regenerate ABI constants and C FFI bindings
 #   [1a] moon check (fatal typecheck gate)
-#   [1b] moon build (only a cold native-link failure is tolerated)
+#   [1b] MoonBit bootstrap build (native-link failure is expected before Cargo flags)
 #   [2] extract app.dispatch's mangled symbol from the generated main.c
 #       (x64 COFF has no ABI underscore: use the name verbatim, like ELF)
 #   [3] cargo build gpui-sys, then capture its native-static-libs list
@@ -34,6 +34,42 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
   Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
   Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64' | Out-Null
 }
+
+Write-Host "==> Preflight (Windows $env:PROCESSOR_ARCHITECTURE)"
+foreach ($command in 'moon', 'cargo', 'rustc', 'cl', 'link', 'dumpbin') {
+  if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
+    throw "required command not found: $command"
+  }
+}
+if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
+  throw "unsupported Windows architecture: $env:PROCESSOR_ARCHITECTURE (supported: AMD64)"
+}
+if ($env:VSCMD_ARG_TGT_ARCH -and $env:VSCMD_ARG_TGT_ARCH -ne 'x64') {
+  throw "MSVC is configured for $env:VSCMD_ARG_TGT_ARCH; run build.ps1 from an x64 developer shell"
+}
+$clBanner = (& cl 2>&1) -join "`n"
+if ($clBanner -notmatch '(?i)\bfor x64\b') {
+  throw 'MSVC compiler is not targeting x64; run build.ps1 from an x64 developer shell'
+}
+& moon --version
+& cargo --version
+& rustc --version
+if (Get-Command rustup -ErrorAction SilentlyContinue) {
+  & rustup show active-toolchain
+}
+$rustHostLine = @(& rustc -vV | Where-Object { $_ -match '^host:\s+' })
+if ($rustHostLine.Count -ne 1) { throw 'could not determine the native Rust host target' }
+$rustHost = $rustHostLine[0] -replace '^host:\s+', ''
+if ($rustHost -ne 'x86_64-pc-windows-msvc') {
+  throw "unsupported Rust host target: $rustHost (supported: x86_64-pc-windows-msvc)"
+}
+$cargoMetadata = (& cargo metadata --no-deps --format-version 1 --manifest-path (Join-Path $GSys 'Cargo.toml') |
+                  Out-String | ConvertFrom-Json)
+$cargoTargetRoot = [string]$cargoMetadata.target_directory
+if (-not $cargoTargetRoot) { throw 'cargo metadata did not report target_directory' }
+$rustTargetDir = Join-Path (Join-Path $cargoTargetRoot $rustHost) 'debug'
+Write-Host "    Rust target: $rustHost"
+Write-Host "    Rust library dir: $rustTargetDir"
 
 function Write-MoonPkg([string]$libs) {
   $tmpl = Get-Content (Join-Path $MB 'cmd\main\moon.pkg.windows') -Raw
@@ -96,7 +132,7 @@ $ec = $LASTEXITCODE
 Pop-Location
 if ($ec -ne 0) { throw 'MoonBit compilation failed' }
 
-Write-Host '==> [1b/5] MoonBit build (only a missing native callback/library is tolerated)'
+Write-Host '==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)'
 Write-MoonPkg ''
 Push-Location $MB
 $coldOutput = cmd /c "moon build 2>&1"
@@ -148,9 +184,9 @@ if (-not $env:RUSTFLAGS) {
   $env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static"
 }
 Push-Location $GSys
-cmd /c "cargo build 2>&1" | Out-Host
+cmd /c "cargo build --target $rustHost 2>&1" | Out-Host
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
-$nativeLibs = (cmd /c "cargo rustc -- --print native-static-libs 2>&1" |
+$nativeLibs = (cmd /c "cargo rustc --target $rustHost --lib --crate-type staticlib -- --print native-static-libs 2>&1" |
                Select-String 'native-static-libs:' | Select-Object -First 1).Line `
                -replace '.*native-static-libs:\s*', ''
 Pop-Location
@@ -163,9 +199,9 @@ $nativeLibTokens = @($nativeLibs -split '\s+' | Where-Object {
 $nativeLibs = $nativeLibTokens -join ' '
 Write-Host "    native libs (static CRT): $nativeLibs"
 
-# gpui's build.rs emits an extra static lib (gpui.lib) under target\debug\build\
-# on Windows; add every build-script out dir that holds a .lib to LIB.
-$extraDirs = @(Get-ChildItem (Join-Path $GSys 'target\debug\build') -Recurse -Filter '*.lib' -ErrorAction SilentlyContinue |
+# gpui's build.rs emits an extra static lib (gpui.lib) under the active
+# target/<host>/debug/build tree on Windows; add every such .lib dir to LIB.
+$extraDirs = @(Get-ChildItem (Join-Path $rustTargetDir 'build') -Recurse -Filter '*.lib' -ErrorAction SilentlyContinue |
                ForEach-Object { $_.DirectoryName } | Sort-Object -Unique)
 # windows-rs ships its import libs (windows.0.5x.0.lib) inside the cargo
 # registry checkout; the linker needs those dirs on the search path too.
@@ -173,7 +209,7 @@ $winLibDirs = @(Get-ChildItem "$env:USERPROFILE\.cargo\registry\src" -Directory 
                  ForEach-Object { Get-ChildItem $_.FullName -Directory -Filter 'windows_x86_64_msvc-*' -ErrorAction SilentlyContinue } |
                  ForEach-Object { Join-Path $_.FullName 'lib' } |
                  Where-Object { Test-Path $_ })
-$projectLibDirs = @((Join-Path $GSys 'target\debug')) + $extraDirs + $winLibDirs
+$projectLibDirs = @($rustTargetDir) + $extraDirs + $winLibDirs
 $allLibDirs = $projectLibDirs + @($env:LIB -split ';')
 $env:LIB = ($allLibDirs | Where-Object { $_ } | Select-Object -Unique) -join ';'
 Write-Host "    extra LIB dirs: $($projectLibDirs -join ';')"
@@ -196,7 +232,7 @@ $exe = Join-Path $MB '_build\native\debug\build\cmd\main\main.exe'
 if (-not (Test-Path $exe)) { throw "final executable not found at $exe" }
 $mainObj = Join-Path $MB '_build\native\debug\build\cmd\main\main.obj'
 if (-not (Test-Path $mainObj)) { throw "MoonBit object not found at $mainObj" }
-$rustLib = Join-Path $GSys 'target\debug\gpui_sys.lib'
+$rustLib = Join-Path $rustTargetDir 'gpui_sys.lib'
 if (-not (Test-Path $rustLib)) { throw "Rust static library not found at $rustLib" }
 
 # Linked PE executables normally omit their COFF symbol table, so checking

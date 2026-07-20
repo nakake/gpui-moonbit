@@ -3,6 +3,11 @@ name = "gpui-sys"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Unit-test-only callback replacement; build.rs also requires the explicit
+# GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 opt-in so --all-features cannot ship it.
+test-dispatch-stub = []
+
 [lib]
 # staticlib only: the archive references `mb_dispatch` (provided by the MoonBit
 # `app` package) as an undefined external, resolved at the final executable link.
