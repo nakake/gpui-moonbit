@@ -38,6 +38,8 @@ pub const GPUI_STATUS_NO_ACTIVE_TREE: i32 = -5;
 pub const GPUI_STATUS_TREE_IN_PROGRESS: i32 = -6;
 /// `gpui_commit_tree` was called before `gpui_set_root` designated a root.
 pub const GPUI_STATUS_NO_ROOT: i32 = -7;
+/// Two or more nodes in the committed tree carry the same explicit key.
+pub const GPUI_STATUS_DUPLICATE_KEY: i32 = -8;
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
 // symbol for an executable build, so we bind directly to the compiled MoonBit
@@ -64,6 +66,10 @@ enum UiNode {
         gap: f32,
         rounded: f32,
         on_click: Option<i32>,
+        /// Explicit stable identity, independent of click routing. When set,
+        /// `render_node` uses it as the GPUI `ElementId`; duplicate keys within
+        /// a committed tree are rejected at `commit_tree`.
+        key: Option<String>,
         children: Vec<UiNode>,
     },
     Text {
@@ -200,6 +206,24 @@ pub extern "C" fn gpui_commit_tree() -> i32 {
         if builder.nodes[root_index].is_none() {
             return GPUI_STATUS_NODE_ABSENT;
         }
+        // Reject duplicate explicit keys before committing: two nodes sharing a
+        // key would collide on GPUI ElementId and corrupt stateful-element state.
+        {
+            let mut seen = std::collections::HashSet::new();
+            let root_ref = builder.nodes[root_index].as_ref().expect("root present");
+            let mut stack: Vec<&UiNode> = vec![root_ref];
+            while let Some(node) = stack.pop() {
+                let UiNode::Div { key, children, .. } = node else {
+                    continue;
+                };
+                if let Some(key) = key {
+                    if !seen.insert(key.as_str()) {
+                        return GPUI_STATUS_DUPLICATE_KEY;
+                    }
+                }
+                stack.extend(children.iter());
+            }
+        }
         // Validation passed; take the builder and swap the root into VIEWS.
         let mut builder = guard.take().expect("builder was present");
         let root_node = builder
@@ -243,6 +267,7 @@ pub extern "C" fn gpui_create_div() -> i32 {
                     gap: 0.0,
                     rounded: 0.0,
                     on_click: None,
+                    key: None,
                     children: Vec::new(),
                 },
             )
@@ -258,6 +283,31 @@ pub extern "C" fn gpui_set_on_click(handle: i32, click_id: i32) -> i32 {
         with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
             Ok(UiNode::Div { on_click, .. }) => {
                 *on_click = Some(click_id);
+                GPUI_STATUS_OK
+            }
+            Ok(_) => unreachable!(),
+            Err(status) => status,
+        })
+    })
+}
+
+/// Set an explicit stable identity for a div, independent of click routing.
+/// `key` is a borrowed UTF-8 byte slice (`ptr`, `len`); it is copied. When set,
+/// the key becomes the GPUI `ElementId` so stateful-element identity survives
+/// rebuilds even for non-clickable divs. Duplicate keys within one committed
+/// tree are rejected by `gpui_commit_tree`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_set_key(handle: i32, ptr: *const u8, len: i32) -> i32 {
+    ffi_export("gpui_set_key", || {
+        let key = if ptr.is_null() || len <= 0 {
+            String::new()
+        } else {
+            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
+                .into_owned()
+        };
+        with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
+            Ok(UiNode::Div { key: slot, .. }) => {
+                *slot = Some(key);
                 GPUI_STATUS_OK
             }
             Ok(_) => unreachable!(),
@@ -554,6 +604,7 @@ fn render_node(
             gap,
             rounded,
             on_click,
+            key,
             children,
         } => {
             // Build children first (recursion borrows `cx`), then attach the
@@ -591,23 +642,43 @@ fn render_node(
                 d = d.rounded(px(*rounded));
             }
             d.extend(child_elements);
-            if let Some(cid) = *on_click {
-                // A stable ElementId derived from the click id (not the volatile
-                // node handle) keeps GPUI's stateful-element identity across
-                // rebuilds. On click, hand the id back to MoonBit and re-render.
-                let el = d
-                    .id(("gpui_click", cid as usize))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_this, _ev: &ClickEvent, _win, cx| {
-                        let changed = unsafe { mb_dispatch(EVENT_CLICK, cid, 0, 0) };
-                        if changed == 1 {
-                            cx.notify();
-                        }
-                    }))
-                    .into_any_element();
-                Some(el)
-            } else {
-                Some(d.into_any_element())
+            // Element identity: an explicit key (set via `gpui_set_key`) is the
+            // stable identity, independent of click routing. Without a key, a
+            // clickable div falls back to its click id (the historical scheme).
+            // A keyed div gets an id even when not clickable, so stateful
+            // elements that only need identity (not click routing) are stable
+            // across rebuilds. Duplicate keys are rejected at commit, so ids
+            // never collide here.
+            match (key.as_deref(), *on_click) {
+                (Some(key), on_click) => {
+                    let mut d = d.id(SharedString::from(format!("gpui_key:{key}")));
+                    if let Some(cid) = on_click {
+                        d = d
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |_this, _ev: &ClickEvent, _win, cx| {
+                                let changed = unsafe { mb_dispatch(EVENT_CLICK, cid, 0, 0) };
+                                if changed == 1 {
+                                    cx.notify();
+                                }
+                            }));
+                    }
+                    Some(d.into_any_element())
+                }
+                (None, Some(cid)) => {
+                    // Legacy: identity synthesized from the click id.
+                    let el = d
+                        .id(("gpui_click", cid as usize))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_this, _ev: &ClickEvent, _win, cx| {
+                            let changed = unsafe { mb_dispatch(EVENT_CLICK, cid, 0, 0) };
+                            if changed == 1 {
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element();
+                    Some(el)
+                }
+                (None, None) => Some(d.into_any_element()),
             }
         }
         UiNode::Text {
@@ -713,6 +784,7 @@ mod tests {
                         gap,
                         rounded,
                         on_click: Some(9),
+                        key: None,
                         children,
                     }) if *width == 100.0 && *height == 50.0 && *gap == 7.0 && *rounded == 8.0 && children.is_empty()
                 ));
@@ -758,6 +830,7 @@ mod tests {
                         gap: 0.0,
                         rounded: 0.0,
                         on_click: None,
+                        key: None,
                         children,
                     }) if children.is_empty()
                 ));
@@ -1006,6 +1079,106 @@ mod tests {
             assert_eq!(gpui_add_child(parent, child), GPUI_STATUS_OK);
             // Commit must fail: the root slot is now empty.
             assert_eq!(gpui_commit_tree(), GPUI_STATUS_NODE_ABSENT);
+        });
+    }
+
+    // --- Stable node keys (issue #9) ---------------------------------------
+
+    #[::core::prelude::v1::test]
+    fn set_key_stores_identity_on_div() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let div = gpui_create_div();
+            let key = "button-1".as_bytes();
+            assert_eq!(gpui_set_key(div, key.as_ptr(), key.len() as i32), GPUI_STATUS_OK);
+            with_builder_nodes(|nodes| {
+                assert!(matches!(
+                    &nodes[div as usize],
+                    Some(UiNode::Div { key: Some(k), .. }) if k == "button-1"
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_key_rejects_text_handle_and_no_transaction() {
+        with_test(|| {
+            // No active transaction.
+            assert_eq!(gpui_set_key(0, "k".as_ptr(), 1), GPUI_STATUS_NO_ACTIVE_TREE);
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let text = gpui_create_text(std::ptr::null(), 0, 0, 0, 0, 12.0);
+            assert_eq!(gpui_set_key(text, "k".as_ptr(), 1), GPUI_STATUS_WRONG_NODE_KIND);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn commit_rejects_duplicate_keys_in_tree() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let root = gpui_create_div();
+            let a = gpui_create_div();
+            let b = gpui_create_div();
+            let dup = "same".as_bytes();
+            assert_eq!(gpui_set_key(a, dup.as_ptr(), dup.len() as i32), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_key(b, dup.as_ptr(), dup.len() as i32), GPUI_STATUS_OK);
+            assert_eq!(gpui_add_child(root, a), GPUI_STATUS_OK);
+            assert_eq!(gpui_add_child(root, b), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(root), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_DUPLICATE_KEY);
+            // Failed commit leaves the previous (empty) committed tree untouched.
+            with_views(|views| assert!(views.is_empty() || views[0].is_none()));
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn commit_allows_distinct_keys() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let root = gpui_create_div();
+            let a = gpui_create_div();
+            let b = gpui_create_div();
+            assert_eq!(gpui_set_key(a, "a".as_ptr(), 1), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_key(b, "b".as_ptr(), 1), GPUI_STATUS_OK);
+            assert_eq!(gpui_add_child(root, a), GPUI_STATUS_OK);
+            assert_eq!(gpui_add_child(root, b), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(root), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn duplicate_key_on_unattached_node_is_ignored() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let root = gpui_create_div();
+            let attached = gpui_create_div();
+            let orphan = gpui_create_div();
+            let dup = "same".as_bytes();
+            assert_eq!(gpui_set_key(attached, dup.as_ptr(), dup.len() as i32), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_key(orphan, dup.as_ptr(), dup.len() as i32), GPUI_STATUS_OK);
+            // Only `attached` is in the tree; `orphan` shares its key but is not
+            // reachable from the root, so it must not trip the duplicate check.
+            assert_eq!(gpui_add_child(root, attached), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(root), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn commit_allows_duplicate_click_ids() {
+        with_test(|| {
+            // click_id is action routing, not identity: duplicates are allowed
+            // (issue #9 separates the two concerns).
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let root = gpui_create_div();
+            let a = gpui_create_div();
+            let b = gpui_create_div();
+            assert_eq!(gpui_set_on_click(a, 7), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_on_click(b, 7), GPUI_STATUS_OK);
+            assert_eq!(gpui_add_child(root, a), GPUI_STATUS_OK);
+            assert_eq!(gpui_add_child(root, b), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(root), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
         });
     }
 

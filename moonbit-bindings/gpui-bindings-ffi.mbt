@@ -20,6 +20,10 @@ extern "C" fn gpui_create_div_ffi() -> Int = "gpui_create_div"
 extern "C" fn gpui_set_on_click_ffi(handle : Int, click_id : Int) -> Int = "gpui_set_on_click"
 
 ///|
+#borrow(ptr)
+extern "C" fn gpui_set_key_ffi(handle : Int, ptr : Bytes, len : Int) -> Int = "gpui_set_key"
+
+///|
 extern "C" fn gpui_set_size_ffi(handle : Int, w : Float, h : Float) -> Int = "gpui_set_size"
 
 ///|

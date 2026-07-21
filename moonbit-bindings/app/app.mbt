@@ -127,6 +127,7 @@ fn on_key(code : Int, _mods : Int) -> Int {
 
 ///|
 fn make_button(
+  key : String,
   label : String,
   click_id : Int,
   r : Int,
@@ -134,6 +135,7 @@ fn make_button(
   b : Int,
 ) -> @username/gpui-bindings.NodeHandle {
   let btn = @username/gpui-bindings.create_div()
+  ignore(@username/gpui-bindings.set_key(btn, key))
   ignore(@username/gpui-bindings.set_size(btn, 92.0, 56.0))
   ignore(@username/gpui-bindings.set_bg(btn, r, g, b))
   ignore(@username/gpui-bindings.set_rounded(btn, 10.0))
@@ -173,25 +175,25 @@ pub fn build_tree() -> Unit {
   ignore(
     @username/gpui-bindings.add_child(
       row,
-      make_button("-1", BTN_DECREMENT, 200, 80, 80),
+      make_button("btn-decrement", "-1", BTN_DECREMENT, 200, 80, 80),
     ),
   )
   ignore(
     @username/gpui-bindings.add_child(
       row,
-      make_button("Reset", BTN_RESET, 92, 98, 110),
+      make_button("btn-reset", "Reset", BTN_RESET, 92, 98, 110),
     ),
   )
   ignore(
     @username/gpui-bindings.add_child(
       row,
-      make_button("+1", BTN_INCREMENT, 70, 160, 95),
+      make_button("btn-increment", "+1", BTN_INCREMENT, 70, 160, 95),
     ),
   )
   ignore(
     @username/gpui-bindings.add_child(
       row,
-      make_button("+10", BTN_INCREMENT_10, 70, 110, 230),
+      make_button("btn-increment-10", "+10", BTN_INCREMENT_10, 70, 110, 230),
     ),
   )
   ignore(@username/gpui-bindings.add_child(root, row))

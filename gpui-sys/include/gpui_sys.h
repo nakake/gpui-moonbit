@@ -49,6 +49,11 @@
 #define gpui_GPUI_STATUS_NO_ROOT -7
 
 /**
+ * Two or more nodes in the committed tree carry the same explicit key.
+ */
+#define gpui_GPUI_STATUS_DUPLICATE_KEY -8
+
+/**
  * Begin staging a new tree for `view`. Fails with `TREE_IN_PROGRESS` if a
  * transaction is already open (one at a time). Configure calls (`create_*`,
  * `set_*`, `add_child`, `set_root`) populate the staging builder until
@@ -82,6 +87,15 @@ int32_t gpui_create_div(void);
  * when the div is clicked.
  */
 int32_t gpui_set_on_click(int32_t handle, int32_t click_id);
+
+/**
+ * Set an explicit stable identity for a div, independent of click routing.
+ * `key` is a borrowed UTF-8 byte slice (`ptr`, `len`); it is copied. When set,
+ * the key becomes the GPUI `ElementId` so stateful-element identity survives
+ * rebuilds even for non-clickable divs. Duplicate keys within one committed
+ * tree are rejected by `gpui_commit_tree`.
+ */
+int32_t gpui_set_key(int32_t handle, const uint8_t *ptr, int32_t len);
 
 int32_t gpui_set_size(int32_t handle, float w, float h);
 
