@@ -982,6 +982,50 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn rejects_huge_string_length_without_panic() {
+        with_test(|| {
+            // A declared length near the address-space ceiling must report
+            // truncation, not overflow the cursor's bounds check.
+            let mut t = Buf::new();
+            t.op(OP_TEXT).u32(u32::MAX).u8(b'a').set_root();
+            assert_eq!(t.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+
+            let mut k = Buf::new();
+            k.div().op(OP_SET_KEY).u32(0x7FFF_FFFF);
+            assert_eq!(k.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn invalid_utf8_text_is_lossy_not_fatal() {
+        with_test(|| {
+            // The boundary replaces invalid UTF-8 with U+FFFD rather than
+            // rejecting: a malformed payload still commits, never panics.
+            let mut b = Buf::new();
+            b.op(OP_TEXT)
+                .u32(2)
+                .u8(0xFF)
+                .u8(0xFE)
+                .u8(1)
+                .u8(2)
+                .u8(3)
+                .f32(10.0)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Text {
+                        content,
+                        color: (1, 2, 3),
+                        size,
+                    }) if content == "\u{FFFD}\u{FFFD}" && *size == 10.0
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
     fn rejects_unknown_opcode() {
         with_test(|| {
             let mut b = Buf::new();
@@ -1080,6 +1124,121 @@ mod tests {
                         if matches!(children.as_slice(),
                             [UiNode::Div { children: inner, .. }]
                                 if matches!(inner.as_slice(), [UiNode::Div { .. }]))
+                ));
+            });
+        });
+    }
+
+    // --- Move / forest semantics (issue #8) --------------------------------
+
+    #[::core::prelude::v1::test]
+    fn add_child_moves_not_copies() {
+        with_test(|| {
+            // Two children attached in order; each appears exactly once under
+            // the parent, in attachment order.
+            let mut b = Buf::new();
+            b.div(); // parent (0)
+            b.div().op(OP_SET_BG).u8(1).u8(0).u8(0); // child A (1)
+            b.add_child();
+            b.div().op(OP_SET_BG).u8(0).u8(1).u8(0); // child B (2)
+            b.add_child();
+            b.set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { children, .. })
+                        if matches!(
+                            children.as_slice(),
+                            [
+                                UiNode::Div {
+                                    bg: Some((1, 0, 0)),
+                                    children: a,
+                                    ..
+                                },
+                                UiNode::Div {
+                                    bg: Some((0, 1, 0)),
+                                    children: c,
+                                    ..
+                                },
+                            ] if a.is_empty() && c.is_empty()
+                        )
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn subtree_moves_intact() {
+        with_test(|| {
+            // Grandchild attached to child, then child moved into root: the
+            // whole subtree relocates with its contents, nothing duplicated.
+            let mut b = Buf::new();
+            b.div(); // root (0)
+            b.div(); // child (1)
+            b.div().op(OP_SET_BG).u8(7).u8(7).u8(7); // grandchild (2)
+            b.add_child(); // 2 into 1
+            b.add_child(); // 1 into 0
+            b.set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { children: root_kids, .. })
+                        if matches!(
+                            root_kids.as_slice(),
+                            [UiNode::Div { children: inner, .. }]
+                                if matches!(
+                                    inner.as_slice(),
+                                    [UiNode::Div {
+                                        bg: Some((7, 7, 7)),
+                                        children: leaf,
+                                        ..
+                                    }] if leaf.is_empty()
+                                )
+                        )
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn unattached_nodes_are_dropped_from_commit() {
+        with_test(|| {
+            // Forest model: only the designated root is committed; a node
+            // never attached nor rooted (here handle 0) is silently discarded.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_BG).u8(9).u8(9).u8(9); // orphan (0)
+            b.div().op(OP_SET_BG).u8(1).u8(2).u8(3); // root (1)
+            b.set_root(); // pops 1
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        bg: Some((1, 2, 3)),
+                        children,
+                        ..
+                    }) if children.is_empty()
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn last_set_root_wins() {
+        with_test(|| {
+            // Two OP_SET_ROOT in one buffer: the last designation commits.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_BG).u8(1).u8(0).u8(0);
+            b.set_root();
+            b.div().op(OP_SET_BG).u8(0).u8(1).u8(0);
+            b.set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { bg: Some((0, 1, 0)), .. })
                 ));
             });
         });
