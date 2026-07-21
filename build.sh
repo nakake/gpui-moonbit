@@ -340,6 +340,14 @@ if [ "$CALLBACK_MATCHES" -ne 1 ]; then
 fi
 echo "    Verified: ${LINK_NAME} is defined exactly once"
 
+# In CI, export link-time environment so subsequent steps (moon test) inherit
+# the library search paths computed above.
+if [ -n "${GITHUB_ENV:-}" ]; then
+  if [ -n "${LIBRARY_PATH:-}" ]; then
+    echo "LIBRARY_PATH=${LIBRARY_PATH}" >> "$GITHUB_ENV"
+  fi
+fi
+
 case "$OS_PKG" in
   macos) echo "Done. Run:  ./bundle.sh && open dist/Counter.app  (keyboard needs the bundle)" ;;
   linux) echo 'Done. Run:  (cd moonbit-bindings && env -u WAYLAND_DISPLAY LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug/build/cmd/main/main.exe)' ;;

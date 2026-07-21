@@ -252,3 +252,9 @@ if ($references.Count -ne 1) { throw "expected exactly 1 reference to $sym in gp
 Write-Host "    Verified: main.obj defines $sym exactly once"
 Write-Host "    Verified: gpui_sys.lib references $sym exactly once and main.exe linked"
 Write-Host "Done. Run: $exe"
+
+# In CI, export the augmented LIB so subsequent steps (moon test) can find
+# gpui_sys.lib and the extra build-tree / registry .lib directories.
+if ($env:GITHUB_ENV) {
+  Add-Content -Path $env:GITHUB_ENV -Value "LIB=$env:LIB"
+}
