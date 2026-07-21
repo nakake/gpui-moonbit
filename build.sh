@@ -265,6 +265,7 @@ echo "    link_name : ${LINK_NAME}  -> ${GSYS}/mb_symbol.txt"
 echo "==> [3/5] Build gpui-sys (build.rs reads mb_symbol.txt and generates the extern)"
 ( cd "$GSYS" && cargo build --target "$RUST_TARGET" )
 NATIVE_LIBS="$(cd "$GSYS" && cargo rustc --target "$RUST_TARGET" --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
+  | tr -d '\r' \
   | awk '/native-static-libs:/ && !found {
       line=$0
       sub(/^.*native-static-libs:[[:space:]]*/, "", line)
@@ -279,6 +280,16 @@ if [ -z "$NATIVE_LIBS" ]; then
   exit 1
 fi
 NATIVE_LIBS="$(normalize_native_libs "$NATIVE_LIBS")"
+# Belt-and-suspenders: strip -lc (all platforms) and -lm (macOS) in case
+# normalize missed them (observed on CI where the drop did not take effect).
+NATIVE_LIBS="$(printf '%s\n' "$NATIVE_LIBS" | awk -v os="$OS_PKG" '{
+  for (i = 1; i <= NF; i++) {
+    if ($i == "-lc") continue
+    if (os == "macos" && $i == "-lm") continue
+    printf "%s%s", (n++ ? " " : ""), $i
+  }
+  print ""
+}')"
 echo "    native libs: $NATIVE_LIBS"
 # moon's native linker appends -lc (Linux) and -lm (macOS) itself. In
 # environments where the linker does not inherit cc's default search paths
@@ -286,21 +297,33 @@ echo "    native libs: $NATIVE_LIBS"
 # flags fail with "cannot find -lc" / "library 'm' not found".
 #
 # moon invokes ld directly (not via cc), so LIBRARY_PATH and compiler default
-# search paths do not apply. Bake -L into NATIVE_LIBS so it reaches ld through
-# the generated moon.pkg cc-link-flags.
+# search paths do not apply. Prepend -L into NATIVE_LIBS so it reaches ld
+# through the generated moon.pkg cc-link-flags BEFORE any -l flags.
 case "$OS_PKG" in
   linux)
     SYS_LIB_DIR="$(cd "$(dirname "$(cc -print-file-name=libc.so)")" && pwd)"
     if [ -d "$SYS_LIB_DIR" ]; then
-      NATIVE_LIBS="$NATIVE_LIBS -L$SYS_LIB_DIR"
+      NATIVE_LIBS="-L$SYS_LIB_DIR $NATIVE_LIBS"
       echo "    system lib dir: $SYS_LIB_DIR"
     fi
     ;;
   macos)
     SDK_LIB_DIR="$(xcrun --show-sdk-path)/usr/lib"
     if [ -d "$SDK_LIB_DIR" ]; then
-      NATIVE_LIBS="$NATIVE_LIBS -L$SDK_LIB_DIR"
+      NATIVE_LIBS="-L$SDK_LIB_DIR $NATIVE_LIBS"
       echo "    SDK lib dir: $SDK_LIB_DIR"
+    fi
+    # New macOS SDKs may not ship standalone libm (math lives in libSystem).
+    # Create a shim so the linker can resolve -lm.
+    if [ -d "$SDK_LIB_DIR" ] && [ ! -e "$SDK_LIB_DIR/libm.dylib" ] && [ ! -e "$SDK_LIB_DIR/libm.tbd" ]; then
+      SHIM_DIR="$(mktemp -d)"
+      if [ -e "$SDK_LIB_DIR/libSystem.tbd" ]; then
+        ln -s "$SDK_LIB_DIR/libSystem.tbd" "$SHIM_DIR/libm.tbd"
+      else
+        ln -s /usr/lib/libSystem.B.dylib "$SHIM_DIR/libm.dylib"
+      fi
+      NATIVE_LIBS="-L$SHIM_DIR $NATIVE_LIBS"
+      echo "    libm shim: $SHIM_DIR"
     fi
     ;;
 esac
@@ -309,6 +332,8 @@ rm -f "$RUST_LIB_DIR/libgpui_sys.dylib" \
 
 echo "==> [4/5] Final MoonBit build (links libgpui_sys.a + resolves the callback)"
 write_moon_pkg "$NATIVE_LIBS"
+echo "    moon.pkg link flags:"
+grep 'cc-link-flags' "$MB/cmd/main/moon.pkg" | sed 's/^/      /'
 # moon does not track the external libgpui_sys.a, so a gpui-sys-only change would
 # NOT trigger a relink of the executable (it would silently keep a stale exe).
 # Remove the linked outputs so moon re-links against the freshly built .a.
