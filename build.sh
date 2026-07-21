@@ -330,6 +330,9 @@ case "$OS_PKG" in
       echo "    libm shim: $SHIM_DIR"
       ls "$SDK_LIB_DIR"/libm* 2>/dev/null | sed 's/^/      SDK libm: /' || true
     fi
+    # The io_surface crate links IOSurface but cargo's native-static-libs
+    # does not always report it. Add it explicitly.
+    NATIVE_LIBS="$NATIVE_LIBS -framework IOSurface"
     ;;
 esac
 rm -f "$RUST_LIB_DIR/libgpui_sys.dylib" \
