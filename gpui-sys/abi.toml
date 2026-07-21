@@ -1,4 +1,4 @@
-abi_version = 1
+abi_version = 2
 
 [events]
 EVENT_CLICK = 1
@@ -14,3 +14,4 @@ MOD_FUNCTION = 16
 [callback]
 name = "dispatch"
 params = ["i32", "i32", "i32", "i32"]
+return = "i32"

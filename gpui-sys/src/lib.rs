@@ -34,7 +34,7 @@ pub const GPUI_STATUS_INTERNAL_PANIC: i32 = -4;
 // are already inside the (MoonBit-initiated) GPUI event loop — safe under
 // MoonBit's reference-counted runtime.
 //
-// Generates: `unsafe extern "C" { #[link_name = "_M0FP…3app8dispatch"] fn mb_dispatch(kind: i32, id: i32, a: i32, b: i32); }`
+// Generates: `unsafe extern "C" { #[link_name = "_M0FP…3app8dispatch"] fn mb_dispatch(kind: i32, id: i32, a: i32, b: i32) -> i32; }`
 include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
 
 #[derive(Clone)]
@@ -389,8 +389,8 @@ impl Render for FfiView {
                 let code = key_code(ev);
                 if code != 0 {
                     let mods = mods_bits(&ev.keystroke.modifiers);
-                    unsafe { mb_dispatch(EVENT_KEY, 0, code, mods) };
-                    cx.notify();
+                    let changed = unsafe { mb_dispatch(EVENT_KEY, 0, code, mods) };
+                    notify_if_changed(changed, || cx.notify());
                 }
             }));
         d.extend(children);
@@ -417,6 +417,12 @@ fn mods_bits(m: &Modifiers) -> i32 {
         | (m.shift as i32) * MOD_SHIFT
         | (m.platform as i32) * MOD_PLATFORM
         | (m.function as i32) * MOD_FUNCTION
+}
+
+fn notify_if_changed(changed: i32, notify: impl FnOnce()) {
+    if changed == 1 {
+        notify();
+    }
 }
 
 fn render_node(
@@ -454,9 +460,7 @@ fn render_node(
                 d = d.w(px(*width)).h(px(*height));
             }
             if let Some((r, g, b)) = bg {
-                d = d.bg(rgb(
-                    ((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32)
-                ));
+                d = d.bg(rgb(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32)));
             }
             if *flex {
                 d = d.flex();
@@ -482,8 +486,10 @@ fn render_node(
                     .id(("gpui_click", cid as usize))
                     .cursor_pointer()
                     .on_click(cx.listener(move |_this, _ev: &ClickEvent, _win, cx| {
-                        unsafe { mb_dispatch(EVENT_CLICK, cid, 0, 0) };
-                        cx.notify();
+                        let changed = unsafe { mb_dispatch(EVENT_CLICK, cid, 0, 0) };
+                        if changed == 1 {
+                            cx.notify();
+                        }
                     }))
                     .into_any_element();
                 Some(el)
@@ -505,12 +511,203 @@ fn render_node(
             // space so the real first glyph becomes an interior glyph; trailing
             // whitespace is counted in the line width, so centering is preserved.
             let d = div()
-                .text_color(rgb(
-                    ((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32)
-                ))
+                .text_color(rgb(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32)))
                 .text_size(px(*size))
                 .child(format!(" {content} "));
             Some(d.into_any_element())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct TestReset;
+
+    impl Drop for TestReset {
+        fn drop(&mut self) {
+            assert_eq!(gpui_reset(), GPUI_STATUS_OK);
+        }
+    }
+
+    fn with_test(f: impl FnOnce()) {
+        let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(gpui_reset(), GPUI_STATUS_OK);
+        let _reset = TestReset;
+        f();
+    }
+
+    #[::core::prelude::v1::test]
+    fn creates_nodes_and_sets_div_fields() {
+        with_test(|| {
+            let div = gpui_create_div();
+            assert_eq!(div, 0);
+            let text_bytes = "A\0あ".as_bytes();
+            let text =
+                gpui_create_text(text_bytes.as_ptr(), text_bytes.len() as i32, 1, 2, 3, 14.0);
+            assert_eq!(text, 1);
+
+            assert_eq!(gpui_set_size(div, 100.0, 50.0), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_bg(div, 4, 5, 6), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_flex(div, 1), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_center(div), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_gap(div, 7.0), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_rounded(div, 8.0), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_on_click(div, 9), GPUI_STATUS_OK);
+
+            with_nodes(|nodes| {
+                assert!(matches!(
+                    &nodes[div as usize],
+                    Some(UiNode::Div {
+                        width,
+                        height,
+                        bg: Some((4, 5, 6)),
+                        flex: true,
+                        flex_col: true,
+                        center: true,
+                        gap,
+                        rounded,
+                        on_click: Some(9),
+                        children,
+                    }) if *width == 100.0 && *height == 50.0 && *gap == 7.0 && *rounded == 8.0 && children.is_empty()
+                ));
+                assert!(matches!(
+                    &nodes[text as usize],
+                    Some(UiNode::Text {
+                        content,
+                        color: (1, 2, 3),
+                        size,
+                    }) if content == "A\0あ" && *size == 14.0
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn setters_reject_negative_out_of_range_and_text_handles() {
+        with_test(|| {
+            let div = gpui_create_div();
+            let text = gpui_create_text(std::ptr::null(), 0, 1, 2, 3, 14.0);
+
+            assert_eq!(gpui_set_size(-1, 1.0, 2.0), GPUI_STATUS_INVALID_HANDLE);
+            assert_eq!(gpui_set_bg(99, 1, 2, 3), GPUI_STATUS_INVALID_HANDLE);
+            assert_eq!(gpui_set_flex(text, 1), GPUI_STATUS_WRONG_NODE_KIND);
+            assert_eq!(gpui_set_center(text), GPUI_STATUS_WRONG_NODE_KIND);
+            assert_eq!(gpui_set_gap(text, 1.0), GPUI_STATUS_WRONG_NODE_KIND);
+            assert_eq!(gpui_set_rounded(text, 1.0), GPUI_STATUS_WRONG_NODE_KIND);
+            assert_eq!(gpui_set_on_click(text, 1), GPUI_STATUS_WRONG_NODE_KIND);
+            assert_eq!(gpui_set_size(text, 1.0, 2.0), GPUI_STATUS_WRONG_NODE_KIND);
+            assert_eq!(gpui_set_bg(text, 1, 2, 3), GPUI_STATUS_WRONG_NODE_KIND);
+
+            with_nodes(|nodes| {
+                assert!(matches!(
+                    &nodes[div as usize],
+                    Some(UiNode::Div {
+                        width: 0.0,
+                        height: 0.0,
+                        bg: None,
+                        flex: false,
+                        flex_col: false,
+                        center: false,
+                        gap: 0.0,
+                        rounded: 0.0,
+                        on_click: None,
+                        children,
+                    }) if children.is_empty()
+                ));
+                assert!(matches!(
+                    &nodes[text as usize],
+                    Some(UiNode::Text {
+                        content,
+                        color: (1, 2, 3),
+                        size,
+                    }) if content.is_empty() && *size == 14.0
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn wrong_parent_preserves_child() {
+        with_test(|| {
+            let parent = gpui_create_text(std::ptr::null(), 0, 0, 0, 0, 12.0);
+            let child = gpui_create_div();
+
+            assert_eq!(gpui_add_child(-1, child), GPUI_STATUS_INVALID_HANDLE);
+            assert_eq!(gpui_add_child(99, child), GPUI_STATUS_INVALID_HANDLE);
+            assert_eq!(gpui_add_child(parent, child), GPUI_STATUS_WRONG_NODE_KIND);
+            with_nodes(|nodes| {
+                assert!(matches!(nodes[child as usize], Some(UiNode::Div { .. })));
+            });
+
+            let valid_parent = gpui_create_div();
+            assert_eq!(gpui_add_child(valid_parent, child), GPUI_STATUS_OK);
+            with_nodes(|nodes| {
+                assert!(nodes[child as usize].is_none());
+                assert!(matches!(
+                    &nodes[valid_parent as usize],
+                    Some(UiNode::Div { children, .. }) if matches!(children.as_slice(), [UiNode::Div { .. }])
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn attaching_child_moves_it_and_rejects_duplicates() {
+        with_test(|| {
+            let parent = gpui_create_div();
+            let other_parent = gpui_create_div();
+            let child = gpui_create_div();
+
+            assert_eq!(gpui_add_child(parent, child), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_center(child), GPUI_STATUS_NODE_ABSENT);
+            assert_eq!(gpui_add_child(parent, child), GPUI_STATUS_NODE_ABSENT);
+            assert_eq!(gpui_add_child(other_parent, child), GPUI_STATUS_NODE_ABSENT);
+            with_nodes(|nodes| {
+                assert!(nodes[child as usize].is_none());
+                assert!(matches!(
+                    &nodes[parent as usize],
+                    Some(UiNode::Div { children, .. }) if matches!(children.as_slice(), [UiNode::Div { children, .. }] if children.is_empty())
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn self_attachment_preserves_parent() {
+        with_test(|| {
+            let parent = gpui_create_div();
+            assert_eq!(gpui_add_child(parent, parent), GPUI_STATUS_INVALID_HANDLE);
+            with_nodes(|nodes| {
+                assert!(matches!(
+                    &nodes[parent as usize],
+                    Some(UiNode::Div { children, .. }) if children.is_empty()
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn reset_invalidates_handles_and_restarts_allocation() {
+        with_test(|| {
+            let old = gpui_create_div();
+            assert_eq!(gpui_reset(), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_center(old), GPUI_STATUS_INVALID_HANDLE);
+            assert_eq!(gpui_create_div(), 0);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn notification_gate_accepts_only_changed_one() {
+        let calls = std::cell::Cell::new(0);
+        notify_if_changed(0, || calls.set(calls.get() + 1));
+        notify_if_changed(-1, || calls.set(calls.get() + 1));
+        notify_if_changed(2, || calls.set(calls.get() + 1));
+        assert_eq!(calls.get(), 0);
+        notify_if_changed(1, || calls.set(calls.get() + 1));
+        assert_eq!(calls.get(), 1);
     }
 }
