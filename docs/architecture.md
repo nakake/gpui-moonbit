@@ -33,8 +33,9 @@
 - `add_child(parent, child)` は子ノードを親の `children` へ移動し、子のスロットは空（absent）になる。
 - `set_root(handle)` はステージングツリーのルートを指定する。指定されたノードがその後 `add_child` で移動されると、`commit_tree` は `GPUI_STATUS_NODE_ABSENT` で失敗する。
 - `FfiView::render` は、mutex を保持したまま自分の view のコミット済みルートをクローンして `VIEWS` をスナップショットし、mutex を解放してから GPUI の要素/リスナーを構築する。これによりロックをリスナーとコールバックの経路から外す。コミット済みツリーがなければ空で描画する。
-- 外側の Rust レンダリングコンテナ（MoonBit が生成したルートノードではない）は全サイズの flex column で、`FfiView.focus` を追跡し `on_key_down` を受け取る。クリック可能な各 div には `.id(("gpui_click", click_id))` と `on_click` リスナーが割り当てられる。
+- 外側の Rust レンダリングコンテナ（MoonBit が生成したルートノードではない）は全サイズの flex column で、`FfiView.focus` を追跡し `on_key_down` を受け取る。各 div は安定キーがあればそれを GPUI `ElementId`（`"gpui_key:{key}"`）として使い、なければクリック可能 div に限り click_id から ID（`"gpui_click"`）を合成する。クリック可能な div には `on_click` リスナーが割り当てられる。
 - 状態変更イベントの後、MoonBit は新しいトランザクションでツリーをゼロから再構築して commit する。何もしないイベントは再構築も commit もスキップする。
+- **安定ノード識別（issue #9）**: `set_key(handle, key)` は div に明示的な安定キーを設定する。設定されたキーは GPUI の `ElementId`（`"gpui_key:{key}"`）になり、クリック有無に関わらず再構築を跨いで stateful element の同一性を保つ。キー未設定のクリック可能 div は従来どおり click_id から ID を合成する（`"gpui_click"`）。click_id はアクションルーティング専用であり、キーとは独立（click_id の重複は許容、キーの重複は `commit_tree` が拒否）。
 
 ## 4. FFI 契約（双方向）
 
@@ -48,6 +49,7 @@
 | `gpui_create_div() -> i32` | `create_div() -> NodeHandle` |
 | `gpui_set_size/bg/flex/center/gap/rounded(...)` | `set_size`、`set_bg`、`set_flex_row`/`set_flex_col`、`set_center`、`set_gap`、`set_rounded` |
 | `gpui_set_on_click(handle, click_id)` | `set_on_click(handle, click_id)` |
+| `gpui_set_key(handle, ptr, len)` | `set_key(handle, key)` — 安定識別キーを設定 |
 | `gpui_create_text(const uint8_t *ptr, int32_t len, ...) -> i32` | `create_text(String, r, g, b, size)` |
 | `gpui_add_child(parent, child)` | `add_child(parent, child)` |
 | `gpui_set_root(handle) -> i32` | `set_root(handle)` — ルートを指定 |
@@ -74,6 +76,7 @@ int32_t gpui_create_text(const uint8_t *ptr, int32_t len,
 | `GPUI_STATUS_NO_ACTIVE_TREE`（`-5`） | `begin_tree` なしで構成/`set_root`/`commit` を呼んだ |
 | `GPUI_STATUS_TREE_IN_PROGRESS`（`-6`） | 既にトランザクションが開いている状態で `begin_tree` を呼んだ |
 | `GPUI_STATUS_NO_ROOT`（`-7`） | `set_root` 前に `commit_tree` を呼んだ |
+| `GPUI_STATUS_DUPLICATE_KEY`（`-8`） | コミットするツリー内で 2 つ以上のノードが同じキーを持つ |
 
 セッター群、トランザクション操作（`begin_tree`/`set_root`/`commit_tree`/`abort_tree`）、`gpui_run_window` はこれらのステータスを返す。現在の高レベル MoonBit ラッパーはこれらの戻り値に `ignore` を呼ぶため、呼び出し元はエラーを観測できない。生成呼び出しは、非負のハンドルか負のステータスのいずれかを返す。
 
@@ -139,7 +142,7 @@ sequenceDiagram
 - **テキスト:** 借用した UTF-8 の `Bytes` と長さを渡す。MoonBit の `String` を C ポインタとして渡したり、NUL 終端の C 文字列契約を用いたりしてはならない。
 - **コールバック:** 現在のマングル名は抽出されるが、固定の `app.dispatch(kind, id, a, b) -> i32`、その 4 つの `i32` パラメータ、および `0`/`1` の結果ポリシーはチェックされる。パッケージ/関数名のリネームには、両ドライバの suffix 更新が必要である。
 - **再リンク:** `gpui-sys` を変更した後は、ルートのドライバを使うか、`moon build` の前に MoonBit のリンク済み出力を明示的にクリーンすること。
-- **ロック:** render は、リスナーが MoonBit コールバックを呼び出し得る前に、`NODES` をスナップショットして解放しなければならない。
+- **ロック:** render は、リスナーが MoonBit コールバックを呼び出し得る前に、`VIEWS` をスナップショットして解放しなければならない。
 - **キーボード:** macOS では `.app` を実行すること。フォーカスは `render` 中ではなく、GPUI ビュー構築時に割り当てられる。
 - **ABI 定数:** `gpui-sys/abi.toml` を編集すること。生成物の `abi_constants.rs` や `abi_constants.mbt` を直接編集してはならない。
 - **生成された FFI:** `gpui-bindings-ffi.mbt` を手編集しないこと。Rust の C エクスポート変更後は、ヘッダーと突き合わせて検証すること。
@@ -157,7 +160,7 @@ sequenceDiagram
 
 ## 9. 検証の範囲
 
-`gpui-sys/` での `GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` は、リンクされた MoonBit コールバックを必要とせずに、ノードストアのハンドル、ステータス、セッター、attach 時の移動、通知ゲート、および `abi.toml` と生成済み Rust/MoonBit 定数の境界横断一致（drift guard）を固定する。追加の環境変数によるオプトインは、誤った `--all-features` での本番ビルドが実際のコールバックを暗黙に置き換えることを防ぐ。`moonbit-bindings/` からは、`moon check` が MoonBit モジュールを型チェックし、`moon test` が高レベルバインディングとイベントの変化/不変化の遷移を検証する。これらはコールバック抽出や最終的な言語横断リンケージは検証しない。それらの統合チェックはルートのドライバが実行する。Issue #8 は、完全にクリーンな `_build`/`target` ビルドと、MoonBit→C→Rust の完全な境界を通過する非 ASCII/埋め込み NUL テキストに関する、より広範な自動化の作業を依然として保持している。現在のテストは MoonBit の UTF-8 エンコードと Rust のポインタ/長デコードを個別にカバーする。Rust の C エクスポート変更後の生成 FFI の鮮度は、bindgen が Cargo によるヘッダー再生成より前に実行されるため、§6 で述べた再実行/再確認が依然として必要である。有効なルートの CI 設定は存在しない。WSL/Linux は 2026-07-20 にフルビルド、Rust のみの強制再リンク、GUI での `+1` 操作で再確認済み。最新の Windows 確認は 2026-07-19。macOS は再確認していない。
+`gpui-sys/` での `GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` は、リンクされた MoonBit コールバックを必要とせずに、ノードストアのハンドル、ステータス、セッター、attach 時の移動、通知ゲート、安定キー（重複拒否・未添付ノード無視・click_id との独立）、および `abi.toml` と生成済み Rust/MoonBit 定数の境界横断一致（drift guard）を固定する。追加の環境変数によるオプトインは、誤った `--all-features` での本番ビルドが実際のコールバックを暗黙に置き換えることを防ぐ。`moonbit-bindings/` からは、`moon check` が MoonBit モジュールを型チェックし、`moon test` が高レベルバインディングとイベントの変化/不変化の遷移を検証する。これらはコールバック抽出や最終的な言語横断リンケージは検証しない。それらの統合チェックはルートのドライバが実行する。Issue #8 は、完全にクリーンな `_build`/`target` ビルドと、MoonBit→C→Rust の完全な境界を通過する非 ASCII/埋め込み NUL テキストに関する、より広範な自動化の作業を依然として保持している。現在のテストは MoonBit の UTF-8 エンコードと Rust のポインタ/長デコードを個別にカバーする。Rust の C エクスポート変更後の生成 FFI の鮮度は、bindgen が Cargo によるヘッダー再生成より前に実行されるため、§6 で述べた再実行/再確認が依然として必要である。有効なルートの CI 設定は存在しない。WSL/Linux は 2026-07-21 にフルビルドと安定キー付き GUI（キー付き 4 ボタン）の起動で再確認済み。最新の Windows 確認は 2026-07-19。macOS は再確認していない。
 
 ## 10. ファイル → 関心事マップ
 

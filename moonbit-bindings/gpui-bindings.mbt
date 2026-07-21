@@ -116,6 +116,16 @@ pub fn set_on_click(handle : NodeHandle, click_id : Int) -> NodeHandle {
 }
 
 ///|
+/// Set an explicit stable identity for a div, independent of click routing.
+/// The key becomes the GPUI element id so stateful-element identity survives
+/// rebuilds. Duplicate keys within one committed tree are rejected at commit.
+pub fn set_key(handle : NodeHandle, key : String) -> NodeHandle {
+  let utf8 = to_utf8_bytes(key)
+  ignore(gpui_set_key_ffi(handle, utf8, utf8.length()))
+  handle
+}
+
+///|
 /// Begin staging a new tree for `view`. Configure calls populate it until
 /// `commit_tree` or `abort_tree` closes the transaction.
 pub fn begin_tree(view : Int) -> Unit {
