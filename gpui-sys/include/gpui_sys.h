@@ -33,6 +33,48 @@
  */
 #define gpui_GPUI_STATUS_INTERNAL_PANIC -4
 
+/**
+ * A configure / `set_root` / `commit` call was made with no active `gpui_begin_tree`.
+ */
+#define gpui_GPUI_STATUS_NO_ACTIVE_TREE -5
+
+/**
+ * `gpui_begin_tree` was called while another transaction is still open.
+ */
+#define gpui_GPUI_STATUS_TREE_IN_PROGRESS -6
+
+/**
+ * `gpui_commit_tree` was called before `gpui_set_root` designated a root.
+ */
+#define gpui_GPUI_STATUS_NO_ROOT -7
+
+/**
+ * Begin staging a new tree for `view`. Fails with `TREE_IN_PROGRESS` if a
+ * transaction is already open (one at a time). Configure calls (`create_*`,
+ * `set_*`, `add_child`, `set_root`) populate the staging builder until
+ * `commit_tree` or `abort_tree` closes it.
+ */
+int32_t gpui_begin_tree(int32_t view);
+
+/**
+ * Designate `handle` as the root of the staged tree. The node must still be
+ * present (not already moved into another node by `add_child`).
+ */
+int32_t gpui_set_root(int32_t handle);
+
+/**
+ * Commit the staged tree: move the root node into `VIEWS` for the view named
+ * by `begin_tree`, replacing whatever was committed before. Only succeeds if
+ * `set_root` was called and the root is still present; on any failure the
+ * staged tree is discarded and the previous committed tree is untouched.
+ */
+int32_t gpui_commit_tree(void);
+
+/**
+ * Discard the staged tree without committing. Always succeeds.
+ */
+int32_t gpui_abort_tree(void);
+
 int32_t gpui_create_div(void);
 
 /**
@@ -40,12 +82,6 @@ int32_t gpui_create_div(void);
  * when the div is clicked.
  */
 int32_t gpui_set_on_click(int32_t handle, int32_t click_id);
-
-/**
- * Clear the whole node tree so MoonBit can rebuild it from scratch (used on
- * re-render after a click).
- */
-int32_t gpui_reset(void);
 
 int32_t gpui_set_size(int32_t handle, float w, float h);
 

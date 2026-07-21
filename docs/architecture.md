@@ -24,13 +24,17 @@
 
 ## 3. 実行時モデル（retained tree）
 
-- Rust は `gpui-sys/src/lib.rs` に `static NODES: Mutex<Vec<Option<UiNode>>>` を保持する。
+- Rust は `gpui-sys/src/lib.rs` に 2 つの静的ストアを保持する。
+  - `static VIEWS: Mutex<Vec<Option<UiNode>>>` — view id ごとのコミット済みツリー。`render` は自分の view のスロットを読む。
+  - `static BUILDER: Mutex<Option<TreeBuilder>>` — 構築中のステージングツリー（トランザクション）。`None` はトランザクション非アクティブ。
   `UiNode` は `Div { size, bg, flex/flex_col, center, gap, rounded, on_click, children }` または `Text { content, color, size }` のいずれかである。
-- MoonBit はハンドル経由でノードを構築する。`create_div` と `create_text` がノードをプッシュする。生成が成功すると非負の `i32` ハンドルを返す。負の戻り値はステータス/エラーである。セッター群と `add_child` はハンドル経由で変更を加える。
+- ツリー構築はトランザクションである。`begin_tree(view)` がステージング builder を開き、`create_*`/`set_*`/`add_child`/`set_root` がそれを構成し、`commit_tree()` が成功時のみルートノードを `VIEWS[view]` へ差し替える。`abort_tree()` は破棄する。失敗した commit は builder を消費せず、以前のコミット済みツリーも無傷である。
+- MoonBit はハンドル経由でノードを構築する。`create_div` と `create_text` が builder のスロットへノードをプッシュする。生成が成功すると非負の `i32` ハンドルを返す。負の戻り値はステータス/エラーである。セッター群と `add_child` はハンドル経由で変更を加える。トランザクション外の構成呼び出しは `GPUI_STATUS_NO_ACTIVE_TREE` を返す。
 - `add_child(parent, child)` は子ノードを親の `children` へ移動し、子のスロットは空（absent）になる。
-- `FfiView::render` は、mutex を保持したまま存在するノードをクローンして `NODES` をスナップショットし、mutex を解放してから GPUI の要素/リスナーを構築する。これによりロックをリスナーとコールバックの経路から外す。
+- `set_root(handle)` はステージングツリーのルートを指定する。指定されたノードがその後 `add_child` で移動されると、`commit_tree` は `GPUI_STATUS_NODE_ABSENT` で失敗する。
+- `FfiView::render` は、mutex を保持したまま自分の view のコミット済みルートをクローンして `VIEWS` をスナップショットし、mutex を解放してから GPUI の要素/リスナーを構築する。これによりロックをリスナーとコールバックの経路から外す。コミット済みツリーがなければ空で描画する。
 - 外側の Rust レンダリングコンテナ（MoonBit が生成したルートノードではない）は全サイズの flex column で、`FfiView.focus` を追跡し `on_key_down` を受け取る。クリック可能な各 div には `.id(("gpui_click", click_id))` と `on_click` リスナーが割り当てられる。
-- `gpui_reset()` は `NODES` をクリアし、状態変更イベントの後に MoonBit がゼロから再構築できるようにする。何もしないイベントは reset も再構築もスキップする。
+- 状態変更イベントの後、MoonBit は新しいトランザクションでツリーをゼロから再構築して commit する。何もしないイベントは再構築も commit もスキップする。
 
 ## 4. FFI 契約（双方向）
 
@@ -40,12 +44,15 @@
 
 | C シンボル | MoonBit ラッパー（`gpui-bindings.mbt`） |
 |---|---|
+| `gpui_begin_tree(view) -> i32` | `begin_tree(view)` — トランザクションを開始 |
 | `gpui_create_div() -> i32` | `create_div() -> NodeHandle` |
 | `gpui_set_size/bg/flex/center/gap/rounded(...)` | `set_size`、`set_bg`、`set_flex_row`/`set_flex_col`、`set_center`、`set_gap`、`set_rounded` |
 | `gpui_set_on_click(handle, click_id)` | `set_on_click(handle, click_id)` |
 | `gpui_create_text(const uint8_t *ptr, int32_t len, ...) -> i32` | `create_text(String, r, g, b, size)` |
 | `gpui_add_child(parent, child)` | `add_child(parent, child)` |
-| `gpui_reset()` | `reset()` |
+| `gpui_set_root(handle) -> i32` | `set_root(handle)` — ルートを指定 |
+| `gpui_commit_tree() -> i32` | `commit_tree()` — コミットして差し替え |
+| `gpui_abort_tree() -> i32` | `abort_tree()` — 破棄 |
 | `gpui_run_window(w, h)` | `run_window(w, h)` — GPUI イベントループ内でブロックする |
 
 テキストの ABI は明示的に借用（borrow）した UTF-8 バイト列である:
@@ -64,8 +71,11 @@ int32_t gpui_create_text(const uint8_t *ptr, int32_t len,
 | `GPUI_STATUS_WRONG_NODE_KIND`（`-2`） | 要求した操作がそのノード種別には適用できない |
 | `GPUI_STATUS_NODE_ABSENT`（`-3`） | ノードは既に `gpui_add_child` で別のノードへ移動済み |
 | `GPUI_STATUS_INTERNAL_PANIC`（`-4`） | C 境界を越える前に Rust の panic を捕捉した |
+| `GPUI_STATUS_NO_ACTIVE_TREE`（`-5`） | `begin_tree` なしで構成/`set_root`/`commit` を呼んだ |
+| `GPUI_STATUS_TREE_IN_PROGRESS`（`-6`） | 既にトランザクションが開いている状態で `begin_tree` を呼んだ |
+| `GPUI_STATUS_NO_ROOT`（`-7`） | `set_root` 前に `commit_tree` を呼んだ |
 
-セッター群、`gpui_reset`、`gpui_run_window` はこれらのステータスを返す。現在の高レベル MoonBit ラッパーはこれらの戻り値に `ignore` を呼ぶため、呼び出し元はエラーを観測できない。生成呼び出しは、非負のハンドルか負のステータスのいずれかを返す。
+セッター群、トランザクション操作（`begin_tree`/`set_root`/`commit_tree`/`abort_tree`）、`gpui_run_window` はこれらのステータスを返す。現在の高レベル MoonBit ラッパーはこれらの戻り値に `ignore` を呼ぶため、呼び出し元はエラーを観測できない。生成呼び出しは、非負のハンドルか負のステータスのいずれかを返す。
 
 ### 4b. Rust → MoonBit（イベントコールバック）
 
@@ -83,17 +93,17 @@ int32_t gpui_create_text(const uint8_t *ptr, int32_t len,
 sequenceDiagram
   participant M as MoonBit main
   participant A as app (MoonBit)
-  participant S as gpui-sys (NODES + render)
+  participant S as gpui-sys (VIEWS + BUILDER + render)
   participant G as GPUI ループ
   M->>A: build_tree()
-  A->>S: gpui_reset / create_* / set_* / add_child
+  A->>S: begin_tree / create_* / set_* / add_child / set_root / commit_tree
   M->>G: run_window(600, 500) [ブロック]
-  G->>S: FfiView::render が NODES をスナップショットしリスナーを配線
+  G->>S: FfiView::render が VIEWS をスナップショットしリスナーを配線
   Note over G: クリックまたはキー
   G->>A: mb_dispatch(kind, id, a, b)
   alt 状態が変化
     A->>A: count を変更
-    A->>S: gpui_reset + ツリー再構築
+    A->>S: begin_tree + ツリー再構築 + commit_tree
     A-->>G: 1 を返す
     G->>G: cx.notify()
     G->>S: FfiView::render を再度実行

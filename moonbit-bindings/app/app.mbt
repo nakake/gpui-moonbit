@@ -147,7 +147,7 @@ fn make_button(
 
 ///|
 pub fn build_tree() -> Unit {
-  @username/gpui-bindings.reset()
+  @username/gpui-bindings.begin_tree(0)
   let root = @username/gpui-bindings.create_div()
   ignore(@username/gpui-bindings.set_bg(root, 28, 30, 38))
   ignore(@username/gpui-bindings.set_flex_col(root))
@@ -200,4 +200,7 @@ pub fn build_tree() -> Unit {
     "keys:  k +1    j -1    r reset", 130, 135, 148, 14.0,
   )
   ignore(@username/gpui-bindings.add_child(root, hint))
+
+  @username/gpui-bindings.set_root(root)
+  @username/gpui-bindings.commit_tree()
 }

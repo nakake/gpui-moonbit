@@ -2,13 +2,22 @@
 // Do not edit manually
 
 ///|
+extern "C" fn gpui_begin_tree_ffi(view : Int) -> Int = "gpui_begin_tree"
+
+///|
+extern "C" fn gpui_set_root_ffi(handle : Int) -> Int = "gpui_set_root"
+
+///|
+extern "C" fn gpui_commit_tree_ffi() -> Int = "gpui_commit_tree"
+
+///|
+extern "C" fn gpui_abort_tree_ffi() -> Int = "gpui_abort_tree"
+
+///|
 extern "C" fn gpui_create_div_ffi() -> Int = "gpui_create_div"
 
 ///|
 extern "C" fn gpui_set_on_click_ffi(handle : Int, click_id : Int) -> Int = "gpui_set_on_click"
-
-///|
-extern "C" fn gpui_reset_ffi() -> Int = "gpui_reset"
 
 ///|
 extern "C" fn gpui_set_size_ffi(handle : Int, w : Float, h : Float) -> Int = "gpui_set_size"

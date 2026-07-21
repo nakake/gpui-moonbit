@@ -116,6 +116,26 @@ pub fn set_on_click(handle : NodeHandle, click_id : Int) -> NodeHandle {
 }
 
 ///|
-pub fn reset() -> Unit {
-  ignore(gpui_reset_ffi())
+/// Begin staging a new tree for `view`. Configure calls populate it until
+/// `commit_tree` or `abort_tree` closes the transaction.
+pub fn begin_tree(view : Int) -> Unit {
+  ignore(gpui_begin_tree_ffi(view))
+}
+
+///|
+/// Designate `handle` as the root of the staged tree.
+pub fn set_root(handle : NodeHandle) -> Unit {
+  ignore(gpui_set_root_ffi(handle))
+}
+
+///|
+/// Commit the staged tree, replacing the previous committed tree for the view.
+pub fn commit_tree() -> Unit {
+  ignore(gpui_commit_tree_ffi())
+}
+
+///|
+/// Discard the staged tree without committing.
+pub fn abort_tree() -> Unit {
+  ignore(gpui_abort_tree_ffi())
 }
