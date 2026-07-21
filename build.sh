@@ -57,8 +57,19 @@ normalize_native_libs() {
   local lib
   local normalized=""
 
-  if [ "$OS_PKG" = linux ]; then
-    for lib in $native_libs; do
+  for lib in $native_libs; do
+    # Drop libc: the cc driver links it implicitly, and passing -lc
+    # explicitly fails in moon's native link on some environments
+    # (CI ubuntu-latest reports "cannot find -lc").
+    case "$lib" in
+      -lc) continue ;;
+    esac
+    # macOS has no standalone libm (math lives in libSystem); drop it there.
+    # Linux needs -lm: the Rust staticlib references exp/log2/log directly.
+    if [ "$OS_PKG" = macos ] && [ "$lib" = "-lm" ]; then
+      continue
+    fi
+    if [ "$OS_PKG" = linux ]; then
       case "$lib" in
         -lxcb)          lib=-l:libxcb.so.1 ;;
         -lxcb-xkb)      lib=-l:libxcb-xkb.so.1 ;;
@@ -68,16 +79,16 @@ normalize_native_libs() {
       if [ "$lib" = -l:libxcb-xkb.so.1 ] && [[ " $normalized " == *" $lib "* ]]; then
         continue
       fi
-      normalized="${normalized:+$normalized }$lib"
-    done
+    fi
+    normalized="${normalized:+$normalized }$lib"
+  done
+  if [ "$OS_PKG" = linux ]; then
     case " $normalized " in
       *' -l:libxcb-xkb.so.1 '*) ;;
       *) normalized="$normalized -l:libxcb-xkb.so.1" ;;
     esac
-    printf '%s\n' "$normalized"
-  else
-    printf '%s\n' "$native_libs"
   fi
+  printf '%s\n' "$normalized"
 }
 
 write_moon_pkg() {
