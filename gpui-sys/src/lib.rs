@@ -11,7 +11,16 @@ use abi_constants::{
 // Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
 const _: () = assert!(ABI_VERSION > 0);
 
-static NODES: Mutex<Vec<Option<UiNode>>> = Mutex::new(Vec::new());
+/// Committed trees, one slot per view id. `render` reads the slot for its own
+/// view; a successful `gpui_commit_tree` swaps a freshly built tree into it.
+/// `None` = no tree committed yet (the view renders empty).
+static VIEWS: Mutex<Vec<Option<UiNode>>> = Mutex::new(Vec::new());
+
+/// The in-flight staging builder. `gpui_begin_tree` installs one, the
+/// `create_*`/`set_*`/`add_child`/`set_root` calls populate it, and
+/// `gpui_commit_tree` (on success) or `gpui_abort_tree` clears it. `None` = no
+/// transaction is active, so configure calls fail with `NO_ACTIVE_TREE`.
+static BUILDER: Mutex<Option<TreeBuilder>> = Mutex::new(None);
 
 /// Operation completed successfully.
 pub const GPUI_STATUS_OK: i32 = 0;
@@ -23,6 +32,12 @@ pub const GPUI_STATUS_WRONG_NODE_KIND: i32 = -2;
 pub const GPUI_STATUS_NODE_ABSENT: i32 = -3;
 /// An internal panic was caught before it could cross the C boundary.
 pub const GPUI_STATUS_INTERNAL_PANIC: i32 = -4;
+/// A configure / `set_root` / `commit` call was made with no active `gpui_begin_tree`.
+pub const GPUI_STATUS_NO_ACTIVE_TREE: i32 = -5;
+/// `gpui_begin_tree` was called while another transaction is still open.
+pub const GPUI_STATUS_TREE_IN_PROGRESS: i32 = -6;
+/// `gpui_commit_tree` was called before `gpui_set_root` designated a root.
+pub const GPUI_STATUS_NO_ROOT: i32 = -7;
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
 // symbol for an executable build, so we bind directly to the compiled MoonBit
@@ -58,11 +73,26 @@ enum UiNode {
     },
 }
 
-fn with_nodes<F, R>(f: F) -> R
+/// A staging tree under construction. `nodes` holds every node created since
+/// `begin_tree`, indexed by handle; `add_child` moves a node out of its slot
+/// into its parent's `children`, leaving `None` behind (the move-on-attach
+/// semantics). `root` records which handle `set_root` designated; `commit_tree`
+/// moves that node into `VIEWS`.
+struct TreeBuilder {
+    view: usize,
+    nodes: Vec<Option<UiNode>>,
+    root: Option<usize>,
+}
+
+fn with_builder<F>(f: F) -> i32
 where
-    F: FnOnce(&mut Vec<Option<UiNode>>) -> R,
+    F: FnOnce(&mut TreeBuilder) -> i32,
 {
-    f(&mut NODES.lock().unwrap_or_else(|e| e.into_inner()))
+    let mut guard = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_mut() {
+        Some(builder) => f(builder),
+        None => GPUI_STATUS_NO_ACTIVE_TREE,
+    }
 }
 
 fn report_panic(context: &str, payload: &(dyn Any + Send)) {
@@ -107,12 +137,102 @@ fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
     id
 }
 
+// --- Transaction lifecycle -------------------------------------------------
+
+/// Begin staging a new tree for `view`. Fails with `TREE_IN_PROGRESS` if a
+/// transaction is already open (one at a time). Configure calls (`create_*`,
+/// `set_*`, `add_child`, `set_root`) populate the staging builder until
+/// `commit_tree` or `abort_tree` closes it.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_begin_tree(view: i32) -> i32 {
+    ffi_export("gpui_begin_tree", || {
+        if view < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        let mut guard = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            return GPUI_STATUS_TREE_IN_PROGRESS;
+        }
+        *guard = Some(TreeBuilder {
+            view: view as usize,
+            nodes: Vec::new(),
+            root: None,
+        });
+        GPUI_STATUS_OK
+    })
+}
+
+/// Designate `handle` as the root of the staged tree. The node must still be
+/// present (not already moved into another node by `add_child`).
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_set_root(handle: i32) -> i32 {
+    ffi_export("gpui_set_root", || {
+        with_builder(|builder| {
+            if handle < 0 {
+                return GPUI_STATUS_INVALID_HANDLE;
+            }
+            match builder.nodes.get(handle as usize) {
+                None => GPUI_STATUS_INVALID_HANDLE,
+                Some(None) => GPUI_STATUS_NODE_ABSENT,
+                Some(Some(_)) => {
+                    builder.root = Some(handle as usize);
+                    GPUI_STATUS_OK
+                }
+            }
+        })
+    })
+}
+
+/// Commit the staged tree: move the root node into `VIEWS` for the view named
+/// by `begin_tree`, replacing whatever was committed before. Only succeeds if
+/// `set_root` was called and the root is still present; on any failure the
+/// staged tree is discarded and the previous committed tree is untouched.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_commit_tree() -> i32 {
+    ffi_export("gpui_commit_tree", || {
+        let mut guard = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(builder) = guard.as_ref() else {
+            return GPUI_STATUS_NO_ACTIVE_TREE;
+        };
+        let Some(root_index) = builder.root else {
+            return GPUI_STATUS_NO_ROOT;
+        };
+        if builder.nodes[root_index].is_none() {
+            return GPUI_STATUS_NODE_ABSENT;
+        }
+        // Validation passed; take the builder and swap the root into VIEWS.
+        let mut builder = guard.take().expect("builder was present");
+        let root_node = builder
+            .nodes
+            .get_mut(root_index)
+            .and_then(Option::take)
+            .expect("root presence was validated");
+        let mut views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        if builder.view >= views.len() {
+            views.resize(builder.view + 1, None);
+        }
+        views[builder.view] = Some(root_node);
+        GPUI_STATUS_OK
+    })
+}
+
+/// Discard the staged tree without committing. Always succeeds.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_abort_tree() -> i32 {
+    ffi_export("gpui_abort_tree", || {
+        *BUILDER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        GPUI_STATUS_OK
+    })
+}
+
+// --- Node construction / configuration (operate on the active builder) -----
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_create_div() -> i32 {
     ffi_export("gpui_create_div", || {
-        with_nodes(|nodes| {
+        with_builder(|builder| {
             push_node(
-                nodes,
+                &mut builder.nodes,
                 UiNode::Div {
                     width: 0.0,
                     height: 0.0,
@@ -135,7 +255,7 @@ pub extern "C" fn gpui_create_div() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_set_on_click(handle: i32, click_id: i32) -> i32 {
     ffi_export("gpui_set_on_click", || {
-        with_nodes(|nodes| match div_mut(nodes, handle) {
+        with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
             Ok(UiNode::Div { on_click, .. }) => {
                 *on_click = Some(click_id);
                 GPUI_STATUS_OK
@@ -146,20 +266,10 @@ pub extern "C" fn gpui_set_on_click(handle: i32, click_id: i32) -> i32 {
     })
 }
 
-/// Clear the whole node tree so MoonBit can rebuild it from scratch (used on
-/// re-render after a click).
-#[unsafe(no_mangle)]
-pub extern "C" fn gpui_reset() -> i32 {
-    ffi_export("gpui_reset", || {
-        with_nodes(|nodes| nodes.clear());
-        GPUI_STATUS_OK
-    })
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_set_size(handle: i32, w: f32, h: f32) -> i32 {
     ffi_export("gpui_set_size", || {
-        with_nodes(|nodes| match div_mut(nodes, handle) {
+        with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
             Ok(UiNode::Div { width, height, .. }) => {
                 *width = w;
                 *height = h;
@@ -174,7 +284,7 @@ pub extern "C" fn gpui_set_size(handle: i32, w: f32, h: f32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_set_bg(handle: i32, r: u8, g: u8, b: u8) -> i32 {
     ffi_export("gpui_set_bg", || {
-        with_nodes(|nodes| match div_mut(nodes, handle) {
+        with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
             Ok(UiNode::Div { bg, .. }) => {
                 *bg = Some((r, g, b));
                 GPUI_STATUS_OK
@@ -188,7 +298,7 @@ pub extern "C" fn gpui_set_bg(handle: i32, r: u8, g: u8, b: u8) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_set_flex(handle: i32, col: i32) -> i32 {
     ffi_export("gpui_set_flex", || {
-        with_nodes(|nodes| match div_mut(nodes, handle) {
+        with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
             Ok(UiNode::Div { flex, flex_col, .. }) => {
                 *flex = true;
                 *flex_col = col != 0;
@@ -203,7 +313,7 @@ pub extern "C" fn gpui_set_flex(handle: i32, col: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_set_center(handle: i32) -> i32 {
     ffi_export("gpui_set_center", || {
-        with_nodes(|nodes| match div_mut(nodes, handle) {
+        with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
             Ok(UiNode::Div { center, .. }) => {
                 *center = true;
                 GPUI_STATUS_OK
@@ -217,7 +327,7 @@ pub extern "C" fn gpui_set_center(handle: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_set_gap(handle: i32, gap: f32) -> i32 {
     ffi_export("gpui_set_gap", || {
-        with_nodes(|nodes| match div_mut(nodes, handle) {
+        with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
             Ok(UiNode::Div { gap: value, .. }) => {
                 *value = gap;
                 GPUI_STATUS_OK
@@ -231,7 +341,7 @@ pub extern "C" fn gpui_set_gap(handle: i32, gap: f32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_set_rounded(handle: i32, radius: f32) -> i32 {
     ffi_export("gpui_set_rounded", || {
-        with_nodes(|nodes| match div_mut(nodes, handle) {
+        with_builder(|builder| match div_mut(&mut builder.nodes, handle) {
             Ok(UiNode::Div { rounded, .. }) => {
                 *rounded = radius;
                 GPUI_STATUS_OK
@@ -258,9 +368,9 @@ pub extern "C" fn gpui_create_text(
             String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
                 .into_owned()
         };
-        with_nodes(|nodes| {
+        with_builder(|builder| {
             push_node(
-                nodes,
+                &mut builder.nodes,
                 UiNode::Text {
                     content,
                     color: (r, g, b),
@@ -274,7 +384,8 @@ pub extern "C" fn gpui_create_text(
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_add_child(parent: i32, child: i32) -> i32 {
     ffi_export("gpui_add_child", || {
-        with_nodes(|nodes| {
+        with_builder(|builder| {
+            let nodes = &mut builder.nodes;
             if parent < 0 || child < 0 || parent == child {
                 return GPUI_STATUS_INVALID_HANDLE;
             }
@@ -327,7 +438,7 @@ fn run_window(width: f32, height: f32) {
                     // so key events never arrive.
                     let focus = cx.focus_handle();
                     window.focus(&focus);
-                    FfiView { focus }
+                    FfiView { focus, view: 0 }
                 })
             },
         )
@@ -366,20 +477,18 @@ fn run_window_with_fallback(width: f32, height: f32) -> i32 {
 
 struct FfiView {
     focus: FocusHandle,
+    /// Index into `VIEWS` whose committed tree this view renders.
+    view: usize,
 }
 
 impl Render for FfiView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let nodes = {
-            let guard = NODES.lock().unwrap_or_else(|e| e.into_inner());
-            guard.iter().flatten().cloned().collect::<Vec<_>>()
+        // Render the committed root for this view (swapped in by `commit_tree`).
+        // Cloned out so the lock is not held while building GPUI elements.
+        let root = {
+            let guard = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+            guard.get(self.view).cloned().flatten()
         };
-        let mut children = Vec::new();
-        for node in &nodes {
-            if let Some(el) = render_node(node, cx, true) {
-                children.push(el);
-            }
-        }
         let mut d = div()
             .size_full()
             .flex()
@@ -393,7 +502,11 @@ impl Render for FfiView {
                     notify_if_changed(changed, || cx.notify());
                 }
             }));
-        d.extend(children);
+        if let Some(node) = &root {
+            if let Some(el) = render_node(node, cx, true) {
+                d = d.child(el);
+            }
+        }
         d
     }
 }
@@ -525,24 +638,53 @@ mod tests {
 
     static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
+    /// Clear both the staging builder and committed views. White-box test
+    /// isolation — the FFI has no "wipe everything" call by design.
+    fn clear_state() {
+        *BUILDER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        VIEWS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
     struct TestReset;
 
     impl Drop for TestReset {
         fn drop(&mut self) {
-            assert_eq!(gpui_reset(), GPUI_STATUS_OK);
+            clear_state();
         }
     }
 
     fn with_test(f: impl FnOnce()) {
         let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(gpui_reset(), GPUI_STATUS_OK);
+        clear_state();
         let _reset = TestReset;
         f();
     }
 
+    /// Inspect the staging builder's nodes (panics if no transaction is open).
+    fn with_builder_nodes<F, R>(f: F) -> R
+    where
+        F: FnOnce(&[Option<UiNode>]) -> R,
+    {
+        let guard = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
+        let builder = guard.as_ref().expect("test expects an active builder");
+        f(&builder.nodes)
+    }
+
+    /// Inspect the committed view trees.
+    fn with_views<F, R>(f: F) -> R
+    where
+        F: FnOnce(&[Option<UiNode>]) -> R,
+    {
+        let guard = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        f(&guard)
+    }
+
+    // --- Node construction / configuration (within a transaction) ----------
+
     #[::core::prelude::v1::test]
     fn creates_nodes_and_sets_div_fields() {
         with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
             let div = gpui_create_div();
             assert_eq!(div, 0);
             let text_bytes = "A\0あ".as_bytes();
@@ -558,7 +700,7 @@ mod tests {
             assert_eq!(gpui_set_rounded(div, 8.0), GPUI_STATUS_OK);
             assert_eq!(gpui_set_on_click(div, 9), GPUI_STATUS_OK);
 
-            with_nodes(|nodes| {
+            with_builder_nodes(|nodes| {
                 assert!(matches!(
                     &nodes[div as usize],
                     Some(UiNode::Div {
@@ -589,6 +731,7 @@ mod tests {
     #[::core::prelude::v1::test]
     fn setters_reject_negative_out_of_range_and_text_handles() {
         with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
             let div = gpui_create_div();
             let text = gpui_create_text(std::ptr::null(), 0, 1, 2, 3, 14.0);
 
@@ -602,7 +745,7 @@ mod tests {
             assert_eq!(gpui_set_size(text, 1.0, 2.0), GPUI_STATUS_WRONG_NODE_KIND);
             assert_eq!(gpui_set_bg(text, 1, 2, 3), GPUI_STATUS_WRONG_NODE_KIND);
 
-            with_nodes(|nodes| {
+            with_builder_nodes(|nodes| {
                 assert!(matches!(
                     &nodes[div as usize],
                     Some(UiNode::Div {
@@ -633,19 +776,20 @@ mod tests {
     #[::core::prelude::v1::test]
     fn wrong_parent_preserves_child() {
         with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
             let parent = gpui_create_text(std::ptr::null(), 0, 0, 0, 0, 12.0);
             let child = gpui_create_div();
 
             assert_eq!(gpui_add_child(-1, child), GPUI_STATUS_INVALID_HANDLE);
             assert_eq!(gpui_add_child(99, child), GPUI_STATUS_INVALID_HANDLE);
             assert_eq!(gpui_add_child(parent, child), GPUI_STATUS_WRONG_NODE_KIND);
-            with_nodes(|nodes| {
+            with_builder_nodes(|nodes| {
                 assert!(matches!(nodes[child as usize], Some(UiNode::Div { .. })));
             });
 
             let valid_parent = gpui_create_div();
             assert_eq!(gpui_add_child(valid_parent, child), GPUI_STATUS_OK);
-            with_nodes(|nodes| {
+            with_builder_nodes(|nodes| {
                 assert!(nodes[child as usize].is_none());
                 assert!(matches!(
                     &nodes[valid_parent as usize],
@@ -658,6 +802,7 @@ mod tests {
     #[::core::prelude::v1::test]
     fn attaching_child_moves_it_and_rejects_duplicates() {
         with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
             let parent = gpui_create_div();
             let other_parent = gpui_create_div();
             let child = gpui_create_div();
@@ -666,7 +811,7 @@ mod tests {
             assert_eq!(gpui_set_center(child), GPUI_STATUS_NODE_ABSENT);
             assert_eq!(gpui_add_child(parent, child), GPUI_STATUS_NODE_ABSENT);
             assert_eq!(gpui_add_child(other_parent, child), GPUI_STATUS_NODE_ABSENT);
-            with_nodes(|nodes| {
+            with_builder_nodes(|nodes| {
                 assert!(nodes[child as usize].is_none());
                 assert!(matches!(
                     &nodes[parent as usize],
@@ -679,9 +824,10 @@ mod tests {
     #[::core::prelude::v1::test]
     fn self_attachment_preserves_parent() {
         with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
             let parent = gpui_create_div();
             assert_eq!(gpui_add_child(parent, parent), GPUI_STATUS_INVALID_HANDLE);
-            with_nodes(|nodes| {
+            with_builder_nodes(|nodes| {
                 assert!(matches!(
                     &nodes[parent as usize],
                     Some(UiNode::Div { children, .. }) if children.is_empty()
@@ -690,15 +836,180 @@ mod tests {
         });
     }
 
+    // --- Transaction lifecycle ---------------------------------------------
+
     #[::core::prelude::v1::test]
-    fn reset_invalidates_handles_and_restarts_allocation() {
+    fn configure_without_transaction_fails() {
         with_test(|| {
-            let old = gpui_create_div();
-            assert_eq!(gpui_reset(), GPUI_STATUS_OK);
-            assert_eq!(gpui_set_center(old), GPUI_STATUS_INVALID_HANDLE);
+            assert_eq!(gpui_create_div(), GPUI_STATUS_NO_ACTIVE_TREE);
+            assert_eq!(gpui_set_center(0), GPUI_STATUS_NO_ACTIVE_TREE);
+            assert_eq!(gpui_add_child(0, 1), GPUI_STATUS_NO_ACTIVE_TREE);
+            assert_eq!(gpui_set_root(0), GPUI_STATUS_NO_ACTIVE_TREE);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_NO_ACTIVE_TREE);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn begin_tree_rejects_nested_transaction() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            assert_eq!(gpui_begin_tree(1), GPUI_STATUS_TREE_IN_PROGRESS);
+            // The first transaction is still active.
             assert_eq!(gpui_create_div(), 0);
         });
     }
+
+    #[::core::prelude::v1::test]
+    fn begin_tree_rejects_negative_view() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(-1), GPUI_STATUS_INVALID_HANDLE);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn commit_without_root_fails_and_keeps_builder() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let _div = gpui_create_div();
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_NO_ROOT);
+            // The builder is still active (failed commit does not consume it).
+            assert_eq!(gpui_create_div(), 1);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn commit_moves_root_to_views() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let root = gpui_create_div();
+            assert_eq!(gpui_set_bg(root, 1, 2, 3), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(root), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
+            // Builder is consumed.
+            assert_eq!(gpui_create_div(), GPUI_STATUS_NO_ACTIVE_TREE);
+            // VIEWS[0] holds the committed root.
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { bg: Some((1, 2, 3)), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn commit_replaces_previous_tree() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let first = gpui_create_div();
+            assert_eq!(gpui_set_bg(first, 1, 2, 3), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(first), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
+
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let second = gpui_create_div();
+            assert_eq!(gpui_set_bg(second, 4, 5, 6), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(second), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
+
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { bg: Some((4, 5, 6)), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn commit_to_distinct_views() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let v0 = gpui_create_div();
+            assert_eq!(gpui_set_bg(v0, 1, 0, 0), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(v0), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
+
+            assert_eq!(gpui_begin_tree(1), GPUI_STATUS_OK);
+            let v1 = gpui_create_div();
+            assert_eq!(gpui_set_bg(v1, 0, 1, 0), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(v1), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
+
+            with_views(|views| {
+                assert!(matches!(&views[0], Some(UiNode::Div { bg: Some((1, 0, 0)), .. })));
+                assert!(matches!(&views[1], Some(UiNode::Div { bg: Some((0, 1, 0)), .. })));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn abort_discards_staged_tree_and_restarts_allocation() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let old = gpui_create_div();
+            assert_eq!(gpui_abort_tree(), GPUI_STATUS_OK);
+            // After abort, configure calls fail (no active builder).
+            assert_eq!(gpui_set_center(old), GPUI_STATUS_NO_ACTIVE_TREE);
+            // A new transaction restarts allocation from 0.
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            assert_eq!(gpui_create_div(), 0);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn abort_preserves_committed_tree() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let root = gpui_create_div();
+            assert_eq!(gpui_set_bg(root, 1, 2, 3), GPUI_STATUS_OK);
+            assert_eq!(gpui_set_root(root), GPUI_STATUS_OK);
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_OK);
+
+            // Start a new transaction and abort it.
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let _staged = gpui_create_div();
+            assert_eq!(gpui_abort_tree(), GPUI_STATUS_OK);
+
+            // The committed tree is untouched.
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { bg: Some((1, 2, 3)), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_root_rejects_moved_node() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let parent = gpui_create_div();
+            let child = gpui_create_div();
+            assert_eq!(gpui_add_child(parent, child), GPUI_STATUS_OK);
+            // child was moved into parent; set_root(child) must fail.
+            assert_eq!(gpui_set_root(child), GPUI_STATUS_NODE_ABSENT);
+            // parent is still present and can be the root.
+            assert_eq!(gpui_set_root(parent), GPUI_STATUS_OK);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn commit_fails_if_root_was_moved_after_set_root() {
+        with_test(|| {
+            assert_eq!(gpui_begin_tree(0), GPUI_STATUS_OK);
+            let parent = gpui_create_div();
+            let child = gpui_create_div();
+            assert_eq!(gpui_set_root(child), GPUI_STATUS_OK);
+            // Move the designated root into another node.
+            assert_eq!(gpui_add_child(parent, child), GPUI_STATUS_OK);
+            // Commit must fail: the root slot is now empty.
+            assert_eq!(gpui_commit_tree(), GPUI_STATUS_NODE_ABSENT);
+        });
+    }
+
+    // --- Notification gate -------------------------------------------------
 
     #[::core::prelude::v1::test]
     fn notification_gate_accepts_only_changed_one() {
@@ -710,6 +1021,8 @@ mod tests {
         notify_if_changed(1, || calls.set(calls.get() + 1));
         assert_eq!(calls.get(), 1);
     }
+
+    // --- Cross-boundary ABI drift guard ------------------------------------
 
     /// Cross-boundary drift guard (issue #8: EVENT_*/EV_* compatibility).
     ///
