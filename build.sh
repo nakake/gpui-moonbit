@@ -196,7 +196,7 @@ echo "==> [1a/5] MoonBit typecheck"
 echo "==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)"
 write_moon_pkg ""
 if ! ( cd "$MB" && moon build ) 2>&1 | tee "$BUILD_OUTPUT"; then
-  if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|${PKG_FN_SUFFIX}" "$BUILD_OUTPUT"; then
+  if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|${PKG_FN_SUFFIX}" "$BUILD_OUTPUT"; then
     echo "    (expected bootstrap native-link failure — final link remains strict)"
   else
     echo "ERROR: MoonBit build failed for a non-link reason." >&2

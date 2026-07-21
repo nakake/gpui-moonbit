@@ -144,7 +144,7 @@ if ($ec -eq 0) {
   $coldText = $coldOutput -join "`n"
   # MSVC reports a missing input lib as LNK1181 and an unresolved external as
   # LNK2019/1120 (locale-independent codes; messages are localized).
-  if ($coldText -match '(?i)undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|3app8dispatch|LNK1104|LNK1181|LNK2019|LNK1120') {
+  if ($coldText -match '(?i)undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|3app8dispatch|LNK1104|LNK1181|LNK2019|LNK1120') {
     Write-Host '    Expected cold-link failure: gpui_sys.lib or callback is not available yet; continuing.'
   } else {
     $coldOutput | Out-Host
