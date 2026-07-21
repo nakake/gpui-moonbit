@@ -283,22 +283,31 @@ echo "    native libs: $NATIVE_LIBS"
 # moon's native linker appends -lc (Linux) and -lm (macOS) itself. In
 # environments where the linker does not inherit cc's default search paths
 # (observed on GitHub Actions ubuntu-latest and macos-latest), those implicit
-# flags fail with "cannot find -lc" / "library 'm' not found". Add the system
-# library directory explicitly so they resolve regardless of the linker's
-# built-in path list.
+# flags fail with "cannot find -lc" / "library 'm' not found".
+#
+# Linux: export LIBRARY_PATH so GNU ld finds libc.so regardless of how moon
+# invokes the linker.
+# macOS: new SDKs don't ship standalone libm (math lives in libSystem).
+# Create a shim so moon's implicit -lm resolves.
 case "$OS_PKG" in
   linux)
-    SYS_LIB_DIR="$(dirname "$(cc -print-file-name=libc.so)")"
+    SYS_LIB_DIR="$(cd "$(dirname "$(cc -print-file-name=libc.so)")" && pwd)"
     if [ -d "$SYS_LIB_DIR" ]; then
-      NATIVE_LIBS="$NATIVE_LIBS -L${SYS_LIB_DIR}"
-      echo "    system lib dir: $SYS_LIB_DIR"
+      export LIBRARY_PATH="${SYS_LIB_DIR}${LIBRARY_PATH:+:$LIBRARY_PATH}"
+      echo "    LIBRARY_PATH: $LIBRARY_PATH"
     fi
     ;;
   macos)
     SDK_LIB_DIR="$(xcrun --show-sdk-path)/usr/lib"
-    if [ -d "$SDK_LIB_DIR" ]; then
-      NATIVE_LIBS="$NATIVE_LIBS -L${SDK_LIB_DIR}"
-      echo "    system lib dir: $SDK_LIB_DIR"
+    if [ -d "$SDK_LIB_DIR" ] && [ ! -e "$SDK_LIB_DIR/libm.dylib" ] && [ ! -e "$SDK_LIB_DIR/libm.tbd" ]; then
+      SHIM_DIR="$(mktemp -d)"
+      if [ -e "$SDK_LIB_DIR/libSystem.tbd" ]; then
+        ln -s "$SDK_LIB_DIR/libSystem.tbd" "$SHIM_DIR/libm.tbd"
+      else
+        ln -s /usr/lib/libSystem.B.dylib "$SHIM_DIR/libm.dylib"
+      fi
+      NATIVE_LIBS="$NATIVE_LIBS -L$SHIM_DIR"
+      echo "    libm shim: $SHIM_DIR"
     fi
     ;;
 esac
