@@ -147,7 +147,7 @@ sequenceDiagram
 
 ## 9. 検証の範囲
 
-`gpui-sys/` での `GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` は、リンクされた MoonBit コールバックを必要とせずに、ノードストアのハンドル、ステータス、セッター、attach 時の移動、通知ゲートの挙動を固定する。追加の環境変数によるオプトインは、誤った `--all-features` での本番ビルドが実際のコールバックを暗黙に置き換えることを防ぐ。`moonbit-bindings/` からは、`moon check` が MoonBit モジュールを型チェックし、`moon test` が高レベルバインディングとイベントの変化/不変化の遷移を検証する。これらはコールバック抽出や最終的な言語横断リンケージは検証しない。それらの統合チェックはルートのドライバが実行する。Issue #8 は、完全にクリーンな `_build`/`target` ビルドと、MoonBit→C→Rust の完全な境界を通過する非 ASCII/埋め込み NUL テキストに関する、より広範な自動化の作業を依然として保持している。現在のテストは MoonBit の UTF-8 エンコードと Rust のポインタ/長デコードを個別にカバーする。Rust の C エクスポート変更後の生成 FFI の鮮度は、bindgen が Cargo によるヘッダー再生成より前に実行されるため、§6 で述べた再実行/再確認が依然として必要である。有効なルートの CI 設定は存在しない。WSL/Linux は 2026-07-20 にフルビルド、Rust のみの強制再リンク、GUI での `+1` 操作で再確認済み。最新の Windows 確認は 2026-07-19。macOS は再確認していない。
+`gpui-sys/` での `GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` は、リンクされた MoonBit コールバックを必要とせずに、ノードストアのハンドル、ステータス、セッター、attach 時の移動、通知ゲート、および `abi.toml` と生成済み Rust/MoonBit 定数の境界横断一致（drift guard）を固定する。追加の環境変数によるオプトインは、誤った `--all-features` での本番ビルドが実際のコールバックを暗黙に置き換えることを防ぐ。`moonbit-bindings/` からは、`moon check` が MoonBit モジュールを型チェックし、`moon test` が高レベルバインディングとイベントの変化/不変化の遷移を検証する。これらはコールバック抽出や最終的な言語横断リンケージは検証しない。それらの統合チェックはルートのドライバが実行する。Issue #8 は、完全にクリーンな `_build`/`target` ビルドと、MoonBit→C→Rust の完全な境界を通過する非 ASCII/埋め込み NUL テキストに関する、より広範な自動化の作業を依然として保持している。現在のテストは MoonBit の UTF-8 エンコードと Rust のポインタ/長デコードを個別にカバーする。Rust の C エクスポート変更後の生成 FFI の鮮度は、bindgen が Cargo によるヘッダー再生成より前に実行されるため、§6 で述べた再実行/再確認が依然として必要である。有効なルートの CI 設定は存在しない。WSL/Linux は 2026-07-20 にフルビルド、Rust のみの強制再リンク、GUI での `+1` 操作で再確認済み。最新の Windows 確認は 2026-07-19。macOS は再確認していない。
 
 ## 10. ファイル → 関心事マップ
 
