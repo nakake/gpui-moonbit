@@ -24,61 +24,61 @@
 
 ## 3. 実行時モデル（retained tree）
 
-- Rust は `gpui-sys/src/lib.rs` に 2 つの静的ストアを保持する。
+- Rust は `gpui-sys/src/lib.rs` に 1 つの静的ストアを保持する。
   - `static VIEWS: Mutex<Vec<Option<UiNode>>>` — view id ごとのコミット済みツリー。`render` は自分の view のスロットを読む。
-  - `static BUILDER: Mutex<Option<TreeBuilder>>` — 構築中のステージングツリー（トランザクション）。`None` はトランザクション非アクティブ。
-  `UiNode` は `Div { size, bg, flex/flex_col, center, gap, rounded, on_click, children }` または `Text { content, color, size }` のいずれかである。
-- ツリー構築はトランザクションである。`begin_tree(view)` がステージング builder を開き、`create_*`/`set_*`/`add_child`/`set_root` がそれを構成し、`commit_tree()` が成功時のみルートノードを `VIEWS[view]` へ差し替える。`abort_tree()` は破棄する。失敗した commit は builder を消費せず、以前のコミット済みツリーも無傷である。
-- MoonBit はハンドル経由でノードを構築する。`create_div` と `create_text` が builder のスロットへノードをプッシュする。生成が成功すると非負の `i32` ハンドルを返す。負の戻り値はステータス/エラーである。セッター群と `add_child` はハンドル経由で変更を加える。トランザクション外の構成呼び出しは `GPUI_STATUS_NO_ACTIVE_TREE` を返す。
-- `add_child(parent, child)` は子ノードを親の `children` へ移動し、子のスロットは空（absent）になる。
-- `set_root(handle)` はステージングツリーのルートを指定する。指定されたノードがその後 `add_child` で移動されると、`commit_tree` は `GPUI_STATUS_NODE_ABSENT` で失敗する。
+  `UiNode` は `Div { size, bg, flex/flex_col, center, gap, rounded, on_click, key, children }` または `Text { content, color, size }` のいずれかである。
+- ツリー構築は **コマンドバッファ**（issue #5）である。MoonBit は `CommandBuffer` に全ノードの記述を 1 つの length-delimited な opcode ストリームとして蓄積し、`build_tree(view, cb)` 1 回の FFI 呼び出しで送信する。Rust はこれをパースしてステージングツリーを組み、ルートとキー重複を検証し、成功時のみ `VIEWS[view]` へ差し替える。失敗時はステージング状態を破棄し、以前のコミット済みツリーは無傷である。
+- コマンドバッファはスタックマシンである。ノード生成（`div`/`text`）がハンドルを内部スタックへ push し、セッターはスタックトップに適用され、`add_child` は child・parent の順に pop して parent を再 push し、`set_root` はトップを pop してルートにする。
 - `FfiView::render` は、mutex を保持したまま自分の view のコミット済みルートをクローンして `VIEWS` をスナップショットし、mutex を解放してから GPUI の要素/リスナーを構築する。これによりロックをリスナーとコールバックの経路から外す。コミット済みツリーがなければ空で描画する。
 - 外側の Rust レンダリングコンテナ（MoonBit が生成したルートノードではない）は全サイズの flex column で、`FfiView.focus` を追跡し `on_key_down` を受け取る。各 div は安定キーがあればそれを GPUI `ElementId`（`"gpui_key:{key}"`）として使い、なければクリック可能 div に限り click_id から ID（`"gpui_click"`）を合成する。クリック可能な div には `on_click` リスナーが割り当てられる。
-- 状態変更イベントの後、MoonBit は新しいトランザクションでツリーをゼロから再構築して commit する。何もしないイベントは再構築も commit もスキップする。
-- **安定ノード識別（issue #9）**: `set_key(handle, key)` は div に明示的な安定キーを設定する。設定されたキーは GPUI の `ElementId`（`"gpui_key:{key}"`）になり、クリック有無に関わらず再構築を跨いで stateful element の同一性を保つ。キー未設定のクリック可能 div は従来どおり click_id から ID を合成する（`"gpui_click"`）。click_id はアクションルーティング専用であり、キーとは独立（click_id の重複は許容、キーの重複は `commit_tree` が拒否）。
+- 状態変更イベントの後、MoonBit は新しいコマンドバッファでツリーをゼロから再構築して `build_tree` する。何もしないイベントは再構築も commit もスキップする。
+- **安定ノード識別（issue #9）**: `set_key(key)` は div に明示的な安定キーを設定する。設定されたキーは GPUI の `ElementId`（`"gpui_key:{key}"`）になり、クリック有無に関わらず再構築を跨いで stateful element の同一性を保つ。キー未設定のクリック可能 div は従来どおり click_id から ID を合成する（`"gpui_click"`）。click_id はアクションルーティング専用であり、キーとは独立（click_id の重複は許容、キーの重複は `build_tree` が拒否）。
 
 ## 4. FFI 契約（双方向）
 
 ### 4a. MoonBit → Rust（C ABI、UI ビルダー API）
 
-`gpui-sys/include/gpui_sys.h` の C シンボルは、`gpui-sys/src/lib.rs` の Rust 側 `#[unsafe(no_mangle)] pub extern "C"` 関数に対応する。このヘッダーを `bindgen-moonbit` が消費して `gpui-bindings-ffi.mbt` を生成し、`gpui-bindings.mbt` がそれをラップする。
+`gpui-sys/include/gpui_sys.h` の C シンボルは、`gpui-sys/src/lib.rs` の Rust 側 `#[unsafe(no_mangle)] pub extern "C"` 関数に対応する。このヘッダーを `bindgen-moonbit` が消費して `gpui-bindings-ffi.mbt` を生成し、`gpui-bindings.mbt` がそれをラップする。UI 構築の FFI は **2 つだけ**である（issue #5 で property-per-call から集約）:
 
 | C シンボル | MoonBit ラッパー（`gpui-bindings.mbt`） |
 |---|---|
-| `gpui_begin_tree(view) -> i32` | `begin_tree(view)` — トランザクションを開始 |
-| `gpui_create_div() -> i32` | `create_div() -> NodeHandle` |
-| `gpui_set_size/bg/flex/center/gap/rounded(...)` | `set_size`、`set_bg`、`set_flex_row`/`set_flex_col`、`set_center`、`set_gap`、`set_rounded` |
-| `gpui_set_on_click(handle, click_id)` | `set_on_click(handle, click_id)` |
-| `gpui_set_key(handle, ptr, len)` | `set_key(handle, key)` — 安定識別キーを設定 |
-| `gpui_create_text(const uint8_t *ptr, int32_t len, ...) -> i32` | `create_text(String, r, g, b, size)` |
-| `gpui_add_child(parent, child)` | `add_child(parent, child)` |
-| `gpui_set_root(handle) -> i32` | `set_root(handle)` — ルートを指定 |
-| `gpui_commit_tree() -> i32` | `commit_tree()` — コミットして差し替え |
-| `gpui_abort_tree() -> i32` | `abort_tree()` — 破棄 |
+| `gpui_build_tree(view, const uint8_t *ptr, int32_t len) -> i32` | `build_tree(view, cb)` — コマンドバッファ 1 回でツリーを構築・コミット |
 | `gpui_run_window(w, h)` | `run_window(w, h)` — GPUI イベントループ内でブロックする |
 
-テキストの ABI は明示的に借用（borrow）した UTF-8 バイト列である:
+コマンドバッファのワイヤ形式（すべてリトルエンディアン）:
 
-```c
-int32_t gpui_create_text(const uint8_t *ptr, int32_t len,
-                         uint8_t r, uint8_t g, uint8_t b, float size);
+```
+ヘッダ:  "GPUI" (4 bytes) | BUFFER_VERSION (u32)
+OP_DIV            u8
+OP_TEXT           u8 | len u32 | utf8[len] | r u8 | g u8 | b u8 | size f32
+OP_SET_SIZE       u8 | w f32 | h f32
+OP_SET_BG         u8 | r u8 | g u8 | b u8
+OP_SET_FLEX       u8 | col u8
+OP_SET_CENTER     u8
+OP_SET_GAP        u8 | gap f32
+OP_SET_ROUNDED    u8 | radius f32
+OP_SET_ON_CLICK   u8 | click_id i32
+OP_SET_KEY        u8 | len u32 | utf8[len]
+OP_ADD_CHILD      u8            (child, parent の順に pop; parent を再 push)
+OP_SET_ROOT       u8            (トップを pop してルートに)
 ```
 
-生成される FFI 宣言は `#borrow(ptr)` 付きで `Bytes` を受け取る。高レベルの `create_text` は MoonBit の `String` を `@utf8.encode` で変換し、`Bytes` と `Bytes.length()` を渡し、NUL ターミネータを付加することはない。Rust はポインタ/長さをその呼び出しの間だけ読み取り、`String::from_utf8_lossy` でデコードする。
+opcode と `BUFFER_VERSION` は `gpui-sys/abi.toml` の `[opcodes]`/`[buffer]` セクションから両言語へ生成される（Rust は `build.rs`、MoonBit は `build.sh` の awk）。境界横断の定数一致テスト（drift guard）がエンコーダとデコーダの食い違いをコンパイル時ではなく実行時前に検出する。MoonBit の `CommandBuffer` は `@buffer.Buffer` でバイト列を組み、`@utf8.encode` で文字列を UTF-8 化する。Rust はポインタ/長さをその呼び出しの間だけ読み取り、文字列は `String::from_utf8_lossy` でデコードする。
 
 | 戻り値 | 意味 |
 |---|---|
 | `GPUI_STATUS_OK`（`0`） | 操作が正常に完了した |
-| `GPUI_STATUS_INVALID_HANDLE`（`-1`） | ノードハンドルが負、範囲外、重複、または割り当て不能 |
+| `GPUI_STATUS_INVALID_HANDLE`（`-1`） | ハンドル/スタックが負、範囲外、空、または割り当て不能 |
 | `GPUI_STATUS_WRONG_NODE_KIND`（`-2`） | 要求した操作がそのノード種別には適用できない |
-| `GPUI_STATUS_NODE_ABSENT`（`-3`） | ノードは既に `gpui_add_child` で別のノードへ移動済み |
+| `GPUI_STATUS_NODE_ABSENT`（`-3`） | ノードは既に `OP_ADD_CHILD` で別のノードへ移動済み |
 | `GPUI_STATUS_INTERNAL_PANIC`（`-4`） | C 境界を越える前に Rust の panic を捕捉した |
-| `GPUI_STATUS_NO_ACTIVE_TREE`（`-5`） | `begin_tree` なしで構成/`set_root`/`commit` を呼んだ |
-| `GPUI_STATUS_TREE_IN_PROGRESS`（`-6`） | 既にトランザクションが開いている状態で `begin_tree` を呼んだ |
-| `GPUI_STATUS_NO_ROOT`（`-7`） | `set_root` 前に `commit_tree` を呼んだ |
-| `GPUI_STATUS_DUPLICATE_KEY`（`-8`） | コミットするツリー内で 2 つ以上のノードが同じキーを持つ |
+| `GPUI_STATUS_BAD_BUFFER_VERSION`（`-5`） | コマンドバッファの magic またはバージョンが不一致 |
+| `GPUI_STATUS_TRUNCATED_BUFFER`（`-6`） | バッファがフィールド途中で終了、またはペイロードが切り詰め/過大 |
+| `GPUI_STATUS_UNKNOWN_OPCODE`（`-7`） | このビルドが認識しない opcode |
+| `GPUI_STATUS_NO_ROOT`（`-8`） | `OP_SET_ROOT` なしでバッファが終了した |
+| `GPUI_STATUS_DUPLICATE_KEY`（`-9`） | コミットするツリー内で 2 つ以上のノードが同じキーを持つ |
 
-セッター群、トランザクション操作（`begin_tree`/`set_root`/`commit_tree`/`abort_tree`）、`gpui_run_window` はこれらのステータスを返す。現在の高レベル MoonBit ラッパーはこれらの戻り値に `ignore` を呼ぶため、呼び出し元はエラーを観測できない。生成呼び出しは、非負のハンドルか負のステータスのいずれかを返す。
+`gpui_build_tree` と `gpui_run_window` はこれらのステータスを返す。現在の高レベル MoonBit ラッパー `build_tree` は戻り値に `ignore` を呼ぶため、呼び出し元はエラーを観測できない。
 
 ### 4b. Rust → MoonBit（イベントコールバック）
 
@@ -96,17 +96,17 @@ int32_t gpui_create_text(const uint8_t *ptr, int32_t len,
 sequenceDiagram
   participant M as MoonBit main
   participant A as app (MoonBit)
-  participant S as gpui-sys (VIEWS + BUILDER + render)
+  participant S as gpui-sys (VIEWS + render)
   participant G as GPUI ループ
   M->>A: build_tree()
-  A->>S: begin_tree / create_* / set_* / add_child / set_root / commit_tree
+  A->>S: build_tree(view, コマンドバッファ) [1 FFI]
   M->>G: run_window(600, 500) [ブロック]
   G->>S: FfiView::render が VIEWS をスナップショットしリスナーを配線
   Note over G: クリックまたはキー
   G->>A: mb_dispatch(kind, id, a, b)
   alt 状態が変化
     A->>A: count を変更
-    A->>S: begin_tree + ツリー再構築 + commit_tree
+    A->>S: build_tree (コマンドバッファ再構築) [1 FFI]
     A-->>G: 1 を返す
     G->>G: cx.notify()
     G->>S: FfiView::render を再度実行
@@ -160,7 +160,7 @@ sequenceDiagram
 
 ## 9. 検証の範囲
 
-`gpui-sys/` での `GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` は、リンクされた MoonBit コールバックを必要とせずに、ノードストアのハンドル、ステータス、セッター、attach 時の移動、通知ゲート、安定キー（重複拒否・未添付ノード無視・click_id との独立）、および `abi.toml` と生成済み Rust/MoonBit 定数の境界横断一致（drift guard）を固定する。追加の環境変数によるオプトインは、誤った `--all-features` での本番ビルドが実際のコールバックを暗黙に置き換えることを防ぐ。`moonbit-bindings/` からは、`moon check` が MoonBit モジュールを型チェックし、`moon test` が高レベルバインディングとイベントの変化/不変化の遷移を検証する。これらはコールバック抽出や最終的な言語横断リンケージは検証しない。それらの統合チェックはルートのドライバが実行する。Issue #8 は、完全にクリーンな `_build`/`target` ビルドと、MoonBit→C→Rust の完全な境界を通過する非 ASCII/埋め込み NUL テキストに関する、より広範な自動化の作業を依然として保持している。現在のテストは MoonBit の UTF-8 エンコードと Rust のポインタ/長デコードを個別にカバーする。Rust の C エクスポート変更後の生成 FFI の鮮度は、bindgen が Cargo によるヘッダー再生成より前に実行されるため、§6 で述べた再実行/再確認が依然として必要である。有効なルートの CI 設定は存在しない。WSL/Linux は 2026-07-21 にフルビルドと安定キー付き GUI（キー付き 4 ボタン）の起動で再確認済み。最新の Windows 確認は 2026-07-19。macOS は再確認していない。
+`gpui-sys/` での `GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` は、リンクされた MoonBit コールバックを必要とせずに、コマンドバッファのパース（magic/バージョン・opcode・切り詰め・未知 opcode）、スタック/ハンドル検証（空スタック・テキストトップ・add_child のポップ順序・set_root）、コミット検証（ルート必須・キー重複拒否・click_id 重複許容・view ごとの差し替え）、通知ゲート、および `abi.toml` と生成済み Rust/MoonBit 定数（opcode と BUFFER_VERSION を含む）の境界横断一致（drift guard）を固定する。追加の環境変数によるオプトインは、誤った `--all-features` での本番ビルドが実際のコールバックを暗黙に置き換えることを防ぐ。`moonbit-bindings/` からは、`moon check` が MoonBit モジュールを型チェックし、`moon test` が高レベルバインディング（色クランプ・UTF-8 エンコード）とイベントの変化/不変化の遷移を検証する。これらはコールバック抽出や最終的な言語横断リンケージは検証しない。それらの統合チェックはルートのドライバが実行する。Issue #8 は、完全にクリーンな `_build`/`target` ビルドと、MoonBit→C→Rust の完全な境界を通過する非 ASCII/埋め込み NUL テキストに関する、より広範な自動化の作業を依然として保持している。現在の Rust テストはバッファ内の非 ASCII/埋め込み NUL テキストの往復を、MoonBit テストは UTF-8 エンコードを個別にカバーする。Rust の C エクスポート変更後の生成 FFI の鮮度は、bindgen が Cargo によるヘッダー再生成より前に実行されるため、§6 で述べた再実行/再確認が依然として必要である。有効なルートの CI 設定は存在しない。WSL/Linux は 2026-07-21 にフルビルドとコマンドバッファ経由の GUI（キー付き 4 ボタン）起動で再確認済み。最新の Windows 確認は 2026-07-19。macOS は再確認していない。
 
 ## 10. ファイル → 関心事マップ
 

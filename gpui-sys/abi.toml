@@ -11,6 +11,23 @@ MOD_SHIFT = 4
 MOD_PLATFORM = 8
 MOD_FUNCTION = 16
 
+[opcodes]
+OP_DIV = 1
+OP_TEXT = 2
+OP_SET_SIZE = 3
+OP_SET_BG = 4
+OP_SET_FLEX = 5
+OP_SET_CENTER = 6
+OP_SET_GAP = 7
+OP_SET_ROUNDED = 8
+OP_SET_ON_CLICK = 9
+OP_SET_KEY = 10
+OP_ADD_CHILD = 11
+OP_SET_ROOT = 12
+
+[buffer]
+BUFFER_VERSION = 1
+
 [callback]
 name = "dispatch"
 params = ["i32", "i32", "i32", "i32"]

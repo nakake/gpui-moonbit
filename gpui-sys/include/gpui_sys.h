@@ -34,89 +34,36 @@
 #define gpui_GPUI_STATUS_INTERNAL_PANIC -4
 
 /**
- * A configure / `set_root` / `commit` call was made with no active `gpui_begin_tree`.
+ * The command buffer header magic or version did not match.
  */
-#define gpui_GPUI_STATUS_NO_ACTIVE_TREE -5
+#define gpui_GPUI_STATUS_BAD_BUFFER_VERSION -5
 
 /**
- * `gpui_begin_tree` was called while another transaction is still open.
+ * The command buffer ended mid-field, or carried a truncated/oversized payload.
  */
-#define gpui_GPUI_STATUS_TREE_IN_PROGRESS -6
+#define gpui_GPUI_STATUS_TRUNCATED_BUFFER -6
 
 /**
- * `gpui_commit_tree` was called before `gpui_set_root` designated a root.
+ * The command buffer named an opcode this build does not recognize.
  */
-#define gpui_GPUI_STATUS_NO_ROOT -7
+#define gpui_GPUI_STATUS_UNKNOWN_OPCODE -7
+
+/**
+ * `gpui_build_tree` finished without an `OP_SET_ROOT` designating a root.
+ */
+#define gpui_GPUI_STATUS_NO_ROOT -8
 
 /**
  * Two or more nodes in the committed tree carry the same explicit key.
  */
-#define gpui_GPUI_STATUS_DUPLICATE_KEY -8
+#define gpui_GPUI_STATUS_DUPLICATE_KEY -9
 
 /**
- * Begin staging a new tree for `view`. Fails with `TREE_IN_PROGRESS` if a
- * transaction is already open (one at a time). Configure calls (`create_*`,
- * `set_*`, `add_child`, `set_root`) populate the staging builder until
- * `commit_tree` or `abort_tree` closes it.
+ * Build and commit a tree for `view` from one command buffer. On any failure
+ * the staging state is discarded and the previously committed tree is left
+ * untouched.
  */
-int32_t gpui_begin_tree(int32_t view);
-
-/**
- * Designate `handle` as the root of the staged tree. The node must still be
- * present (not already moved into another node by `add_child`).
- */
-int32_t gpui_set_root(int32_t handle);
-
-/**
- * Commit the staged tree: move the root node into `VIEWS` for the view named
- * by `begin_tree`, replacing whatever was committed before. Only succeeds if
- * `set_root` was called and the root is still present; on any failure the
- * staged tree is discarded and the previous committed tree is untouched.
- */
-int32_t gpui_commit_tree(void);
-
-/**
- * Discard the staged tree without committing. Always succeeds.
- */
-int32_t gpui_abort_tree(void);
-
-int32_t gpui_create_div(void);
-
-/**
- * Mark a div as clickable. `click_id` is passed back to MoonBit's `dispatch`
- * when the div is clicked.
- */
-int32_t gpui_set_on_click(int32_t handle, int32_t click_id);
-
-/**
- * Set an explicit stable identity for a div, independent of click routing.
- * `key` is a borrowed UTF-8 byte slice (`ptr`, `len`); it is copied. When set,
- * the key becomes the GPUI `ElementId` so stateful-element identity survives
- * rebuilds even for non-clickable divs. Duplicate keys within one committed
- * tree are rejected by `gpui_commit_tree`.
- */
-int32_t gpui_set_key(int32_t handle, const uint8_t *ptr, int32_t len);
-
-int32_t gpui_set_size(int32_t handle, float w, float h);
-
-int32_t gpui_set_bg(int32_t handle, uint8_t r, uint8_t g, uint8_t b);
-
-int32_t gpui_set_flex(int32_t handle, int32_t col);
-
-int32_t gpui_set_center(int32_t handle);
-
-int32_t gpui_set_gap(int32_t handle, float gap);
-
-int32_t gpui_set_rounded(int32_t handle, float radius);
-
-int32_t gpui_create_text(const uint8_t *ptr,
-                         int32_t len,
-                         uint8_t r,
-                         uint8_t g,
-                         uint8_t b,
-                         float size);
-
-int32_t gpui_add_child(int32_t parent, int32_t child);
+int32_t gpui_build_tree(int32_t view, const uint8_t *ptr, int32_t len);
 
 int32_t gpui_run_window(float width, float height);
 

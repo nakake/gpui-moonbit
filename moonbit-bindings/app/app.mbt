@@ -123,86 +123,63 @@ fn on_key(code : Int, _mods : Int) -> Int {
   }
 }
 
-// Build one labelled, clickable button and return its handle.
+// Build one labelled, clickable button onto the command buffer. The button div
+// is pushed, configured, given a text label child, and left on the stack so the
+// caller can `add_child` it into its parent.
 
 ///|
 fn make_button(
+  cb : @username/gpui-bindings.CommandBuffer,
   key : String,
   label : String,
   click_id : Int,
   r : Int,
   g : Int,
   b : Int,
-) -> @username/gpui-bindings.NodeHandle {
-  let btn = @username/gpui-bindings.create_div()
-  ignore(@username/gpui-bindings.set_key(btn, key))
-  ignore(@username/gpui-bindings.set_size(btn, 92.0, 56.0))
-  ignore(@username/gpui-bindings.set_bg(btn, r, g, b))
-  ignore(@username/gpui-bindings.set_rounded(btn, 10.0))
-  ignore(@username/gpui-bindings.set_flex_col(btn))
-  ignore(@username/gpui-bindings.set_center(btn))
-  ignore(@username/gpui-bindings.set_on_click(btn, click_id))
-  let lbl = @username/gpui-bindings.create_text(label, 255, 255, 255, 18.0)
-  ignore(@username/gpui-bindings.add_child(btn, lbl))
-  btn
+) -> Unit {
+  cb.div()
+  cb.set_key(key)
+  cb.set_size(92.0, 56.0)
+  cb.set_bg(r, g, b)
+  cb.set_rounded(10.0)
+  cb.set_flex_col()
+  cb.set_center()
+  cb.set_on_click(click_id)
+  cb.text(label, 255, 255, 255, 18.0)
+  cb.add_child() // attach the label to the button; button stays on top
 }
 
 ///|
 pub fn build_tree() -> Unit {
-  @username/gpui-bindings.begin_tree(0)
-  let root = @username/gpui-bindings.create_div()
-  ignore(@username/gpui-bindings.set_bg(root, 28, 30, 38))
-  ignore(@username/gpui-bindings.set_flex_col(root))
-  ignore(@username/gpui-bindings.set_center(root))
-  ignore(@username/gpui-bindings.set_gap(root, 28.0))
-  let title = @username/gpui-bindings.create_text(
-    "Counter", 236, 239, 245, 30.0,
-  )
-  ignore(@username/gpui-bindings.add_child(root, title))
-  let value = @username/gpui-bindings.create_text(
-    "Count: \{count[0]}",
-    120,
-    200,
-    255,
-    44.0,
-  )
-  ignore(@username/gpui-bindings.add_child(root, value))
+  let cb = @username/gpui-bindings.CommandBuffer::new()
+  cb.div() // root
+  cb.set_bg(28, 30, 38)
+  cb.set_flex_col()
+  cb.set_center()
+  cb.set_gap(28.0)
 
-  // A row of buttons; each is just a distinct click_id routed in on_click.
-  let row = @username/gpui-bindings.create_div()
-  ignore(@username/gpui-bindings.set_flex_row(row))
-  ignore(@username/gpui-bindings.set_gap(row, 12.0))
-  ignore(
-    @username/gpui-bindings.add_child(
-      row,
-      make_button("btn-decrement", "-1", BTN_DECREMENT, 200, 80, 80),
-    ),
-  )
-  ignore(
-    @username/gpui-bindings.add_child(
-      row,
-      make_button("btn-reset", "Reset", BTN_RESET, 92, 98, 110),
-    ),
-  )
-  ignore(
-    @username/gpui-bindings.add_child(
-      row,
-      make_button("btn-increment", "+1", BTN_INCREMENT, 70, 160, 95),
-    ),
-  )
-  ignore(
-    @username/gpui-bindings.add_child(
-      row,
-      make_button("btn-increment-10", "+10", BTN_INCREMENT_10, 70, 110, 230),
-    ),
-  )
-  ignore(@username/gpui-bindings.add_child(root, row))
+  cb.text("Counter", 236, 239, 245, 30.0)
+  cb.add_child()
+  cb.text("Count: \{count[0]}", 120, 200, 255, 44.0)
+  cb.add_child()
 
-  let hint = @username/gpui-bindings.create_text(
-    "keys:  k +1    j -1    r reset", 130, 135, 148, 14.0,
-  )
-  ignore(@username/gpui-bindings.add_child(root, hint))
+  // A row of buttons; each is a distinct click_id routed in on_click.
+  cb.div() // row
+  cb.set_flex_row()
+  cb.set_gap(12.0)
+  make_button(cb, "btn-decrement", "-1", BTN_DECREMENT, 200, 80, 80)
+  cb.add_child()
+  make_button(cb, "btn-reset", "Reset", BTN_RESET, 92, 98, 110)
+  cb.add_child()
+  make_button(cb, "btn-increment", "+1", BTN_INCREMENT, 70, 160, 95)
+  cb.add_child()
+  make_button(cb, "btn-increment-10", "+10", BTN_INCREMENT_10, 70, 110, 230)
+  cb.add_child()
+  cb.add_child() // attach the row to the root
 
-  @username/gpui-bindings.set_root(root)
-  @username/gpui-bindings.commit_tree()
+  cb.text("keys:  k +1    j -1    r reset", 130, 135, 148, 14.0)
+  cb.add_child()
+
+  cb.set_root()
+  @username/gpui-bindings.build_tree(0, cb)
 }
