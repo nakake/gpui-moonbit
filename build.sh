@@ -280,6 +280,28 @@ if [ -z "$NATIVE_LIBS" ]; then
 fi
 NATIVE_LIBS="$(normalize_native_libs "$NATIVE_LIBS")"
 echo "    native libs: $NATIVE_LIBS"
+# moon's native linker appends -lc (Linux) and -lm (macOS) itself. In
+# environments where the linker does not inherit cc's default search paths
+# (observed on GitHub Actions ubuntu-latest and macos-latest), those implicit
+# flags fail with "cannot find -lc" / "library 'm' not found". Add the system
+# library directory explicitly so they resolve regardless of the linker's
+# built-in path list.
+case "$OS_PKG" in
+  linux)
+    SYS_LIB_DIR="$(dirname "$(cc -print-file-name=libc.so)")"
+    if [ -d "$SYS_LIB_DIR" ]; then
+      NATIVE_LIBS="$NATIVE_LIBS -L${SYS_LIB_DIR}"
+      echo "    system lib dir: $SYS_LIB_DIR"
+    fi
+    ;;
+  macos)
+    SDK_LIB_DIR="$(xcrun --show-sdk-path)/usr/lib"
+    if [ -d "$SDK_LIB_DIR" ]; then
+      NATIVE_LIBS="$NATIVE_LIBS -L${SDK_LIB_DIR}"
+      echo "    system lib dir: $SDK_LIB_DIR"
+    fi
+    ;;
+esac
 rm -f "$RUST_LIB_DIR/libgpui_sys.dylib" \
       "$RUST_LIB_DIR/libgpui_sys.so" 2>/dev/null || true  # staticlib only; drop any stale dylib/so
 
