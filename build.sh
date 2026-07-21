@@ -264,9 +264,11 @@ echo "    link_name : ${LINK_NAME}  -> ${GSYS}/mb_symbol.txt"
 
 echo "==> [3/5] Build gpui-sys (build.rs reads mb_symbol.txt and generates the extern)"
 ( cd "$GSYS" && cargo build --target "$RUST_TARGET" )
-NATIVE_LIBS="$(cd "$GSYS" && cargo rustc --target "$RUST_TARGET" --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
+NATIVE_LIBS="$(cd "$GSYS" && CARGO_TERM_COLOR=never cargo rustc --target "$RUST_TARGET" --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
   | tr -d '\r' \
-  | awk '/native-static-libs:/ && !found {
+  | awk 'BEGIN { esc = sprintf("%c", 27) }
+    { gsub(esc "\\[[0-9;]*m", "") }
+    /native-static-libs:/ && !found {
       line=$0
       sub(/^.*native-static-libs:[[:space:]]*/, "", line)
       gsub(/[[:space:]]+/, " ", line)
@@ -280,12 +282,13 @@ if [ -z "$NATIVE_LIBS" ]; then
   exit 1
 fi
 NATIVE_LIBS="$(normalize_native_libs "$NATIVE_LIBS")"
-# Belt-and-suspenders: strip -lc (all platforms) and -lm (macOS) in case
-# normalize missed them (observed on CI where the drop did not take effect).
+# Belt-and-suspenders: strip -lc (all platforms) and -lm (macOS).
+# Use regex match to tolerate any invisible characters that may survive
+# from cargo output despite ANSI stripping above.
 NATIVE_LIBS="$(printf '%s\n' "$NATIVE_LIBS" | awk -v os="$OS_PKG" '{
   for (i = 1; i <= NF; i++) {
-    if ($i == "-lc") continue
-    if (os == "macos" && $i == "-lm") continue
+    if ($i ~ /-lc/) continue
+    if (os == "macos" && $i ~ /-lm/) continue
     printf "%s%s", (n++ ? " " : ""), $i
   }
   print ""
@@ -313,17 +316,19 @@ case "$OS_PKG" in
       NATIVE_LIBS="-L$SDK_LIB_DIR $NATIVE_LIBS"
       echo "    SDK lib dir: $SDK_LIB_DIR"
     fi
-    # New macOS SDKs may not ship standalone libm (math lives in libSystem).
-    # Create a shim so the linker can resolve -lm.
-    if [ -d "$SDK_LIB_DIR" ] && [ ! -e "$SDK_LIB_DIR/libm.dylib" ] && [ ! -e "$SDK_LIB_DIR/libm.tbd" ]; then
+    # Always create a libm shim: new macOS SDKs may not ship standalone
+    # libm (math lives in libSystem), and even when libm.tbd exists the
+    # linker invoked by moon may not find it through -L alone.
+    if [ -d "$SDK_LIB_DIR" ]; then
       SHIM_DIR="$(mktemp -d)"
       if [ -e "$SDK_LIB_DIR/libSystem.tbd" ]; then
         ln -s "$SDK_LIB_DIR/libSystem.tbd" "$SHIM_DIR/libm.tbd"
-      else
+      elif [ -e /usr/lib/libSystem.B.dylib ]; then
         ln -s /usr/lib/libSystem.B.dylib "$SHIM_DIR/libm.dylib"
       fi
       NATIVE_LIBS="-L$SHIM_DIR $NATIVE_LIBS"
       echo "    libm shim: $SHIM_DIR"
+      ls "$SDK_LIB_DIR"/libm* 2>/dev/null | sed 's/^/      SDK libm: /' || true
     fi
     ;;
 esac
