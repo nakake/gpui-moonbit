@@ -710,4 +710,88 @@ mod tests {
         notify_if_changed(1, || calls.set(calls.get() + 1));
         assert_eq!(calls.get(), 1);
     }
+
+    /// Cross-boundary drift guard (issue #8: EVENT_*/EV_* compatibility).
+    ///
+    /// The integers Rust ships as the callback `kind` and modifier bits must be
+    /// the exact integers MoonBit decodes. Both sides are generated from
+    /// `gpui-sys/abi.toml`, but generation is independent (build.rs for Rust,
+    /// build.sh/awk for MoonBit) and only *warns* on drift — nothing fails. This
+    /// pins the contract headlessly: every compiled Rust constant must equal
+    /// `abi.toml`, and `abi.toml` must equal the generated MoonBit file, so a
+    /// stale or hand-edited generated file on either side fails here rather than
+    /// at runtime.
+    #[::core::prelude::v1::test]
+    fn abi_constants_match_across_boundary() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let root = std::path::Path::new(&manifest);
+
+        // abi.toml is the single source of truth: [section] headers + key = int.
+        let abi_toml = std::fs::read_to_string(root.join("abi.toml")).expect("read abi.toml");
+        let mut expected: std::collections::BTreeMap<String, i32> =
+            std::collections::BTreeMap::new();
+        let mut in_callback = false;
+        for raw in abi_toml.lines() {
+            let line = raw.split('#').next().unwrap().trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                in_callback = name.trim() == "callback";
+                continue;
+            }
+            if in_callback {
+                continue; // callback signature is string-valued, not a numeric constant
+            }
+            let (key, value) = line.split_once('=').expect("abi.toml key = value");
+            let key = key.trim();
+            let Ok(value) = value.trim().parse::<i32>() else {
+                continue; // skip non-integer values defensively
+            };
+            let key = if key == "abi_version" { "ABI_VERSION" } else { key };
+            expected.insert(key.to_string(), value);
+        }
+        assert!(
+            !expected.is_empty(),
+            "abi.toml yielded no numeric constants; parser drift?"
+        );
+
+        // 1) Compiled Rust constants must equal the source of truth.
+        let rust_constants = [
+            ("ABI_VERSION", ABI_VERSION),
+            ("EVENT_CLICK", EVENT_CLICK),
+            ("EVENT_KEY", EVENT_KEY),
+            ("MOD_CTRL", MOD_CTRL),
+            ("MOD_ALT", MOD_ALT),
+            ("MOD_SHIFT", MOD_SHIFT),
+            ("MOD_PLATFORM", MOD_PLATFORM),
+            ("MOD_FUNCTION", MOD_FUNCTION),
+        ];
+        for (name, compiled) in rust_constants {
+            assert_eq!(
+                expected.get(name).copied(),
+                Some(compiled),
+                "Rust {name} drifted from abi.toml (regenerate src/abi_constants.rs via build.rs)"
+            );
+        }
+        for name in expected.keys() {
+            assert!(
+                rust_constants.iter().any(|(n, _)| n == name),
+                "abi.toml constant {name} has no compiled Rust counterpart"
+            );
+        }
+
+        // 2) The generated MoonBit file must carry the same values. Whitespace is
+        //    stripped so the check survives `moon fmt` spacing changes.
+        let mb = std::fs::read_to_string(root.join("../moonbit-bindings/abi_constants.mbt"))
+            .expect("read moonbit-bindings/abi_constants.mbt (run build.sh to regenerate)");
+        let mb_compact: String = mb.chars().filter(|c| !c.is_whitespace()).collect();
+        for (name, value) in &expected {
+            let needle = format!("pubconst{name}:Int={value}");
+            assert!(
+                mb_compact.contains(&needle),
+                "MoonBit abi_constants.mbt missing `pub const {name} : Int = {value}` — regenerate via build.sh"
+            );
+        }
+    }
 }

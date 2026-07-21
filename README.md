@@ -110,7 +110,7 @@ moon check
 moon test
 ```
 
-Rust tests は node store の handle・move-on-attach・status・notification gate の契約を固定し、MoonBit tests は bindings とイベントの changed/unchanged・rebuild gate を検証します。Linux で XCB/XKB の unversioned development link (`libxcb.so` 等) がない場合、Rust test executable のリンクには `-dev` package または同等のローカル link shim が必要です（root app build は versioned runtime library fallback に対応）。実 callback、生成 ABI、最終リンクの統合検証は root の build driver が担います。root のアクティブな CI はありません。WSL/Linux は 2026-07-20 に full build、Rust-only change 後の強制再リンク、GUI の `+1` 操作を再確認しました。Windows の最終確認は 2026-07-19、macOS は今回再確認していません。
+Rust tests は node store の handle・move-on-attach・status・notification gate の契約と、`abi.toml` と生成済み Rust/MoonBit ABI 定数の境界横断一致（drift guard）を固定し、MoonBit tests は bindings とイベントの changed/unchanged・rebuild gate を検証します。Linux で XCB/XKB の unversioned development link (`libxcb.so` 等) がない場合、Rust test executable のリンクには `-dev` package または同等のローカル link shim が必要です（root app build は versioned runtime library fallback に対応）。実 callback、生成 ABI、最終リンクの統合検証は root の build driver が担います。root のアクティブな CI はありません。WSL/Linux は 2026-07-20 に full build、Rust-only change 後の強制再リンク、GUI の `+1` 操作を再確認しました。Windows の最終確認は 2026-07-19、macOS は今回再確認していません。
 
 ## ライセンス
 
