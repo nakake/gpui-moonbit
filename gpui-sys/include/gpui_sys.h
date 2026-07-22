@@ -69,6 +69,15 @@
 int32_t gpui_event_copy_text(int32_t token, uint8_t *buf, int32_t len);
 
 /**
+ * Debug read-back: dump every text node's content from the committed tree for
+ * `view` into `buf` as a sequence of `len u32 LE + utf8[len]` records (DFS
+ * pre-order). Returns the total number of bytes written, or a negative
+ * GPUI_STATUS_* on error. Used by the headless round-trip test (issue #34)
+ * to verify MoonBit→C→Rust text fidelity without a GUI.
+ */
+int32_t gpui_debug_dump_text(int32_t view, uint8_t *buf, int32_t len);
+
+/**
  * Build and commit a tree for `view` from one command buffer. On any failure
  * the staging state is discarded and the previously committed tree is left
  * untouched.

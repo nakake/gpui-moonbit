@@ -181,7 +181,7 @@ pub fn CommandBuffer::set_root(self : CommandBuffer) -> Unit {
 
 ///|
 /// Serialize the accumulated commands to their wire bytes.
-fn CommandBuffer::to_bytes(self : CommandBuffer) -> Bytes {
+pub fn CommandBuffer::to_bytes(self : CommandBuffer) -> Bytes {
   self.buf.to_bytes()
 }
 

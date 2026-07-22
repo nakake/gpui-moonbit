@@ -44,6 +44,7 @@ case "$(uname -s)" in
   *) echo "ERROR: unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
 PKG_TMPL="$MB/cmd/main/moon.pkg.$OS_PKG"
+RT_PKG_TMPL="$MB/cmd/roundtrip/moon.pkg.$OS_PKG"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -92,17 +93,18 @@ normalize_native_libs() {
 }
 
 write_moon_pkg() {
-  local native_libs="$1"
-  local destination="$MB/cmd/main/moon.pkg"
+  local template="$1"
+  local destination="$2"
+  local native_libs="$3"
   local output
   output="$(while IFS= read -r line || [ -n "$line" ]; do
     line="${line//@RUST_LIB_DIR@/$RUST_LIB_DIR}"
     printf '%s\n' "${line//@NATIVE_LIBS@/$native_libs}"
-  done < "$PKG_TMPL")"
-  if [ ! -f "$destination" ] || ! cmp -s "$PKG_TMPL" "$destination" || grep -q '@NATIVE_LIBS@' "$destination" ||
+  done < "$template")"
+  if [ ! -f "$destination" ] || ! cmp -s "$template" "$destination" || grep -q '@NATIVE_LIBS@' "$destination" ||
      [ "$(cat "$destination")" != "$output" ]; then
     printf '%s\n' "$output" > "$destination"
-    echo "==> wrote cmd/main/moon.pkg ($OS_PKG)"
+    echo "==> wrote ${destination#"$MB"/} ($OS_PKG)"
   fi
 }
 
@@ -205,7 +207,8 @@ echo "==> [1a/5] MoonBit typecheck"
 ( cd "$MB" && moon check ) || { echo "ERROR: MoonBit compilation failed" >&2; exit 1; }
 
 echo "==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)"
-write_moon_pkg ""
+write_moon_pkg "$PKG_TMPL" "$MB/cmd/main/moon.pkg" ""
+write_moon_pkg "$RT_PKG_TMPL" "$MB/cmd/roundtrip/moon.pkg" ""
 if ! ( cd "$MB" && moon build ) 2>&1 | tee "$BUILD_OUTPUT"; then
   if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|${PKG_FN_SUFFIX}" "$BUILD_OUTPUT"; then
     echo "    (expected bootstrap native-link failure — final link remains strict)"
@@ -338,18 +341,21 @@ esac
 rm -f "$RUST_LIB_DIR/libgpui_sys.dylib" \
       "$RUST_LIB_DIR/libgpui_sys.so" 2>/dev/null || true  # staticlib only; drop any stale dylib/so
 
-echo "==> [4/5] Final MoonBit build (links libgpui_sys.a + resolves the callback)"
-write_moon_pkg "$NATIVE_LIBS"
+echo "==> [4/6] Final MoonBit build (links libgpui_sys.a + resolves the callback)"
+write_moon_pkg "$PKG_TMPL" "$MB/cmd/main/moon.pkg" "$NATIVE_LIBS"
+write_moon_pkg "$RT_PKG_TMPL" "$MB/cmd/roundtrip/moon.pkg" "$NATIVE_LIBS"
 echo "    moon.pkg link flags:"
 grep 'cc-link-flags' "$MB/cmd/main/moon.pkg" | sed 's/^/      /'
 # moon does not track the external libgpui_sys.a, so a gpui-sys-only change would
 # NOT trigger a relink of the executable (it would silently keep a stale exe).
 # Remove the linked outputs so moon re-links against the freshly built .a.
 rm -f "$MB"/_build/native/debug/build/cmd/main/main.exe \
-      "$MB"/_build/native/debug/build/cmd/main/__moonbit_link_core__/main.o 2>/dev/null || true
+      "$MB"/_build/native/debug/build/cmd/main/__moonbit_link_core__/main.o \
+      "$MB"/_build/native/debug/build/cmd/roundtrip/roundtrip.exe \
+      "$MB"/_build/native/debug/build/cmd/roundtrip/__moonbit_link_core__/roundtrip.o 2>/dev/null || true
 ( cd "$MB" && moon build )
 
-echo "==> [5/5] Verify exactly one callback definition in the final binary"
+echo "==> [5/6] Verify exactly one callback definition in the final binary"
 EXE="$MB/_build/native/debug/build/cmd/main/main.exe"
 if [ ! -f "$EXE" ]; then
   echo "ERROR: final executable not found at $EXE" >&2
@@ -365,6 +371,17 @@ if [ "$CALLBACK_MATCHES" -ne 1 ]; then
   exit 1
 fi
 echo "    Verified: ${LINK_NAME} is defined exactly once"
+
+echo "==> [6/6] Run headless round-trip test (issue #34)"
+RT_EXE="$MB/_build/native/debug/build/cmd/roundtrip/roundtrip.exe"
+if [ ! -f "$RT_EXE" ]; then
+  echo "ERROR: roundtrip executable not found at $RT_EXE" >&2
+  exit 1
+fi
+case "$OS_PKG" in
+  linux) ( cd "$MB" && env -u WAYLAND_DISPLAY LD_LIBRARY_PATH="$PWD/../.linux-libs" "$RT_EXE" ) ;;
+  macos) "$RT_EXE" ;;
+esac
 
 
 case "$OS_PKG" in

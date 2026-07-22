@@ -1,0 +1,16 @@
+import {
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/encoding/utf8",
+  "username/gpui-bindings",
+  "username/gpui-bindings/app",
+}
+
+options(
+  "is-main": true,
+  link: {
+    "native": {
+      "cc-flags": "-I../gpui-sys/include",
+      "cc-link-flags": "-L@RUST_LIB_DIR@ -L../.linux-libs -lgpui_sys @NATIVE_LIBS@",
+    },
+  },
+)
