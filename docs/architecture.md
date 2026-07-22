@@ -139,10 +139,11 @@ sequenceDiagram
 6. MoonBit のリンク済み出力を削除して再度ビルドし、新しい Rust 静的ライブラリと Cargo 由来のネイティブ依存に対して強制的に再リンクする。
 7. リンケージを検証する。macOS/Linux は最終バイナリを調べ、コールバック定義がちょうど 1 つであることを確認する。Windows は、MoonBit の `main.obj` にコールバック定義が 1 つ、`gpui_sys.lib` に未解決参照が 1 つあること、および最終リンクが成功することを検証する（リンク済み PE は通常 COFF シンボルテーブルを省略するため）。
 8. ヘッドレス往復テスト（`cmd/roundtrip`）を実行する。MoonBit がエッジケースのテキスト（NUL バイト・多バイト UTF-8・4 バイト絵文字）を含むツリーを `gpui_build_tree` で送信し、`gpui_debug_dump_text` で読み戻してバイト単位で比較する。GUI なしで MoonBit→C→Rust→C→MoonBit の完全な FFI 往復を検証する（issue #34）。
+9. macOS のみ: `bundle.sh` を呼び出して実行ファイルを `dist/Counter.app` にバンドルする（デフォルト。`--no-bundle` で省略）。素の Mach-O バイナリには macOS がキーボードイベントを配送しないため、キーボード入力に必要である。
 
 最初の bindgen ステップは、必然的に 1 つ前の Rust ビルド由来のヘッダーを参照する。したがって、Rust の C エクスポートを変更した後は、必要に応じてドライバを再実行/再確認し、新たに再生成されたヘッダーと追跡対象の `gpui-bindings-ffi.mbt` を同期させること。最初の 1 回の bindgen 呼び出しが、同じドライバ実行内で後から再生成されるヘッダーを消費したと仮定してはならない。
 
-`gpui-sys` は `staticlib` である。その未解決の `mb_dispatch` 参照は、最終的な MoonBit 実行ファイルのリンク時にのみ解決される。プラットフォームのテンプレートには、検出された Rust ライブラリディレクトリと Cargo 由来のネイティブリンクフラグ用のプレースホルダが含まれる。Linux は上述の SONAME 互換正規化を適用する。macOS では `bundle.sh` が `dist/Counter.app` を作成し、キーボードの配送にはこのバンドルが必要である。Linux では実行ファイルを直接使う。`.linux-libs` は、利用できないシステムの XCB/XKB ランタイムライブラリ用の、無視されるローカルフォールバックである。WSLg では `env -u WAYLAND_DISPLAY` が確実な明示的 X11 起動方法である。Rust は Wayland 起動時の panic を捕捉し、その変数を除去して 1 度だけ再試行する。Windows は `build.ps1` が用意する MSVC x64 セットアップを使う。
+`gpui-sys` は `staticlib` である。その未解決の `mb_dispatch` 参照は、最終的な MoonBit 実行ファイルのリンク時にのみ解決される。プラットフォームのテンプレートには、検出された Rust ライブラリディレクトリと Cargo 由来のネイティブリンクフラグ用のプレースホルダが含まれる。Linux は上述の SONAME 互換正規化を適用する。macOS ではドライバが最後に `bundle.sh` を呼び出して `dist/Counter.app` を作成する（デフォルト。`--no-bundle` で省略）。キーボードの配送にはこのバンドルが必要である。Linux では実行ファイルを直接使う。`.linux-libs` は、利用できないシステムの XCB/XKB ランタイムライブラリ用の、無視されるローカルフォールバックである。WSLg では `env -u WAYLAND_DISPLAY` が確実な明示的 X11 起動方法である。Rust は Wayland 起動時の panic を捕捉し、その変数を除去して 1 度だけ再試行する。Windows は `build.ps1` が用意する MSVC x64 セットアップを使う。
 
 ## 7. 不変条件と落とし穴
 
