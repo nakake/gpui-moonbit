@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit toolchain (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Install MoonBit toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          irm https://cli.moonbitlang.com/install/powershell.ps1 | iex
+          echo "$env:USERPROFILE\.moon\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install XCB/XKB development libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libc6-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      - name: Cold build (Unix)
+        if: runner.os != 'Windows'
+        run: ./build.sh
+
+      - name: Cold build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Rust unit tests
+        working-directory: gpui-sys
+        env:
+          GPUI_SYS_ALLOW_TEST_DISPATCH_STUB: "1"
+        run: cargo test --features test-dispatch-stub
+
+      - name: MoonBit tests
+        working-directory: moonbit-bindings
+        run: moon test
+
+      - name: Rebuild after Rust-only change (Unix)
+        if: runner.os != 'Windows'
+        run: touch gpui-sys/src/lib.rs && ./build.sh
+
+      - name: Rebuild after Rust-only change (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-Item gpui-sys\src\lib.rs).LastWriteTime = Get-Date
+          .\build.ps1

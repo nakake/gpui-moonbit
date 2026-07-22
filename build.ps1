@@ -144,7 +144,7 @@ if ($ec -eq 0) {
   $coldText = $coldOutput -join "`n"
   # MSVC reports a missing input lib as LNK1181 and an unresolved external as
   # LNK2019/1120 (locale-independent codes; messages are localized).
-  if ($coldText -match '(?i)undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|3app8dispatch|LNK1104|LNK1181|LNK2019|LNK1120') {
+  if ($coldText -match '(?i)undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|3app8dispatch|LNK1104|LNK1181|LNK2019|LNK1120') {
     Write-Host '    Expected cold-link failure: gpui_sys.lib or callback is not available yet; continuing.'
   } else {
     $coldOutput | Out-Host
@@ -184,11 +184,17 @@ if (-not $env:RUSTFLAGS) {
   $env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static"
 }
 Push-Location $GSys
-cmd /c "cargo build --target $rustHost 2>&1" | Out-Host
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
+# Capture native-static-libs FIRST: `cargo rustc -- --print` may invalidate
+# the previously built .lib (cargo cleans stale artifacts before invoking
+# rustc, and rustc exits after printing without producing output). Running
+# `cargo build` last guarantees gpui_sys.lib exists for the moon link step.
 $nativeLibs = (cmd /c "cargo rustc --target $rustHost --lib --crate-type staticlib -- --print native-static-libs 2>&1" |
                Select-String 'native-static-libs:' | Select-Object -First 1).Line `
                -replace '.*native-static-libs:\s*', ''
+cmd /c "cargo build --target $rustHost 2>&1" | Out-Host
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
+$gpuiLib = Join-Path $rustTargetDir 'gpui_sys.lib'
+if (-not (Test-Path $gpuiLib)) { Pop-Location; throw "gpui_sys.lib not found at $gpuiLib after cargo build" }
 Pop-Location
 if (-not $nativeLibs) { throw 'could not capture native-static-libs' }
 # /MT already selects libcmt. Do not pass Cargo's CRT default directive before
@@ -252,3 +258,9 @@ if ($references.Count -ne 1) { throw "expected exactly 1 reference to $sym in gp
 Write-Host "    Verified: main.obj defines $sym exactly once"
 Write-Host "    Verified: gpui_sys.lib references $sym exactly once and main.exe linked"
 Write-Host "Done. Run: $exe"
+
+# In CI, export the augmented LIB so subsequent steps (moon test) can find
+# gpui_sys.lib and the extra build-tree / registry .lib directories.
+if ($env:GITHUB_ENV) {
+  Add-Content -Path $env:GITHUB_ENV -Value "LIB=$env:LIB"
+}

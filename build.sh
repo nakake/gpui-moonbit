@@ -57,8 +57,19 @@ normalize_native_libs() {
   local lib
   local normalized=""
 
-  if [ "$OS_PKG" = linux ]; then
-    for lib in $native_libs; do
+  for lib in $native_libs; do
+    # Drop libc: the cc driver links it implicitly, and passing -lc
+    # explicitly fails in moon's native link on some environments
+    # (CI ubuntu-latest reports "cannot find -lc").
+    case "$lib" in
+      -lc) continue ;;
+    esac
+    # macOS has no standalone libm (math lives in libSystem); drop it there.
+    # Linux needs -lm: the Rust staticlib references exp/log2/log directly.
+    if [ "$OS_PKG" = macos ] && [ "$lib" = "-lm" ]; then
+      continue
+    fi
+    if [ "$OS_PKG" = linux ]; then
       case "$lib" in
         -lxcb)          lib=-l:libxcb.so.1 ;;
         -lxcb-xkb)      lib=-l:libxcb-xkb.so.1 ;;
@@ -68,16 +79,16 @@ normalize_native_libs() {
       if [ "$lib" = -l:libxcb-xkb.so.1 ] && [[ " $normalized " == *" $lib "* ]]; then
         continue
       fi
-      normalized="${normalized:+$normalized }$lib"
-    done
+    fi
+    normalized="${normalized:+$normalized }$lib"
+  done
+  if [ "$OS_PKG" = linux ]; then
     case " $normalized " in
       *' -l:libxcb-xkb.so.1 '*) ;;
       *) normalized="$normalized -l:libxcb-xkb.so.1" ;;
     esac
-    printf '%s\n' "$normalized"
-  else
-    printf '%s\n' "$native_libs"
   fi
+  printf '%s\n' "$normalized"
 }
 
 write_moon_pkg() {
@@ -196,7 +207,7 @@ echo "==> [1a/5] MoonBit typecheck"
 echo "==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)"
 write_moon_pkg ""
 if ! ( cd "$MB" && moon build ) 2>&1 | tee "$BUILD_OUTPUT"; then
-  if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|${PKG_FN_SUFFIX}" "$BUILD_OUTPUT"; then
+  if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|${PKG_FN_SUFFIX}" "$BUILD_OUTPUT"; then
     echo "    (expected bootstrap native-link failure — final link remains strict)"
   else
     echo "ERROR: MoonBit build failed for a non-link reason." >&2
@@ -253,8 +264,11 @@ echo "    link_name : ${LINK_NAME}  -> ${GSYS}/mb_symbol.txt"
 
 echo "==> [3/5] Build gpui-sys (build.rs reads mb_symbol.txt and generates the extern)"
 ( cd "$GSYS" && cargo build --target "$RUST_TARGET" )
-NATIVE_LIBS="$(cd "$GSYS" && cargo rustc --target "$RUST_TARGET" --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
-  | awk '/native-static-libs:/ && !found {
+NATIVE_LIBS="$(cd "$GSYS" && CARGO_TERM_COLOR=never cargo rustc --target "$RUST_TARGET" --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
+  | tr -d '\r' \
+  | awk 'BEGIN { esc = sprintf("%c", 27) }
+    { gsub(esc "\\[[0-9;]*m", "") }
+    /native-static-libs:/ && !found {
       line=$0
       sub(/^.*native-static-libs:[[:space:]]*/, "", line)
       gsub(/[[:space:]]+/, " ", line)
@@ -268,12 +282,66 @@ if [ -z "$NATIVE_LIBS" ]; then
   exit 1
 fi
 NATIVE_LIBS="$(normalize_native_libs "$NATIVE_LIBS")"
+# Belt-and-suspenders: strip -lc (all platforms) and -lm (macOS).
+# Use regex match to tolerate any invisible characters that may survive
+# from cargo output despite ANSI stripping above.
+NATIVE_LIBS="$(printf '%s\n' "$NATIVE_LIBS" | awk -v os="$OS_PKG" '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /-lc/) continue
+    if (os == "macos" && $i ~ /-lm/) continue
+    printf "%s%s", (n++ ? " " : ""), $i
+  }
+  print ""
+}')"
 echo "    native libs: $NATIVE_LIBS"
+# moon's native linker appends -lc (Linux) and -lm (macOS) itself. In
+# environments where the linker does not inherit cc's default search paths
+# (observed on GitHub Actions ubuntu-latest and macos-latest), those implicit
+# flags fail with "cannot find -lc" / "library 'm' not found".
+#
+# moon invokes ld directly (not via cc), so LIBRARY_PATH and compiler default
+# search paths do not apply. Prepend -L into NATIVE_LIBS so it reaches ld
+# through the generated moon.pkg cc-link-flags BEFORE any -l flags.
+case "$OS_PKG" in
+  linux)
+    SYS_LIB_DIR="$(cd "$(dirname "$(cc -print-file-name=libc.so)")" && pwd)"
+    if [ -d "$SYS_LIB_DIR" ]; then
+      NATIVE_LIBS="-L$SYS_LIB_DIR $NATIVE_LIBS"
+      echo "    system lib dir: $SYS_LIB_DIR"
+    fi
+    ;;
+  macos)
+    SDK_LIB_DIR="$(xcrun --show-sdk-path)/usr/lib"
+    if [ -d "$SDK_LIB_DIR" ]; then
+      NATIVE_LIBS="-L$SDK_LIB_DIR $NATIVE_LIBS"
+      echo "    SDK lib dir: $SDK_LIB_DIR"
+    fi
+    # Always create a libm shim: new macOS SDKs may not ship standalone
+    # libm (math lives in libSystem), and even when libm.tbd exists the
+    # linker invoked by moon may not find it through -L alone.
+    if [ -d "$SDK_LIB_DIR" ]; then
+      SHIM_DIR="$(mktemp -d)"
+      if [ -e "$SDK_LIB_DIR/libSystem.tbd" ]; then
+        ln -s "$SDK_LIB_DIR/libSystem.tbd" "$SHIM_DIR/libm.tbd"
+      elif [ -e /usr/lib/libSystem.B.dylib ]; then
+        ln -s /usr/lib/libSystem.B.dylib "$SHIM_DIR/libm.dylib"
+      fi
+      NATIVE_LIBS="-L$SHIM_DIR $NATIVE_LIBS"
+      echo "    libm shim: $SHIM_DIR"
+      ls "$SDK_LIB_DIR"/libm* 2>/dev/null | sed 's/^/      SDK libm: /' || true
+    fi
+    # The io_surface crate links IOSurface but cargo's native-static-libs
+    # does not always report it. Add it explicitly.
+    NATIVE_LIBS="$NATIVE_LIBS -framework IOSurface"
+    ;;
+esac
 rm -f "$RUST_LIB_DIR/libgpui_sys.dylib" \
       "$RUST_LIB_DIR/libgpui_sys.so" 2>/dev/null || true  # staticlib only; drop any stale dylib/so
 
 echo "==> [4/5] Final MoonBit build (links libgpui_sys.a + resolves the callback)"
 write_moon_pkg "$NATIVE_LIBS"
+echo "    moon.pkg link flags:"
+grep 'cc-link-flags' "$MB/cmd/main/moon.pkg" | sed 's/^/      /'
 # moon does not track the external libgpui_sys.a, so a gpui-sys-only change would
 # NOT trigger a relink of the executable (it would silently keep a stale exe).
 # Remove the linked outputs so moon re-links against the freshly built .a.
@@ -297,6 +365,7 @@ if [ "$CALLBACK_MATCHES" -ne 1 ]; then
   exit 1
 fi
 echo "    Verified: ${LINK_NAME} is defined exactly once"
+
 
 case "$OS_PKG" in
   macos) echo "Done. Run:  ./bundle.sh && open dist/Counter.app  (keyboard needs the bundle)" ;;
