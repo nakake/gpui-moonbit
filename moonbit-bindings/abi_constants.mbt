@@ -106,4 +106,10 @@ pub const OP_ADD_CHILD : Int = 11
 pub const OP_SET_ROOT : Int = 12
 
 ///|
+pub const OP_SET_PADDING : Int = 13
+
+///|
+pub const OP_SET_BORDER : Int = 14
+
+///|
 pub const BUFFER_VERSION : Int = 1

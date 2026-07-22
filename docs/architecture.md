@@ -59,9 +59,13 @@ OP_SET_GAP        u8 | gap f32
 OP_SET_ROUNDED    u8 | radius f32
 OP_SET_ON_CLICK   u8 | click_id i32
 OP_SET_KEY        u8 | len u32 | utf8[len]
+OP_SET_PADDING    u8 | padding f32
+OP_SET_BORDER     u8 | width f32 | r u8 | g u8 | b u8
 OP_ADD_CHILD      u8            (child, parent の順に pop; parent を再 push)
 OP_SET_ROOT       u8            (トップを pop してルートに)
 ```
+
+opcode の追加は後方互換（issue #42）: 古い Rust バイナリは未知 opcode を `UNKNOWN_OPCODE` で拒否するだけで誤デコードしないため、`BUFFER_VERSION` は既存 opcode の意味が変わったときだけ bump する。
 
 opcode と `BUFFER_VERSION` は `gpui-sys/abi.toml` の `[opcodes]`/`[buffer]` セクションから両言語へ生成される（Rust は `build.rs`、MoonBit は `build.sh` の awk）。境界横断の定数一致テスト（drift guard）がエンコーダとデコーダの食い違いをコンパイル時ではなく実行時前に検出する。MoonBit の `CommandBuffer` は `@buffer.Buffer` でバイト列を組み、`@utf8.encode` で文字列を UTF-8 化する。Rust はポインタ/長さをその呼び出しの間だけ読み取り、文字列は `String::from_utf8_lossy` でデコードする。
 

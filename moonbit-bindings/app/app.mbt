@@ -237,11 +237,19 @@ pub fn build_tree() -> Result[Unit, Int] {
   cb.set_flex_col()
   cb.set_center()
   cb.set_gap(28.0)
+  cb.set_padding(32.0)
 
   cb.text("Counter", 236, 239, 245, 30.0)
   cb.add_child()
+
+  // Count display card: bordered, padded, rounded.
+  cb.div()
+  cb.set_padding(16.0)
+  cb.set_border(2.0, 120, 200, 255)
+  cb.set_rounded(12.0)
   cb.text("Count: \{count[0]}", 120, 200, 255, 44.0)
   cb.add_child()
+  cb.add_child() // attach the card to the root
 
   // A row of buttons; each is a distinct click_id routed in on_click.
   cb.div() // row

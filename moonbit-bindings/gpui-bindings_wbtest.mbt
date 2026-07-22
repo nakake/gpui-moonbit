@@ -97,3 +97,36 @@ test "command buffer text carries embedded NUL as payload data" {
   assert_eq(b[14], b'\x00')
   assert_eq(b[15], b'B')
 }
+
+///|
+test "command buffer set_padding wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_padding(4.0)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_PADDING | f32 padding (LE).
+  assert_eq(b[8].to_int(), OP_SET_PADDING)
+  // 4.0f32 = 0x40800000 -> little-endian 00 00 80 40.
+  assert_eq(b[9], b'\x00')
+  assert_eq(b[10], b'\x00')
+  assert_eq(b[11], b'\x80')
+  assert_eq(b[12], b'\x40')
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_border wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_border(2.0, 10, 20, 30)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_BORDER | f32 width | r u8 | g u8 | b u8.
+  assert_eq(b[8].to_int(), OP_SET_BORDER)
+  // 2.0f32 = 0x40000000 -> little-endian 00 00 00 40.
+  assert_eq(b[9], b'\x00')
+  assert_eq(b[10], b'\x00')
+  assert_eq(b[11], b'\x00')
+  assert_eq(b[12], b'\x40')
+  assert_eq(b[13], b'\x0A')
+  assert_eq(b[14], b'\x14')
+  assert_eq(b[15], b'\x1E')
+  assert_eq(b.length(), 16)
+}

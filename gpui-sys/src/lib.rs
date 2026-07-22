@@ -8,8 +8,9 @@ use abi_constants::{
     ABI_VERSION, BUFFER_VERSION, EVENT_CLICK, EVENT_KEY, EVENT_NAMED_KEY, EVENT_TEXT,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT,
     KEY_PAGEUP, KEY_PAGEDOWN, KEY_RIGHT, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION,
-    MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV, OP_SET_BG, OP_SET_CENTER, OP_SET_FLEX,
-    OP_SET_GAP, OP_SET_KEY, OP_SET_ON_CLICK, OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SIZE, OP_TEXT,
+    MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV, OP_SET_BG, OP_SET_BORDER, OP_SET_CENTER,
+    OP_SET_FLEX, OP_SET_GAP, OP_SET_KEY, OP_SET_ON_CLICK, OP_SET_PADDING, OP_SET_ROOT,
+    OP_SET_ROUNDED, OP_SET_SIZE, OP_TEXT,
 };
 
 // Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
@@ -142,6 +143,9 @@ enum UiNode {
         center: bool,
         gap: f32,
         rounded: f32,
+        padding: f32,
+        border_width: f32,
+        border_color: Option<(u8, u8, u8)>,
         on_click: Option<i32>,
         /// Explicit stable identity, independent of click routing. When set,
         /// `render_node` uses it as the GPUI `ElementId`; duplicate keys within
@@ -221,12 +225,16 @@ fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
 //   OP_SET_ROUNDED    u8 | radius f32
 //   OP_SET_ON_CLICK   u8 | click_id i32
 //   OP_SET_KEY        u8 | len u32 | utf8[len]
+//   OP_SET_PADDING    u8 | padding f32
+//   OP_SET_BORDER     u8 | width f32 | r u8 | g u8 | b u8
 //   OP_ADD_CHILD      u8            (pops child, then parent; re-pushes parent)
 //   OP_SET_ROOT       u8            (pops the root)
 //
 // Opcodes and BUFFER_VERSION are generated from abi.toml on both sides, so a
 // drift fails the cross-boundary constant check rather than corrupting at
-// runtime.
+// runtime. New opcodes are backward-compatible additions (issue #42): an old
+// Rust binary rejects them with `UNKNOWN_OPCODE` rather than misdecoding, so
+// `BUFFER_VERSION` is bumped only when an existing opcode's meaning changes.
 
 const BUFFER_MAGIC: &[u8; 4] = b"GPUI";
 
@@ -344,6 +352,9 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                         center: false,
                         gap: 0.0,
                         rounded: 0.0,
+                        padding: 0.0,
+                        border_width: 0.0,
+                        border_color: None,
                         on_click: None,
                         key: None,
                         children: Vec::new(),
@@ -471,6 +482,40 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                 with_top_div(&stack, &mut nodes, |node| match node {
                     UiNode::Div { key: slot, .. } => {
                         *slot = Some(key);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_PADDING => {
+                let Some(padding) = reader.read_f32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { padding: value, .. } => {
+                        *value = padding;
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_BORDER => {
+                let (Some(width), Some(r), Some(g), Some(b)) = (
+                    reader.read_f32(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div {
+                        border_width,
+                        border_color,
+                        ..
+                    } => {
+                        *border_width = width;
+                        *border_color = Some((r, g, b));
                         GPUI_STATUS_OK
                     }
                     _ => unreachable!("with_top_div guarantees a div"),
@@ -758,6 +803,9 @@ fn render_node(
             center,
             gap,
             rounded,
+            padding,
+            border_width,
+            border_color,
             on_click,
             key,
             children,
@@ -795,6 +843,17 @@ fn render_node(
             }
             if *rounded > 0.0 {
                 d = d.rounded(px(*rounded));
+            }
+            if *padding > 0.0 {
+                d = d.p(px(*padding));
+            }
+            if *border_width > 0.0 {
+                d = d.border(px(*border_width));
+                if let Some((r, g, b)) = border_color {
+                    d = d.border_color(rgb(
+                        ((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32),
+                    ));
+                }
             }
             d.extend(child_elements);
             // Element identity: an explicit key (set via `gpui_set_key`) is the
@@ -960,7 +1019,8 @@ mod tests {
     fn builds_and_commits_a_full_tree() {
         with_test(|| {
             let mut b = Buf::new();
-            // root: bg(1,2,3), flex col, center, gap 7, rounded 8, key "root"
+            // root: bg(1,2,3), flex col, center, gap 7, rounded 8, padding 5,
+            // border 2 (9,9,9), key "root"
             b.div()
                 .op(OP_SET_BG)
                 .u8(1)
@@ -973,6 +1033,13 @@ mod tests {
                 .f32(7.0)
                 .op(OP_SET_ROUNDED)
                 .f32(8.0)
+                .op(OP_SET_PADDING)
+                .f32(5.0)
+                .op(OP_SET_BORDER)
+                .f32(2.0)
+                .u8(9)
+                .u8(9)
+                .u8(9)
                 .op(OP_SET_SIZE)
                 .f32(100.0)
                 .f32(50.0)
@@ -1001,6 +1068,9 @@ mod tests {
                     center: true,
                     gap,
                     rounded,
+                    padding,
+                    border_width,
+                    border_color: Some((9, 9, 9)),
                     on_click: None,
                     key: Some(root_key),
                     children,
@@ -1012,6 +1082,8 @@ mod tests {
                 assert_eq!(*height, 50.0);
                 assert_eq!(*gap, 7.0);
                 assert_eq!(*rounded, 8.0);
+                assert_eq!(*padding, 5.0);
+                assert_eq!(*border_width, 2.0);
                 assert_eq!(root_key, "root");
                 assert_eq!(children.len(), 2);
                 assert!(matches!(
@@ -1116,6 +1188,16 @@ mod tests {
             let mut t = Buf::new();
             t.op(OP_TEXT).u32(999).u8(b'a').set_root();
             assert_eq!(t.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+
+            // OP_SET_PADDING needs an f32; end the buffer right after the opcode.
+            let mut p = Buf::new();
+            p.div().op(OP_SET_PADDING);
+            assert_eq!(p.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+
+            // OP_SET_BORDER needs f32 + 3 bytes; supply width and only 2 bytes.
+            let mut br = Buf::new();
+            br.div().op(OP_SET_BORDER).f32(1.0).u8(1).u8(2);
+            assert_eq!(br.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
         });
     }
 
@@ -1197,6 +1279,52 @@ mod tests {
             let mut b = Buf::new();
             b.text("x", 0, 0, 0, 12.0).op(OP_SET_CENTER);
             assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn padding_and_border_apply_to_div() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_PADDING)
+                .f32(12.0)
+                .op(OP_SET_BORDER)
+                .f32(3.0)
+                .u8(10)
+                .u8(20)
+                .u8(30)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        padding,
+                        border_width,
+                        border_color: Some((10, 20, 30)),
+                        ..
+                    }) if *padding == 12.0 && *border_width == 3.0
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn padding_and_border_on_text_top_fail() {
+        with_test(|| {
+            let mut p = Buf::new();
+            p.text("x", 0, 0, 0, 12.0).op(OP_SET_PADDING).f32(4.0);
+            assert_eq!(p.build(0), GPUI_STATUS_WRONG_NODE_KIND);
+
+            let mut br = Buf::new();
+            br.text("x", 0, 0, 0, 12.0)
+                .op(OP_SET_BORDER)
+                .f32(1.0)
+                .u8(0)
+                .u8(0)
+                .u8(0);
+            assert_eq!(br.build(0), GPUI_STATUS_WRONG_NODE_KIND);
         });
     }
 
@@ -1524,6 +1652,8 @@ mod tests {
             ("OP_SET_ROUNDED", OP_SET_ROUNDED),
             ("OP_SET_ON_CLICK", OP_SET_ON_CLICK),
             ("OP_SET_KEY", OP_SET_KEY),
+            ("OP_SET_PADDING", OP_SET_PADDING),
+            ("OP_SET_BORDER", OP_SET_BORDER),
             ("OP_ADD_CHILD", OP_ADD_CHILD),
             ("OP_SET_ROOT", OP_SET_ROOT),
             ("BUFFER_VERSION", BUFFER_VERSION),
