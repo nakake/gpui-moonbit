@@ -105,7 +105,7 @@ fn main() {
                  GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 explicitly when running gpui-sys tests"
             );
         }
-        "unsafe fn mb_dispatch(_kind: i32, _id: i32, _a: i32, _b: i32) -> i32 {\n    0\n}\n"
+        "unsafe fn mb_dispatch(_version: i32, _kind: i32, _data_a: i32, _data_b: i32) -> i32 {\n    0\n}\n"
             .to_string()
     } else {
         let link_name = std::fs::read_to_string("mb_symbol.txt")
@@ -120,9 +120,10 @@ fn main() {
             );
         }
         // This declaration is generated only after validating the fixed-width
-        // callback signature from abi.toml above.
+        // callback signature from abi.toml above. The four i32 slots carry the
+        // versioned event envelope: (abi_version, event_kind, data_a, data_b).
         format!(
-            "unsafe extern \"C\" {{\n    #[link_name = \"{link_name}\"]\n    fn mb_dispatch(kind: i32, id: i32, a: i32, b: i32) -> i32;\n}}\n"
+            "unsafe extern \"C\" {{\n    #[link_name = \"{link_name}\"]\n    fn mb_dispatch(version: i32, kind: i32, data_a: i32, data_b: i32) -> i32;\n}}\n"
         )
     };
     let out_dir = std::env::var("OUT_DIR").unwrap();

@@ -1,13 +1,16 @@
 // Auto-generated from gpui-sys/abi.toml. Do not edit manually.
 
 ///|
-pub const ABI_VERSION : Int = 2
+pub const ABI_VERSION : Int = 3
 
 ///|
 pub const EVENT_CLICK : Int = 1
 
 ///|
 pub const EVENT_KEY : Int = 2
+
+///|
+pub const EVENT_TEXT : Int = 3
 
 ///|
 pub const MOD_CTRL : Int = 1

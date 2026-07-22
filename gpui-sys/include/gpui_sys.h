@@ -59,6 +59,16 @@
 #define gpui_GPUI_STATUS_DUPLICATE_KEY -9
 
 /**
+ * Copy the text payload for a pending EVENT_TEXT dispatch.
+ *
+ * `token` is the index passed in `data_a`; `buf` must point to at least `len`
+ * writable bytes (the `data_b` value). Returns the number of bytes written,
+ * or a negative GPUI_STATUS_* on error. The payload is valid only during the
+ * dispatch call that provided the token.
+ */
+int32_t gpui_event_copy_text(int32_t token, uint8_t *buf, int32_t len);
+
+/**
  * Build and commit a tree for `view` from one command buffer. On any failure
  * the staging state is discarded and the previously committed tree is left
  * untouched.

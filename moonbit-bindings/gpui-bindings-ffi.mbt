@@ -2,6 +2,14 @@
 // Do not edit manually
 
 ///|
+#borrow(buf)
+extern "C" fn gpui_event_copy_text_ffi(
+  token : Int,
+  buf : Bytes,
+  len : Int,
+) -> Int = "gpui_event_copy_text"
+
+///|
 #borrow(ptr)
 extern "C" fn gpui_build_tree_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "gpui_build_tree"
 
