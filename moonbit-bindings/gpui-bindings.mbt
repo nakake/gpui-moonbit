@@ -167,6 +167,33 @@ pub fn CommandBuffer::set_key(self : CommandBuffer, key : String) -> Unit {
 }
 
 ///|
+/// Set the uniform padding of the div on top of the stack.
+pub fn CommandBuffer::set_padding(
+  self : CommandBuffer,
+  padding : Float,
+) -> Unit {
+  self.op(OP_SET_PADDING)
+  self.buf.write_float_le(padding)
+}
+
+///|
+/// Set the border of the div on top of the stack: a uniform width plus an RGB
+/// color (clamped to 0-255). A non-positive width renders no border.
+pub fn CommandBuffer::set_border(
+  self : CommandBuffer,
+  width : Float,
+  r : Int,
+  g : Int,
+  b : Int,
+) -> Unit {
+  self.op(OP_SET_BORDER)
+  self.buf.write_float_le(width)
+  self.buf.write_byte(clamp_color_component(r).to_byte())
+  self.buf.write_byte(clamp_color_component(g).to_byte())
+  self.buf.write_byte(clamp_color_component(b).to_byte())
+}
+
+///|
 /// Attach the node on top of the stack (child) to the one below it (parent).
 /// The parent stays on top so further children can be attached.
 pub fn CommandBuffer::add_child(self : CommandBuffer) -> Unit {

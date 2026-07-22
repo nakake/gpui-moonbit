@@ -35,4 +35,6 @@ pub(crate) const OP_SET_ON_CLICK: i32 = 9;
 pub(crate) const OP_SET_KEY: i32 = 10;
 pub(crate) const OP_ADD_CHILD: i32 = 11;
 pub(crate) const OP_SET_ROOT: i32 = 12;
+pub(crate) const OP_SET_PADDING: i32 = 13;
+pub(crate) const OP_SET_BORDER: i32 = 14;
 pub(crate) const BUFFER_VERSION: i32 = 1;
