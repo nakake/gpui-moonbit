@@ -188,13 +188,26 @@ pub fn CommandBuffer::to_bytes(self : CommandBuffer) -> Bytes {
 ///|
 /// Build and commit the tree for `view` from one command buffer, replacing the
 /// previously committed tree. This is the single FFI crossing for the whole
-/// tree.
-pub fn build_tree(view : Int, cb : CommandBuffer) -> Unit {
+/// tree. Returns `Err(status)` with a negative `GPUI_STATUS_*` code on failure;
+/// the previously committed tree is left untouched.
+pub fn build_tree(view : Int, cb : CommandBuffer) -> Result[Unit, Int] {
   let bytes = cb.to_bytes()
-  ignore(gpui_build_tree_ffi(view, bytes, bytes.length()))
+  let status = gpui_build_tree_ffi(view, bytes, bytes.length())
+  if status == 0 {
+    Ok(())
+  } else {
+    Err(status)
+  }
 }
 
 ///|
-pub fn run_window(width : Float, height : Float) -> Unit {
-  ignore(gpui_run_window_ffi(width, height))
+/// Open a GPUI window and block in the event loop. Returns `Err(status)` if
+/// the window could not be created or the event loop panicked.
+pub fn run_window(width : Float, height : Float) -> Result[Unit, Int] {
+  let status = gpui_run_window_ffi(width, height)
+  if status == 0 {
+    Ok(())
+  } else {
+    Err(status)
+  }
 }

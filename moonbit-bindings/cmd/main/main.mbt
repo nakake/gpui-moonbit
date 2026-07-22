@@ -7,6 +7,12 @@ fn main {
   let _keep : (Int, Int, Int, Int) -> Int = @username/gpui-bindings/app.dispatch
   ignore(_keep)
 
-  @username/gpui-bindings/app.build_tree()
-  @username/gpui-bindings.run_window(600.0, 500.0)
+  match @username/gpui-bindings/app.build_tree() {
+    Ok(_) => ()
+    Err(status) => abort("initial build_tree failed with status \{status}")
+  }
+  match @username/gpui-bindings.run_window(600.0, 500.0) {
+    Ok(_) => ()
+    Err(status) => abort("run_window failed with status \{status}")
+  }
 }

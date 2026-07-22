@@ -77,10 +77,16 @@ fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
 
 ///|
 pub fn dispatch(version : Int, kind : Int, data_a : Int, data_b : Int) -> Int {
-  rebuild_if_changed(
-    apply_event(decode(version, kind, data_a, data_b)),
-    build_tree,
-  )
+  let changed = apply_event(decode(version, kind, data_a, data_b))
+  if changed == 1 {
+    // Rebuild the tree. On failure the Rust side keeps the old committed tree
+    // (atomic commit), so returning `changed` still lets GPUI re-render it.
+    match build_tree() {
+      Ok(_) => ()
+      Err(status) => println("app: build_tree failed with status \{status}")
+    }
+  }
+  changed
 }
 
 ///|
@@ -91,14 +97,6 @@ fn apply_event(event : Event) -> Int {
     Text(text) => on_text(text)
     Unknown => 0
   }
-}
-
-///|
-fn rebuild_if_changed(changed : Int, rebuild : () -> Unit) -> Int {
-  if changed == 1 {
-    rebuild()
-  }
-  changed
 }
 
 ///|
@@ -209,7 +207,7 @@ fn make_button(
 }
 
 ///|
-pub fn build_tree() -> Unit {
+pub fn build_tree() -> Result[Unit, Int] {
   let cb = @username/gpui-bindings.CommandBuffer::new()
   cb.div() // root
   cb.set_bg(28, 30, 38)
