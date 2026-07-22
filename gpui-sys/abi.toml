@@ -1,8 +1,9 @@
-abi_version = 2
+abi_version = 3
 
 [events]
 EVENT_CLICK = 1
 EVENT_KEY = 2
+EVENT_TEXT = 3
 
 [modifiers]
 MOD_CTRL = 1

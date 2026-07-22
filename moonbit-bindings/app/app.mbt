@@ -1,15 +1,27 @@
 // Interactive app: state + logic, written in MoonBit.
 //
 // `dispatch` is the single event entry point that Rust (gpui-sys) calls via its
-// compiled symbol. It takes a small scalar payload — `kind` selects the event
-// type, and `id`/`a`/`b` carry per-kind data. The FFI surface stays fixed at ONE
-// symbol no matter how many event types (or buttons) we add: new kinds are
-// handled by extending the `Event` enum here, and new buttons are just new
-// `click_id`s routed in `on_click` — neither needs any Rust/FFI change.
+// compiled symbol. The four i32 slots carry a versioned event envelope:
+//   (abi_version, event_kind, data_a, data_b)
+// Slot 0 is always ABI_VERSION so a stale Rust binary is rejected at runtime.
+// Slot 1 selects the event kind; slots 2–3 are kind-dependent:
+//   EVENT_CLICK: data_a = click_id, data_b = 0
+//   EVENT_KEY:   data_a = codepoint, data_b = modifier bits
+//   EVENT_TEXT:  data_a = token, data_b = byte length (copy via gpui_event_copy_text)
 //
 // NOTE: changing `dispatch`'s signature does NOT change the mangled symbol name
 // (MoonBit mangling excludes types), so the Rust `extern` must be kept in sync —
 // it is generated from a template in `gpui-sys/build.rs`.
+
+// Direct FFI: declared here (not in the root package) so `moon test` on
+// gpui-bindings never compiles a reference to the Rust-only symbol.
+///|
+#borrow(buf)
+extern "C" fn gpui_event_copy_text_ffi(
+  token : Int,
+  buf : Bytes,
+  len : Int,
+) -> Int = "gpui_event_copy_text"
 
 ///|
 let count : Array[Int] = [0]
@@ -32,24 +44,43 @@ const BTN_INCREMENT_10 : Int = 4
 priv enum Event {
   Click(Int) // click_id
   Key(Int, Int) // codepoint, modifier bits
+  Text(String) // typed text (UTF-8 decoded)
   Unknown
 }
 
 ///|
-fn decode(kind : Int, id : Int, a : Int, b : Int) -> Event {
-  // Int 定数の比較。const 名を match のパターンにすると束縛と紛れるので if で比較。
+fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
+  // Runtime version handshake: reject a stale Rust binary.
+  if version != @username/gpui-bindings.ABI_VERSION {
+    return Unknown
+  }
   if kind == @username/gpui-bindings.EVENT_CLICK {
-    Click(id)
+    Click(data_a)
   } else if kind == @username/gpui-bindings.EVENT_KEY {
-    Key(a, b)
+    Key(data_a, data_b)
+  } else if kind == @username/gpui-bindings.EVENT_TEXT {
+    // data_a = token, data_b = byte length. Copy the UTF-8 payload from
+    // Rust's event queue synchronously before returning from dispatch.
+    let len = data_b
+    let buf = Bytes::make(len, b'\x00')
+    let copied = gpui_event_copy_text_ffi(data_a, buf, len)
+    if copied > 0 {
+      let text = @utf8.decode(buf[0:copied]) catch { _ => "" }
+      Text(text)
+    } else {
+      Unknown
+    }
   } else {
     Unknown
   }
 }
 
 ///|
-pub fn dispatch(kind : Int, id : Int, a : Int, b : Int) -> Int {
-  rebuild_if_changed(apply_event(decode(kind, id, a, b)), build_tree)
+pub fn dispatch(version : Int, kind : Int, data_a : Int, data_b : Int) -> Int {
+  rebuild_if_changed(
+    apply_event(decode(version, kind, data_a, data_b)),
+    build_tree,
+  )
 }
 
 ///|
@@ -57,6 +88,7 @@ fn apply_event(event : Event) -> Int {
   match event {
     Click(click_id) => on_click(click_id)
     Key(code, mods) => on_key(code, mods)
+    Text(text) => on_text(text)
     Unknown => 0
   }
 }
@@ -118,6 +150,33 @@ fn on_key(code : Int, _mods : Int) -> Int {
     1
   } else if code == KEY_R {
     reset_count()
+  } else {
+    0
+  }
+}
+
+// Text events carry typed characters (including IME-composed text). The demo
+// treats a pure-digit string as "set count to N"; anything else is ignored.
+
+///|
+fn on_text(text : String) -> Int {
+  if text.is_empty() {
+    return 0
+  }
+  // Accept only ASCII digits so the demo stays deterministic across locales.
+  let mut value = 0
+  let mut all_digits = true
+  for c in text {
+    if c >= '0' && c <= '9' {
+      value = value * 10 + (c.to_int() - '0'.to_int())
+    } else {
+      all_digits = false
+      break
+    }
+  }
+  if all_digits && value != count[0] {
+    count[0] = value
+    1
   } else {
     0
   }

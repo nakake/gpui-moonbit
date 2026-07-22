@@ -88,11 +88,11 @@ PowerShell を MSVC x64 環境で開く（または build driver に検出させ
 4. `mb_symbol.txt` を読む `gpui-sys` を Rust で build し、Cargo の `native-static-libs` 出力から OS 固有 link flags を生成して MoonBit を強制再リンクする。
 5. callback の最終リンクを検証する。macOS/Linux は最終バイナリ上で定義を検査し、Windows は COFF の事情から MoonBit object の定義、Rust archive の未解決参照、最終リンク成功を検査する。
 
-callback のパッケージ/関数は `app.dispatch`、4 個の `i32` 引数という固定契約です。現在の実マングル表記は抽出により追従しますが、`app` package または `dispatch` を改名する場合は、両 build driver の `PKG_FN_SUFFIX` / `$PkgFnSuffix` と ABI 方針も更新する必要があります。
+callback のパッケージ/関数は `app.dispatch`、4 個の `i32` 引数という固定契約です。4 スロットは **バージョニング済みイベントエンベロープ** `(abi_version, event_kind, data_a, data_b)` を運びます。slot 0 は常に `ABI_VERSION` で、古い Rust バイナリをランタイムに拒否します。`EVENT_TEXT` は Rust 所有のイベントキューから `gpui_event_copy_text(token, buf, len)` で UTF-8 ペイロードをコピーします。現在の実マングル表記は抽出により追従しますが、`app` package または `dispatch` を改名する場合は、両 build driver の `PKG_FN_SUFFIX` / `$PkgFnSuffix` と ABI 方針も更新する必要があります。
 
 ## FFI と実行モデル
 
-MoonBit は Rust 側に retained node tree を組み立て、GPUI が描画します。ツリーは **コマンドバッファ**（length-delimited な opcode ストリーム）として記述され、`build_tree(view, cb)` 1 回の FFI 呼び出しで送信・コミットされます（issue #5 で property-per-call から集約）。opcode と `BUFFER_VERSION` は `gpui-sys/abi.toml` から両言語へ生成され、drift guard テストが食い違いを検出します。クリックまたはキーイベントは Rust から MoonBit の `app.dispatch(kind, id, a, b)` に戻ります。callback は状態が変わった場合に `1`、変わらない場合に `0` を返し、`1` のときだけ tree 全体を再構築して Rust が `cx.notify()` を呼びます。未知のイベントや reset 済みの値を再度 reset する操作では再描画しません。
+MoonBit は Rust 側に retained node tree を組み立て、GPUI が描画します。ツリーは **コマンドバッファ**（length-delimited な opcode ストリーム）として記述され、`build_tree(view, cb)` 1 回の FFI 呼び出しで送信・コミットされます（issue #5 で property-per-call から集約）。opcode と `BUFFER_VERSION` は `gpui-sys/abi.toml` から両言語へ生成され、drift guard テストが食い違いを検出します。クリック・キー・テキストイベントは Rust から MoonBit の `app.dispatch(version, kind, data_a, data_b)` に戻ります。`EVENT_CLICK` は `(3, 1, click_id, 0)`、`EVENT_KEY` は `(3, 2, codepoint, mods)`、`EVENT_TEXT` は `(3, 3, token, byte_len)` を送り、MoonBit は `gpui_event_copy_text` でペイロードをコピーします。callback は状態が変わった場合に `1`、変わらない場合に `0` を返し、`1` のときだけ tree 全体を再構築して Rust が `cx.notify()` を呼びます。未知のイベントや reset 済みの値を再度 reset する操作では再描画しません。
 
 コマンドバッファ内のテキストは `len u32 + UTF-8 バイト列`（明示長、NUL 終端なし）で、MoonBit は `@utf8.encode` で変換します。Rust はポインタ/長さをその呼び出しの間だけ読み取ります。
 
