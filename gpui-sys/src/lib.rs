@@ -5,10 +5,11 @@ use std::sync::Mutex;
 
 mod abi_constants;
 use abi_constants::{
-    ABI_VERSION, BUFFER_VERSION, EVENT_CLICK, EVENT_KEY, EVENT_TEXT, MOD_ALT, MOD_CTRL,
-    MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV, OP_SET_BG, OP_SET_CENTER,
-    OP_SET_FLEX, OP_SET_GAP, OP_SET_KEY, OP_SET_ON_CLICK, OP_SET_ROOT, OP_SET_ROUNDED,
-    OP_SET_SIZE, OP_TEXT,
+    ABI_VERSION, BUFFER_VERSION, EVENT_CLICK, EVENT_KEY, EVENT_NAMED_KEY, EVENT_TEXT,
+    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT,
+    KEY_PAGEUP, KEY_PAGEDOWN, KEY_RIGHT, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION,
+    MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV, OP_SET_BG, OP_SET_CENTER, OP_SET_FLEX,
+    OP_SET_GAP, OP_SET_KEY, OP_SET_ON_CLICK, OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SIZE, OP_TEXT,
 };
 
 // Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
@@ -646,6 +647,10 @@ impl Render for FfiView {
                     let changed =
                         unsafe { mb_dispatch(ABI_VERSION, EVENT_KEY, code, mods) };
                     notify_if_changed(changed, || cx.notify());
+                } else if let Some(key_id) = named_key_id(&ev.keystroke.key) {
+                    let changed =
+                        unsafe { mb_dispatch(ABI_VERSION, EVENT_NAMED_KEY, key_id, mods) };
+                    notify_if_changed(changed, || cx.notify());
                 }
                 // Emit a text event for keys that produce typed characters
                 // (including multi-char keys and IME-composed text). The
@@ -674,13 +679,34 @@ impl Render for FfiView {
 }
 
 /// Codepoint of a single-character key (letters/digits/…); 0 for named or
-/// multi-char keys (up/down/enter/…), which this demo ignores. Rust only
-/// translates the platform key to a scalar; MoonBit decides what each key does.
+/// multi-char keys (up/down/enter/…), which `named_key_id` maps to an ABI id.
+/// Rust only translates the platform key to a scalar; MoonBit decides what it does.
 fn key_code(ev: &KeyDownEvent) -> i32 {
     let mut chars = ev.keystroke.key.chars();
     match (chars.next(), chars.next()) {
         (Some(c), None) => c as i32,
         _ => 0,
+    }
+}
+
+/// Map a GPUI named key string to its ABI id. Returns `None` for single-char
+/// keys (handled by `key_code`) and unrecognized names.
+fn named_key_id(key: &str) -> Option<i32> {
+    match key {
+        "enter" => Some(KEY_ENTER),
+        "escape" => Some(KEY_ESCAPE),
+        "up" => Some(KEY_UP),
+        "down" => Some(KEY_DOWN),
+        "left" => Some(KEY_LEFT),
+        "right" => Some(KEY_RIGHT),
+        "tab" => Some(KEY_TAB),
+        "backspace" => Some(KEY_BACKSPACE),
+        "delete" => Some(KEY_DELETE),
+        "home" => Some(KEY_HOME),
+        "end" => Some(KEY_END),
+        "pageup" => Some(KEY_PAGEUP),
+        "pagedown" => Some(KEY_PAGEDOWN),
+        _ => None,
     }
 }
 
@@ -1469,11 +1495,25 @@ mod tests {
             ("EVENT_CLICK", EVENT_CLICK),
             ("EVENT_KEY", EVENT_KEY),
             ("EVENT_TEXT", EVENT_TEXT),
+            ("EVENT_NAMED_KEY", EVENT_NAMED_KEY),
             ("MOD_CTRL", MOD_CTRL),
             ("MOD_ALT", MOD_ALT),
             ("MOD_SHIFT", MOD_SHIFT),
             ("MOD_PLATFORM", MOD_PLATFORM),
             ("MOD_FUNCTION", MOD_FUNCTION),
+            ("KEY_ENTER", KEY_ENTER),
+            ("KEY_ESCAPE", KEY_ESCAPE),
+            ("KEY_UP", KEY_UP),
+            ("KEY_DOWN", KEY_DOWN),
+            ("KEY_LEFT", KEY_LEFT),
+            ("KEY_RIGHT", KEY_RIGHT),
+            ("KEY_TAB", KEY_TAB),
+            ("KEY_BACKSPACE", KEY_BACKSPACE),
+            ("KEY_DELETE", KEY_DELETE),
+            ("KEY_HOME", KEY_HOME),
+            ("KEY_END", KEY_END),
+            ("KEY_PAGEUP", KEY_PAGEUP),
+            ("KEY_PAGEDOWN", KEY_PAGEDOWN),
             ("OP_DIV", OP_DIV),
             ("OP_TEXT", OP_TEXT),
             ("OP_SET_SIZE", OP_SET_SIZE),
@@ -1566,5 +1606,30 @@ mod tests {
                 GPUI_STATUS_INVALID_HANDLE
             );
         });
+    }
+
+    #[::core::prelude::v1::test]
+    fn named_key_id_maps_known_keys() {
+        assert_eq!(named_key_id("enter"), Some(KEY_ENTER));
+        assert_eq!(named_key_id("escape"), Some(KEY_ESCAPE));
+        assert_eq!(named_key_id("up"), Some(KEY_UP));
+        assert_eq!(named_key_id("down"), Some(KEY_DOWN));
+        assert_eq!(named_key_id("left"), Some(KEY_LEFT));
+        assert_eq!(named_key_id("right"), Some(KEY_RIGHT));
+        assert_eq!(named_key_id("tab"), Some(KEY_TAB));
+        assert_eq!(named_key_id("backspace"), Some(KEY_BACKSPACE));
+        assert_eq!(named_key_id("delete"), Some(KEY_DELETE));
+        assert_eq!(named_key_id("home"), Some(KEY_HOME));
+        assert_eq!(named_key_id("end"), Some(KEY_END));
+        assert_eq!(named_key_id("pageup"), Some(KEY_PAGEUP));
+        assert_eq!(named_key_id("pagedown"), Some(KEY_PAGEDOWN));
+    }
+
+    #[::core::prelude::v1::test]
+    fn named_key_id_rejects_unknown() {
+        assert_eq!(named_key_id("k"), None);
+        assert_eq!(named_key_id("space"), None);
+        assert_eq!(named_key_id(""), None);
+        assert_eq!(named_key_id("f13"), None);
     }
 }

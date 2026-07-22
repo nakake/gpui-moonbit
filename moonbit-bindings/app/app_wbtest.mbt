@@ -62,3 +62,24 @@ test "unknown key and event are unchanged" {
   // gpui_event_copy_text (Rust FFI), which is unavailable in moon test.
   // The version handshake is verified by the CI linked-binary run.
 }
+
+///|
+test "named key handlers report state changes" {
+  count[0] = 0
+  assert_eq(on_named_key(@username/gpui-bindings.KEY_ENTER, 0), 1)
+  assert_eq(count[0], 1)
+  assert_eq(on_named_key(@username/gpui-bindings.KEY_UP, 0), 1)
+  assert_eq(count[0], 2)
+  assert_eq(on_named_key(@username/gpui-bindings.KEY_DOWN, 0), 1)
+  assert_eq(count[0], 1)
+  assert_eq(on_named_key(@username/gpui-bindings.KEY_ESCAPE, 0), 1)
+  assert_eq(count[0], 0)
+  assert_eq(on_named_key(@username/gpui-bindings.KEY_ESCAPE, 0), 0) // already 0
+}
+
+///|
+test "unknown named key is unchanged" {
+  count[0] = 5
+  assert_eq(on_named_key(99, 0), 0)
+  assert_eq(count[0], 5)
+}
