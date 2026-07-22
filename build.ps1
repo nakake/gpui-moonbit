@@ -184,11 +184,17 @@ if (-not $env:RUSTFLAGS) {
   $env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static"
 }
 Push-Location $GSys
-cmd /c "cargo build --target $rustHost 2>&1" | Out-Host
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
+# Capture native-static-libs FIRST: `cargo rustc -- --print` may invalidate
+# the previously built .lib (cargo cleans stale artifacts before invoking
+# rustc, and rustc exits after printing without producing output). Running
+# `cargo build` last guarantees gpui_sys.lib exists for the moon link step.
 $nativeLibs = (cmd /c "cargo rustc --target $rustHost --lib --crate-type staticlib -- --print native-static-libs 2>&1" |
                Select-String 'native-static-libs:' | Select-Object -First 1).Line `
                -replace '.*native-static-libs:\s*', ''
+cmd /c "cargo build --target $rustHost 2>&1" | Out-Host
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
+$gpuiLib = Join-Path $rustTargetDir 'gpui_sys.lib'
+if (-not (Test-Path $gpuiLib)) { Pop-Location; throw "gpui_sys.lib not found at $gpuiLib after cargo build" }
 Pop-Location
 if (-not $nativeLibs) { throw 'could not capture native-static-libs' }
 # /MT already selects libcmt. Do not pass Cargo's CRT default directive before
