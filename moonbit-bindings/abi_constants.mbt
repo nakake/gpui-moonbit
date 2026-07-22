@@ -13,6 +13,9 @@ pub const EVENT_KEY : Int = 2
 pub const EVENT_TEXT : Int = 3
 
 ///|
+pub const EVENT_NAMED_KEY : Int = 4
+
+///|
 pub const MOD_CTRL : Int = 1
 
 ///|
@@ -26,6 +29,45 @@ pub const MOD_PLATFORM : Int = 8
 
 ///|
 pub const MOD_FUNCTION : Int = 16
+
+///|
+pub const KEY_ENTER : Int = 1
+
+///|
+pub const KEY_ESCAPE : Int = 2
+
+///|
+pub const KEY_UP : Int = 3
+
+///|
+pub const KEY_DOWN : Int = 4
+
+///|
+pub const KEY_LEFT : Int = 5
+
+///|
+pub const KEY_RIGHT : Int = 6
+
+///|
+pub const KEY_TAB : Int = 7
+
+///|
+pub const KEY_BACKSPACE : Int = 8
+
+///|
+pub const KEY_DELETE : Int = 9
+
+///|
+pub const KEY_HOME : Int = 10
+
+///|
+pub const KEY_END : Int = 11
+
+///|
+pub const KEY_PAGEUP : Int = 12
+
+///|
+pub const KEY_PAGEDOWN : Int = 13
 
 ///|
 pub const OP_DIV : Int = 1

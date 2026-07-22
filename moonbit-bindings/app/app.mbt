@@ -8,6 +8,7 @@
 //   EVENT_CLICK: data_a = click_id, data_b = 0
 //   EVENT_KEY:   data_a = codepoint, data_b = modifier bits
 //   EVENT_TEXT:  data_a = token, data_b = byte length (copy via gpui_event_copy_text)
+//   EVENT_NAMED_KEY: data_a = named_key_id, data_b = modifier bits
 //
 // NOTE: changing `dispatch`'s signature does NOT change the mangled symbol name
 // (MoonBit mangling excludes types), so the Rust `extern` must be kept in sync —
@@ -45,6 +46,7 @@ priv enum Event {
   Click(Int) // click_id
   Key(Int, Int) // codepoint, modifier bits
   Text(String) // typed text (UTF-8 decoded)
+  NamedKey(Int, Int) // named_key_id, modifier bits
   Unknown
 }
 
@@ -70,6 +72,8 @@ fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
     } else {
       Unknown
     }
+  } else if kind == @username/gpui-bindings.EVENT_NAMED_KEY {
+    NamedKey(data_a, data_b)
   } else {
     Unknown
   }
@@ -77,10 +81,16 @@ fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
 
 ///|
 pub fn dispatch(version : Int, kind : Int, data_a : Int, data_b : Int) -> Int {
-  rebuild_if_changed(
-    apply_event(decode(version, kind, data_a, data_b)),
-    build_tree,
-  )
+  let changed = apply_event(decode(version, kind, data_a, data_b))
+  if changed == 1 {
+    // Rebuild the tree. On failure the Rust side keeps the old committed tree
+    // (atomic commit), so returning `changed` still lets GPUI re-render it.
+    match build_tree() {
+      Ok(_) => ()
+      Err(status) => println("app: build_tree failed with status \{status}")
+    }
+  }
+  changed
 }
 
 ///|
@@ -89,16 +99,9 @@ fn apply_event(event : Event) -> Int {
     Click(click_id) => on_click(click_id)
     Key(code, mods) => on_key(code, mods)
     Text(text) => on_text(text)
+    NamedKey(id, mods) => on_named_key(id, mods)
     Unknown => 0
   }
-}
-
-///|
-fn rebuild_if_changed(changed : Int, rebuild : () -> Unit) -> Int {
-  if changed == 1 {
-    rebuild()
-  }
-  changed
 }
 
 ///|
@@ -149,6 +152,24 @@ fn on_key(code : Int, _mods : Int) -> Int {
     count[0] = count[0] - 1
     1
   } else if code == KEY_R {
+    reset_count()
+  } else {
+    0
+  }
+}
+
+// Named keys (Enter/Escape/arrows/…) arrive as an ABI id; the demo maps
+// Enter/Up → +1, Down → -1, Escape → reset, mirroring k/j/r.
+
+///|
+fn on_named_key(id : Int, _mods : Int) -> Int {
+  if id == @username/gpui-bindings.KEY_ENTER || id == @username/gpui-bindings.KEY_UP {
+    count[0] = count[0] + 1
+    1
+  } else if id == @username/gpui-bindings.KEY_DOWN {
+    count[0] = count[0] - 1
+    1
+  } else if id == @username/gpui-bindings.KEY_ESCAPE {
     reset_count()
   } else {
     0
@@ -209,7 +230,7 @@ fn make_button(
 }
 
 ///|
-pub fn build_tree() -> Unit {
+pub fn build_tree() -> Result[Unit, Int] {
   let cb = @username/gpui-bindings.CommandBuffer::new()
   cb.div() // root
   cb.set_bg(28, 30, 38)
