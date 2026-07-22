@@ -11,7 +11,7 @@ fn main {
     Ok(_) => ()
     Err(status) => abort("initial build_tree failed with status \{status}")
   }
-  match @username/gpui-bindings.run_window(600.0, 500.0) {
+  match @username/gpui-bindings.run_window(0, 600.0, 500.0) {
     Ok(_) => ()
     Err(status) => abort("run_window failed with status \{status}")
   }

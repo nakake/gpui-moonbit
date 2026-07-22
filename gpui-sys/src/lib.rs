@@ -606,14 +606,20 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
     GPUI_STATUS_OK
 }
 
+/// Open a window rendering the committed tree for `view` (index into
+/// `VIEWS`) and block in the GPUI event loop. A negative `view` fails with
+/// `GPUI_STATUS_INVALID_HANDLE` before any GPUI startup.
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_run_window(width: f32, height: f32) -> i32 {
+pub extern "C" fn gpui_run_window(view: i32, width: f32, height: f32) -> i32 {
     ffi_export("gpui_run_window", || {
-        run_window_with_fallback(width, height)
+        if view < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        run_window_with_fallback(view as usize, width, height)
     })
 }
 
-fn run_window(width: f32, height: f32) {
+fn run_window(view: usize, width: f32, height: f32) {
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         cx.open_window(
@@ -629,7 +635,7 @@ fn run_window(width: f32, height: f32) {
                     // so key events never arrive.
                     let focus = cx.focus_handle();
                     window.focus(&focus);
-                    FfiView { focus, view: 0 }
+                    FfiView { focus, view }
                 })
             },
         )
@@ -638,8 +644,8 @@ fn run_window(width: f32, height: f32) {
     });
 }
 
-fn run_window_with_fallback(width: f32, height: f32) -> i32 {
-    match catch_unwind(AssertUnwindSafe(|| run_window(width, height))) {
+fn run_window_with_fallback(view: usize, width: f32, height: f32) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| run_window(view, width, height))) {
         Ok(()) => GPUI_STATUS_OK,
         Err(first_panic) => {
             #[cfg(target_os = "linux")]
@@ -651,7 +657,7 @@ fn run_window_with_fallback(width: f32, height: f32) -> i32 {
                 // SAFETY: window startup is single-threaded and happens before GPUI
                 // creates worker threads that could concurrently read the environment.
                 unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
-                return match catch_unwind(AssertUnwindSafe(|| run_window(width, height))) {
+                return match catch_unwind(AssertUnwindSafe(|| run_window(view, width, height))) {
                     Ok(()) => GPUI_STATUS_OK,
                     Err(second_panic) => {
                         report_panic("gpui_run_window (X11 retry)", second_panic.as_ref());
@@ -1260,6 +1266,14 @@ mod tests {
             let b = Buf::new();
             assert_eq!(b.build(-1), GPUI_STATUS_INVALID_HANDLE);
         });
+    }
+
+    #[::core::prelude::v1::test]
+    fn run_window_rejects_negative_view() {
+        assert_eq!(
+            gpui_run_window(-1, 10.0, 10.0),
+            GPUI_STATUS_INVALID_HANDLE
+        );
     }
 
     // --- Stack / handle validation -----------------------------------------

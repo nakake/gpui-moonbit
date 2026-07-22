@@ -228,10 +228,16 @@ pub fn build_tree(view : Int, cb : CommandBuffer) -> Result[Unit, Int] {
 }
 
 ///|
-/// Open a GPUI window and block in the event loop. Returns `Err(status)` if
-/// the window could not be created or the event loop panicked.
-pub fn run_window(width : Float, height : Float) -> Result[Unit, Int] {
-  let status = gpui_run_window_ffi(width, height)
+/// Open a GPUI window rendering the committed tree for `view` (index into the
+/// Rust-side view slots set by `build_tree`) and block in the event loop.
+/// Returns `Err(status)` if the window could not be created or the event loop
+/// panicked.
+pub fn run_window(
+  view : Int,
+  width : Float,
+  height : Float,
+) -> Result[Unit, Int] {
+  let status = gpui_run_window_ffi(view, width, height)
   if status == 0 {
     Ok(())
   } else {
