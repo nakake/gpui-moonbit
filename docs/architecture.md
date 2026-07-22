@@ -133,6 +133,7 @@ sequenceDiagram
 5. 検出されたネイティブの Rust ホスト向けに `gpui-sys` をビルドし、`cargo rustc --lib --crate-type staticlib -- --print native-static-libs` を捕捉し、Cargo metadata が報告するターゲットディレクトリを使って最終的なプラットフォーム用 `moon.pkg` を生成する。`build.rs` は `mb_symbol.txt` を読み取り、コールバックの extern を生成し、Rust の ABI 定数を再生成し、cbindgen で `include/gpui_sys.h` を再生成する。
 6. MoonBit のリンク済み出力を削除して再度ビルドし、新しい Rust 静的ライブラリと Cargo 由来のネイティブ依存に対して強制的に再リンクする。
 7. リンケージを検証する。macOS/Linux は最終バイナリを調べ、コールバック定義がちょうど 1 つであることを確認する。Windows は、MoonBit の `main.obj` にコールバック定義が 1 つ、`gpui_sys.lib` に未解決参照が 1 つあること、および最終リンクが成功することを検証する（リンク済み PE は通常 COFF シンボルテーブルを省略するため）。
+8. ヘッドレス往復テスト（`cmd/roundtrip`）を実行する。MoonBit がエッジケースのテキスト（NUL バイト・多バイト UTF-8・4 バイト絵文字）を含むツリーを `gpui_build_tree` で送信し、`gpui_debug_dump_text` で読み戻してバイト単位で比較する。GUI なしで MoonBit→C→Rust→C→MoonBit の完全な FFI 往復を検証する（issue #34）。
 
 最初の bindgen ステップは、必然的に 1 つ前の Rust ビルド由来のヘッダーを参照する。したがって、Rust の C エクスポートを変更した後は、必要に応じてドライバを再実行/再確認し、新たに再生成されたヘッダーと追跡対象の `gpui-bindings-ffi.mbt` を同期させること。最初の 1 回の bindgen 呼び出しが、同じドライバ実行内で後から再生成されるヘッダーを消費したと仮定してはならない。
 
@@ -155,13 +156,13 @@ sequenceDiagram
 | 手編集の ABI ソース | `gpui-sys/abi.toml` |
 | 手編集の実装 | `gpui-sys/src/lib.rs`、`moonbit-bindings/gpui-bindings.mbt`、`moonbit-bindings/app/app.mbt` |
 | 追跡対象の生成ソース | `gpui-sys/include/gpui_sys.h`、`gpui-sys/src/abi_constants.rs`、`moonbit-bindings/abi_constants.mbt`、`moonbit-bindings/gpui-bindings-ffi.mbt` |
-| 手編集の OS テンプレート | `moonbit-bindings/cmd/main/moon.pkg.macos`、`.linux`、`.windows` |
-| 無視されるビルド生成物 | `moonbit-bindings/cmd/main/moon.pkg`、`gpui-sys/mb_symbol.txt`、`_build/`、`target/`、`dist/` |
+| 手編集の OS テンプレート | `moonbit-bindings/cmd/main/moon.pkg.macos`、`.linux`、`.windows`、`moonbit-bindings/cmd/roundtrip/moon.pkg.*` |
+| 無視されるビルド生成物 | `moonbit-bindings/cmd/main/moon.pkg`、`moonbit-bindings/cmd/roundtrip/moon.pkg`、`gpui-sys/mb_symbol.txt`、`_build/`、`target/`、`dist/` |
 | 無視される手動配置フォールバック | `.linux-libs/` |
 
 ## 9. 検証の範囲
 
-`gpui-sys/` での `GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` は、リンクされた MoonBit コールバックを必要とせずに、コマンドバッファのパース（magic/バージョン・opcode・切り詰め・未知 opcode）、スタック/ハンドル検証（空スタック・テキストトップ・add_child のポップ順序・set_root）、コミット検証（ルート必須・キー重複拒否・click_id 重複許容・view ごとの差し替え）、move/forest セマンティクス（attach はコピーでなく move・サブツリーは内容ごと移動・未 attach ノードはコミットから脱落・最後の `set_root` が勝つ）、敵対的な文字列長（`u32::MAX` 近傍でもカーソルオーバーフローせず `TRUNCATED_BUFFER`）・lossy UTF-8（不正バイト列は U+FFFD 置換で致命的にしない）、通知ゲート、および `abi.toml` と生成済み Rust/MoonBit 定数（opcode と BUFFER_VERSION を含む）の境界横断一致（drift guard）を固定する。追加の環境変数によるオプトインは、誤った `--all-features` での本番ビルドが実際のコールバックを暗黙に置き換えることを防ぐ。`moonbit-bindings/` からは、`moon check` が MoonBit モジュールを型チェックし、`moon test` が高レベルバインディング（色クランプ・埋め込み NUL を含む UTF-8 エンコード）、Rust デコーダのレイアウトに対するコマンドバッファのバイト正確なワイヤ形式（ヘッダ・OP_TEXT オペランド・リトルエンディアン f32）、およびイベントの変化/不変化の遷移を検証する。これらはコールバック抽出や最終的な言語横断リンケージは検証しない。それらの統合チェックはルートのドライバが実行する。Issue #8 のチェックリスト（ハンドル操作・move-on-attach・重複/親違い attach・EVENT_*/EV_* 互換・nm シンボル・非 ASCII/埋め込み NUL・クリーンビルド・Rust 専用リビルド）はヘッドレステストと手動ドライバ実行で覆われた。GitHub Actions CI（`.github/workflows/ci.yml`）が Linux・macOS・Windows の 3 プラットフォームでクリーン `_build`/`target` からのコールドビルド、Rust/MoonBit テスト、Rust 専用変更後リビルドを自動検証する（2026-07-22 に全プラットフォーム緑確認済み）。残作業はリンク済みバイナリを通過する完全な MoonBit→C→Rust 境界の非 ASCII/埋め込み NUL テキスト往復（各側は個別にカバー済み。エンドツーエンドにはヘッドレスな dispatch ハーネスが必要）である。Rust の C エクスポート変更後の生成 FFI の鮮度は、bindgen が Cargo によるヘッダー再生成より前に実行されるため、§6 で述べた再実行/再確認が依然として必要である。
+`gpui-sys/` での `GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 cargo test --features test-dispatch-stub` は、リンクされた MoonBit コールバックを必要とせずに、コマンドバッファのパース（magic/バージョン・opcode・切り詰め・未知 opcode）、スタック/ハンドル検証（空スタック・テキストトップ・add_child のポップ順序・set_root）、コミット検証（ルート必須・キー重複拒否・click_id 重複許容・view ごとの差し替え）、move/forest セマンティクス（attach はコピーでなく move・サブツリーは内容ごと移動・未 attach ノードはコミットから脱落・最後の `set_root` が勝つ）、敵対的な文字列長（`u32::MAX` 近傍でもカーソルオーバーフローせず `TRUNCATED_BUFFER`）・lossy UTF-8（不正バイト列は U+FFFD 置換で致命的にしない）、通知ゲート、および `abi.toml` と生成済み Rust/MoonBit 定数（opcode と BUFFER_VERSION を含む）の境界横断一致（drift guard）を固定する。追加の環境変数によるオプトインは、誤った `--all-features` での本番ビルドが実際のコールバックを暗黙に置き換えることを防ぐ。`moonbit-bindings/` からは、`moon check` が MoonBit モジュールを型チェックし、`moon test` が高レベルバインディング（色クランプ・埋め込み NUL を含む UTF-8 エンコード）、Rust デコーダのレイアウトに対するコマンドバッファのバイト正確なワイヤ形式（ヘッダ・OP_TEXT オペランド・リトルエンディアン f32）、およびイベントの変化/不変化の遷移を検証する。これらはコールバック抽出や最終的な言語横断リンケージは検証しない。それらの統合チェックはルートのドライバが実行する。Issue #8 のチェックリスト（ハンドル操作・move-on-attach・重複/親違い attach・EVENT_*/EV_* 互換・nm シンボル・非 ASCII/埋め込み NUL・クリーンビルド・Rust 専用リビルド）はヘッドレステストと手動ドライバ実行で覆われた。GitHub Actions CI（`.github/workflows/ci.yml`）が Linux・macOS・Windows の 3 プラットフォームでクリーン `_build`/`target` からのコールドビルド、Rust/MoonBit テスト、Rust 専用変更後リビルドを自動検証する（2026-07-22 に全プラットフォーム緑確認済み）。リンク済みバイナリを通過する完全な MoonBit→C→Rust テキスト往復は、build driver の最終ステップとして実行されるヘッドレス往復テスト（`cmd/roundtrip`、issue #34）がカバーする。NUL バイト・多バイト UTF-8（ひらがな）・4 バイト絵文字を含むエッジケーステキストを `gpui_build_tree` で送信し、`gpui_debug_dump_text` で読み戻してバイト単位で比較する。Rust の C エクスポート変更後の生成 FFI の鮮度は、bindgen が Cargo によるヘッダー再生成より前に実行されるため、§6 で述べた再実行/再確認が依然として必要である。
 
 ## 10. ファイル → 関心事マップ
 
@@ -175,3 +176,5 @@ sequenceDiagram
 - エントリポイントとコールバックの保持: `moonbit-bindings/cmd/main/main.mbt`
 - OS ネイティブのリンクテンプレート: `moonbit-bindings/cmd/main/moon.pkg.*`
 - ビルド/バンドルの orchestration: `build.sh`、`build.ps1`、`bundle.sh`
+- ヘッドレス往復テスト（issue #34）: `moonbit-bindings/cmd/roundtrip/main.mbt`
+- デバッグ用テキスト読み戻し export: `gpui-sys/src/lib.rs`（`gpui_debug_dump_text`）

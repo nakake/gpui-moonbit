@@ -71,13 +71,13 @@ $rustTargetDir = Join-Path (Join-Path $cargoTargetRoot $rustHost) 'debug'
 Write-Host "    Rust target: $rustHost"
 Write-Host "    Rust library dir: $rustTargetDir"
 
-function Write-MoonPkg([string]$libs) {
-  $tmpl = Get-Content (Join-Path $MB 'cmd\main\moon.pkg.windows') -Raw
+function Write-MoonPkg([string]$template, [string]$destination, [string]$libs) {
+  $tmpl = Get-Content $template -Raw
   $out  = $tmpl.Replace('@NATIVE_LIBS@', $libs)
-  $dst  = Join-Path $MB 'cmd\main\moon.pkg'
-  if (-not (Test-Path $dst) -or (Get-Content $dst -Raw) -ne $out) {
-    Set-Content -NoNewline -Path $dst -Value $out
-    Write-Host "==> wrote cmd\main\moon.pkg (windows)"
+  if (-not (Test-Path $destination) -or (Get-Content $destination -Raw) -ne $out) {
+    Set-Content -NoNewline -Path $destination -Value $out
+    $rel = $destination.Substring($MB.Length + 1)
+    Write-Host "==> wrote $rel (windows)"
   }
 }
 
@@ -133,7 +133,8 @@ Pop-Location
 if ($ec -ne 0) { throw 'MoonBit compilation failed' }
 
 Write-Host '==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)'
-Write-MoonPkg ''
+Write-MoonPkg (Join-Path $MB 'cmd\main\moon.pkg.windows') (Join-Path $MB 'cmd\main\moon.pkg') ''
+Write-MoonPkg (Join-Path $MB 'cmd\roundtrip\moon.pkg.windows') (Join-Path $MB 'cmd\roundtrip\moon.pkg') ''
 Push-Location $MB
 $coldOutput = cmd /c "moon build 2>&1"
 $ec = $LASTEXITCODE
@@ -220,9 +221,11 @@ $allLibDirs = $projectLibDirs + @($env:LIB -split ';')
 $env:LIB = ($allLibDirs | Where-Object { $_ } | Select-Object -Unique) -join ';'
 Write-Host "    extra LIB dirs: $($projectLibDirs -join ';')"
 
-Write-Host '==> [4/5] Final MoonBit build (real moon.pkg + forced relink)'
-Write-MoonPkg $nativeLibs
+Write-Host '==> [4/6] Final MoonBit build (real moon.pkg + forced relink)'
+Write-MoonPkg (Join-Path $MB 'cmd\main\moon.pkg.windows') (Join-Path $MB 'cmd\main\moon.pkg') $nativeLibs
+Write-MoonPkg (Join-Path $MB 'cmd\roundtrip\moon.pkg.windows') (Join-Path $MB 'cmd\roundtrip\moon.pkg') $nativeLibs
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $MB '_build\native\debug\build\cmd\main\main.exe')
+Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $MB '_build\native\debug\build\cmd\roundtrip\roundtrip.exe')
 Push-Location $MB
 $finalOutput = cmd /c "moon build 2>&1"
 $ec = $LASTEXITCODE
@@ -233,7 +236,7 @@ if ($ec -ne 0) {
 }
 Write-Host '    Final MoonBit build succeeded.'
 
-Write-Host '==> [5/5] Verify the callback definition/reference contract'
+Write-Host '==> [5/6] Verify the callback definition/reference contract'
 $exe = Join-Path $MB '_build\native\debug\build\cmd\main\main.exe'
 if (-not (Test-Path $exe)) { throw "final executable not found at $exe" }
 $mainObj = Join-Path $MB '_build\native\debug\build\cmd\main\main.obj'
@@ -257,6 +260,12 @@ if ($LASTEXITCODE -ne 0) { throw 'dumpbin /SYMBOLS gpui_sys.lib failed' }
 if ($references.Count -ne 1) { throw "expected exactly 1 reference to $sym in gpui_sys.lib, found $($references.Count)" }
 Write-Host "    Verified: main.obj defines $sym exactly once"
 Write-Host "    Verified: gpui_sys.lib references $sym exactly once and main.exe linked"
+
+Write-Host '==> [6/6] Run headless round-trip test (issue #34)'
+$rtExe = Join-Path $MB '_build\native\debug\build\cmd\roundtrip\roundtrip.exe'
+if (-not (Test-Path $rtExe)) { throw "roundtrip executable not found at $rtExe" }
+& $rtExe
+if ($LASTEXITCODE -ne 0) { throw 'round-trip test failed' }
 Write-Host "Done. Run: $exe"
 
 # In CI, export the augmented LIB so subsequent steps (moon test) can find

@@ -10,6 +10,14 @@ extern "C" fn gpui_event_copy_text_ffi(
 ) -> Int = "gpui_event_copy_text"
 
 ///|
+#borrow(buf)
+extern "C" fn gpui_debug_dump_text_ffi(
+  view : Int,
+  buf : Bytes,
+  len : Int,
+) -> Int = "gpui_debug_dump_text"
+
+///|
 #borrow(ptr)
 extern "C" fn gpui_build_tree_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "gpui_build_tree"
 

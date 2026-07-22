@@ -91,6 +91,45 @@ pub extern "C" fn gpui_event_copy_text(token: i32, buf: *mut u8, len: i32) -> i3
     copy_len as i32
 }
 
+/// Collect text node contents in DFS pre-order from a committed tree.
+fn collect_text_contents(node: &UiNode, out: &mut Vec<u8>) {
+    match node {
+        UiNode::Div { children, .. } => {
+            for child in children {
+                collect_text_contents(child, out);
+            }
+        }
+        UiNode::Text { content, .. } => {
+            let bytes = content.as_bytes();
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+    }
+}
+
+/// Debug read-back: dump every text node's content from the committed tree for
+/// `view` into `buf` as a sequence of `len u32 LE + utf8[len]` records (DFS
+/// pre-order). Returns the total number of bytes written, or a negative
+/// GPUI_STATUS_* on error. Used by the headless round-trip test (issue #34)
+/// to verify MoonBit→C→Rust text fidelity without a GUI.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_debug_dump_text(view: i32, buf: *mut u8, len: i32) -> i32 {
+    if view < 0 || buf.is_null() || len < 0 {
+        return GPUI_STATUS_INVALID_HANDLE;
+    }
+    let guard = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(Some(root)) = guard.get(view as usize) else {
+        return GPUI_STATUS_INVALID_HANDLE;
+    };
+    let mut payload = Vec::new();
+    collect_text_contents(root, &mut payload);
+    let copy_len = (len as usize).min(payload.len());
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, copy_len);
+    }
+    copy_len as i32
+}
+
 #[derive(Clone)]
 enum UiNode {
     Div {
@@ -1475,5 +1514,57 @@ mod tests {
                 "MoonBit abi_constants.mbt missing `pub const {name} : Int = {value}` — regenerate via build.sh"
             );
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn debug_dump_text_round_trips() {
+        with_test(|| {
+            // div { text("A\0あ"), text("🎉") }
+            let mut b = Buf::new();
+            b.div()
+                .text("A\0あ", 255, 255, 255, 16.0)
+                .add_child()
+                .text("🎉", 255, 255, 255, 16.0)
+                .add_child()
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+
+            // Expected: len u32 LE + utf8 for each text node, DFS pre-order.
+            let mut expected = Vec::new();
+            for s in ["A\0あ", "🎉"] {
+                let bytes = s.as_bytes();
+                expected.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                expected.extend_from_slice(bytes);
+            }
+
+            let mut buf = vec![0u8; 256];
+            let n = gpui_debug_dump_text(0, buf.as_mut_ptr(), buf.len() as i32);
+            assert_eq!(n, expected.len() as i32);
+            assert_eq!(&buf[..n as usize], &expected[..]);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn debug_dump_text_rejects_bad_args() {
+        with_test(|| {
+            let mut buf = [0u8; 8];
+            assert_eq!(
+                gpui_debug_dump_text(-1, buf.as_mut_ptr(), 8),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(
+                gpui_debug_dump_text(0, std::ptr::null_mut(), 8),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(
+                gpui_debug_dump_text(0, buf.as_mut_ptr(), -1),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            // No tree committed yet.
+            assert_eq!(
+                gpui_debug_dump_text(0, buf.as_mut_ptr(), 8),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+        });
     }
 }
