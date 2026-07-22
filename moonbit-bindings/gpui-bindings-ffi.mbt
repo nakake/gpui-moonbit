@@ -22,4 +22,8 @@ extern "C" fn gpui_debug_dump_text_ffi(
 extern "C" fn gpui_build_tree_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "gpui_build_tree"
 
 ///|
-extern "C" fn gpui_run_window_ffi(width : Float, height : Float) -> Int = "gpui_run_window"
+extern "C" fn gpui_run_window_ffi(
+  view : Int,
+  width : Float,
+  height : Float,
+) -> Int = "gpui_run_window"

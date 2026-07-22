@@ -84,6 +84,11 @@ int32_t gpui_debug_dump_text(int32_t view, uint8_t *buf, int32_t len);
  */
 int32_t gpui_build_tree(int32_t view, const uint8_t *ptr, int32_t len);
 
-int32_t gpui_run_window(float width, float height);
+/**
+ * Open a window rendering the committed tree for `view` (index into
+ * `VIEWS`) and block in the GPUI event loop. A negative `view` fails with
+ * `GPUI_STATUS_INVALID_HANDLE` before any GPUI startup.
+ */
+int32_t gpui_run_window(int32_t view, float width, float height);
 
 #endif  /* GPUI_SYS_H */
