@@ -49,6 +49,12 @@ jobs:
         if: runner.os != 'Windows'
         run: ./build.sh
 
+      - name: Verify .app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          test -x dist/Counter.app/Contents/MacOS/Counter
+          plutil -lint dist/Counter.app/Contents/Info.plist
+
       - name: Cold build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

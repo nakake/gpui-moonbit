@@ -18,6 +18,19 @@ MB="$ROOT/moonbit-bindings"
 BUILD_OUTPUT="$(mktemp)"
 trap 'rm -f "$BUILD_OUTPUT"' EXIT
 
+# --- CLI flags ---
+# macOS builds bundle dist/Counter.app by default (keyboard delivery needs it);
+# --no-bundle skips. --bundle requests bundling explicitly and is an error on
+# other OSes, where .app bundles are meaningless.
+BUNDLE=auto
+for arg in "$@"; do
+  case "$arg" in
+    --bundle) BUNDLE=yes ;;
+    --no-bundle) BUNDLE=no ;;
+    *) echo "ERROR: unknown argument: $arg (usage: ./build.sh [--bundle|--no-bundle])" >&2; exit 1 ;;
+  esac
+done
+
 # --- Platform differences ---
 # Mach-O prepends one ABI underscore to every C symbol: nm shows `__M0FP…` and
 # `#[link_name]` must be written with a single `_` (the linker adds the other).
@@ -43,6 +56,10 @@ case "$(uname -s)" in
     ;;
   *) echo "ERROR: unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
+if [ "$OS_PKG" != macos ] && [ "$BUNDLE" = yes ]; then
+  echo "ERROR: --bundle is only supported on macOS (.app bundles are macOS-specific)" >&2
+  exit 1
+fi
 PKG_TMPL="$MB/cmd/main/moon.pkg.$OS_PKG"
 RT_PKG_TMPL="$MB/cmd/roundtrip/moon.pkg.$OS_PKG"
 
@@ -383,8 +400,19 @@ case "$OS_PKG" in
   macos) "$RT_EXE" ;;
 esac
 
+if [ "$OS_PKG" = macos ] && [ "$BUNDLE" != no ]; then
+  echo "==> [7/7] Bundle Counter.app (keyboard delivery needs the bundle)"
+  "$ROOT/bundle.sh"
+fi
+
 
 case "$OS_PKG" in
-  macos) echo "Done. Run:  ./bundle.sh && open dist/Counter.app  (keyboard needs the bundle)" ;;
+  macos)
+    if [ "$BUNDLE" != no ]; then
+      echo "Done. Run:  open dist/Counter.app  (or ./dist/Counter.app/Contents/MacOS/Counter to keep stderr on the terminal)"
+    else
+      echo "Done. Run:  ./bundle.sh && open dist/Counter.app  (keyboard needs the bundle)"
+    fi
+    ;;
   linux) echo 'Done. Run:  (cd moonbit-bindings && env -u WAYLAND_DISPLAY LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug/build/cmd/main/main.exe)' ;;
 esac
