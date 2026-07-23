@@ -1,14 +1,14 @@
 # GPUI + MoonBit ロードマップ
 
-## 現況 (2026-07-19)
+## 現況 (2026-07-23)
 
-この節は 2026-07-19 時点の現行状況であり、後続のフェーズ一覧と進捗メモは当時の計画・履歴として保持する。
+この節は 2026-07-23 時点の現行状況であり、後続のフェーズ一覧と進捗メモは当時の計画・履歴として保持する。
 
 ### 実装済み
 - retained UI と MoonBit 側の Counter (`-1` / `Reset` / `+1` / `+10`)。
 - click/key callback。コールバック ABI は固定の `app.dispatch(kind, id, a, b)` (4 × `i32`) で、実マングル表記のみを build driver が自動検出する。
 - `abi.toml` からの共有 ABI 定数生成、C ヘッダーからの MoonBit FFI 生成・検証、および macOS/Linux/Windows の build 経路。
-- Windows と WSL/Linux は 2026-07-19 に手動検証済み。macOS は最近再検証していない。
+- Windows と WSL/Linux は 2026-07-19 に手動検証済み。macOS は 2026-07-23 に再検証済み（`build.sh` のバンドル統合後、ウィンドウ表示と `j`/`k`/`r` キー操作を実機確認）。
 
 ### 未完了
 - 安定した利用者向け API と、より広い GPUI surface。
