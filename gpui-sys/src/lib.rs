@@ -908,20 +908,108 @@ fn render_node(
             color: (r, g, b),
             size,
         } => {
-            // GPUI rounds element positions to whole pixels (taffy rounding),
-            // so the first glyph of a line always lands at subpixel offset 0 and
-            // is rasterized with a hard, un-antialiased left edge — visible as a
-            // ~1px "cut" on the left of a leading round glyph such as "G".
-            // Interior glyphs land at fractional offsets and get proper
-            // antialiasing. Pad the string with a leading (and matching trailing)
-            // space so the real first glyph becomes an interior glyph; trailing
-            // whitespace is counted in the line width, so centering is preserved.
-            let d = div()
+            // The content string flows through unmodified (issue #16). The
+            // first-glyph subpixel fix lives in `TextGlyphInset`, a
+            // paint-time-only shim — see its doc comment and
+            // `docs/troubleshooting.md` §2.
+            let text = div()
                 .text_color(rgb(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32)))
                 .text_size(px(*size))
-                .child(format!(" {content} "));
-            Some(d.into_any_element())
+                .child(content.clone());
+            let inset = TextGlyphInset {
+                child: text.into_any_element(),
+            };
+            Some(inset.into_any_element())
         }
+    }
+}
+
+/// Paint-time-only wrapper that shifts a text element's prepaint origin by a
+/// fractional ¼px so its first glyph escapes GPUI's subpixel variant 0.
+///
+/// GPUI rounds taffy layout to whole pixels (`taffy.enable_rounding()`), so a
+/// text element's left edge always lands at an integer x and its first glyph
+/// is rasterized at subpixel variant 0 — a hard, un-antialiased left edge
+/// (the ~1px "cut" on a leading round glyph such as "G"; see
+/// `docs/troubleshooting.md` §2 for the full incident).
+///
+/// The historical workaround padded the content string with spaces, which
+/// polluted the text MoonBit sent (issue #16). This shim keeps the content
+/// string untouched: it delegates layout transparently to the child (the
+/// layout box is unchanged), and applies the ¼px shift only to the prepaint
+/// origin via `Window::with_element_offset`. `Window::layout_bounds` folds
+/// the element offset into the child's prepaint bounds, so the first glyph's
+/// pen position carries a ¼px fraction — subpixel variant 1 — and gets the
+/// same antialiasing as interior glyphs.
+///
+/// ¼px was chosen because it stays fractional at the scale factors GPUI
+/// actually ships (1×, 2×, 3×: 0.25·n is never an integer), whereas ½px would
+/// re-snap to variant 0 at 2× HiDPI — the very platform where the original
+/// incident was observed. At an exotic scale where 0.25·n is integral (4×,
+/// 8×) the glyph falls back to variant 0, i.e. exactly what GPUI renders for
+/// every line-leading glyph by default — never worse than unmitigated. The
+/// inset is invisible: it moves glyph ink by a quarter pixel and reserves no
+/// layout space, so siblings and centering are unaffected.
+struct TextGlyphInset {
+    child: AnyElement,
+}
+
+impl Element for TextGlyphInset {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        // Transparent: the child's own layout node is ours.
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        window.with_element_offset(point(px(0.25), px(0.0)), |window| {
+            self.child.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for TextGlyphInset {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
     }
 }
 
