@@ -2,6 +2,8 @@
 
 MoonBit native から Rust/GPUI を C FFI 越しに呼ぶ、ローカル向けの実験的プロジェクトです。安定した汎用 UI API ではありません。現在のデモは interactive Counter で、`-1` / `Reset` / `+1` / `+10` のボタン、ならびに `j` / `k` / `r` キーで値を操作します。
 
+**モジュールの使い方**（getting-started、API の使い方、examples）は [`moonbit-bindings/README.md`](moonbit-bindings/README.md) を参照してください。この README はリポジトリのビルド・内部構造向けです。
+
 ## プロジェクト構造
 
 ```text
@@ -16,7 +18,8 @@ MoonBit native から Rust/GPUI を C FFI 越しに呼ぶ、ローカル向け�
 │   ├── gpui-bindings.mbt              # 手編集する高水準 API
 │   ├── gpui-bindings-ffi.mbt          # bindgen による tracked な生成 FFI
 │   ├── abi_constants.mbt              # abi.toml からの tracked な生成定数
-│   └── app/app.mbt                    # Counter の状態・イベント・UI 構築
+│   ├── app/app.mbt                    # Counter の状態・イベント・UI 構築
+│   └── examples/hello/                # Counter 以外の最小 example（ライブラリ）
 ├── build.sh                           # macOS / Linux 用 build driver
 ├── build.ps1                          # Windows 用 build driver
 ├── bundle.sh                          # macOS Counter.app の作成（build.sh から呼び出される）

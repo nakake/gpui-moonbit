@@ -24,7 +24,7 @@
 | 境界横断統合テスト | P1 | ✅ ヘッドレス往復テスト + 3 OS CI | #34 |
 | click ID に依存しない安定 ID | P2 | ✅ `OP_SET_KEY`（重複拒否） | #9 |
 | **計測で正当化できるインクリメンタル更新** | P2 | ❌ 未着手 | #10 |
-| **text 空白パディングのコンテンツ汚染** | P2 | ❌ 未着手 | #16 |
+| **text 空白パディングのコンテンツ汚染** | P2 | ✅ #16 解決済み: 空白パディングを撤廃し、paint-time の ¼px 描画オフセット（`TextGlyphInset`）で先頭グリフのサブピクセル欠けを回避 | #16 |
 
 結論: 「正しく動く demo」の土台（ABI 契約・panic 安全性・ビルド再現性・テスト）は固い。残るのは**「第三者が使える」にするための軸**で、これは codex レビューの射程外だった。
 
@@ -34,11 +34,11 @@
 
 **現状、これはライブラリではなく「ビルドスクリプト付きリポジトリ」である。** 第三者が依存関係として追加し、自分のアプリからビルドする手段がない。
 
-- **`G1` モジュールマニフェストがプレースホルダ。** `moonbit-bindings/moon.mod:12-26` は `name = "username/gpui-bindings"`、`repository = ""`、`description = ""`、`keywords = []`。このままでは mooncakes への公開・`moon add` による消費ができない。
-- **`G2` ビルドがリポジトリ固有のドライバに依存。** Rust staticlib のリンク・マングルシンボル抽出・`native-static-libs` 注入はすべて `build.sh`/`build.ps1` の仕業で、**パッケージ機構で表現されていない**。利用者は `gpui-sys` の Rust ビルド + シンボル抽出 + リンクフラグ生成を自前で再現する必要がある。
+- **`G1` [完了 2026-07-25] モジュールマニフェスト整備。** `moonbit-bindings/moon.mod` の `description` / `repository` / `keywords` を埋め、`moon check` 通過を確認（#48）。
+- **`G2` [保留] ビルドがリポジトリ固有のドライバに依存。** Rust staticlib のリンク・マングルシンボル抽出・`native-static-libs` 注入はすべて `build.sh`/`build.ps1` の仕業で、**パッケージ機構で表現されていない**。利用者は `gpui-sys` の Rust ビルド + シンボル抽出 + リンクフラグ生成を自前で再現する必要がある。保留理由: prebuild パイプラインの実装は別トラック（#48 の G2）で扱う。
 - **`G3` [検証済み 2026-07-24] MoonBit native のパッケージ機構で Rust staticlib 依存の配布は原理的に可能。** `cc-link-flags` は依存から伝播しない（[moon#1595](https://github.com/moonbitlang/moon/issues/1595)）。唯一の経路は実験的機能 `--moonbit-unstable-prebuild`（`moon.mod` に登録した JS/Python スクリプトが依存として消費された場合でも実行され、LinkConfig の `link_libs`/`link_search_paths` が dependents へ伝播する）。2 モジュール構成で実機検証済み（[スパイレポート](spikes/2026-07-24-packaging-feasibility.md)）。リスク: API が「extremely experimental」で変更の可能性。フォールバックとしてテンプレートリポジトリ方式（現状の `build.sh`）を併記する。
-- **`G4` バージョニング/release/changelog/semver が未整備。** C ABI（`abi.toml` の `ABI_VERSION`）と MoonBit モジュールバージョン（`moon.mod` の `0.1.0`）の関係が未定義。
-- **`G5` macOS 配布用の署名・entitlement・icon・パッケージングがない。** codex §3。現状の `.app` バンドルは開発専用（`build.sh` の `--bundle`、issue #40）。
+- **`G4` [完了 2026-07-25] バージョニング方針の整備。** [`versioning.md`](versioning.md) で `ABI_VERSION`（現在 4）とモジュール/クレート semver（現在 0.1.0）の関係・バンプ規則・changelog 方針・リリースチェックリストを定義し、[`CHANGELOG.md`](../CHANGELOG.md) を導入（#48）。
+- **`G5` [保留] macOS 配布用の署名・entitlement・icon・パッケージングがない。** codex §3。現状の `.app` バンドルは開発専用（`build.sh` の `--bundle`、issue #40）。保留理由: 署名・配布整備は別トラックで扱う。
 
 ---
 
@@ -50,16 +50,16 @@
 - **`G7` style 表面の不足。** 現状は `size / bg / flex(row|col) / center / gap / rounded / padding / border` のみ。margin、辺別 padding/border、min/max/auto サイズ、flex-grow/shrink/basis、align/justify、overflow、opacity、shadow、transform、cursor 指定がない。
 - **`G8` typography の不足。** text は単一 size + 単一 color のみ。weight / line-height / align / wrap 制御 / font family / rich text（部分装飾）がない。
 - **`G9` 色の抽象がない。** 全域が生の RGB `Int`（`set_bg(r, g, b)` 等）。alpha 通道なし、`Color` 型なし、テーマ/デザイントークンなし。
-- **`G10` text 空白パディング hack。** `render_node` が全テキストを `format!(" {content} ")` で包み先頭グリフのサブピクセル欠けを回避（`docs/troubleshooting.md`）。パディングがコンテンツ本体を汚染し、将来の選択/コピー/計測 API を阻害する（issue #16）。
+- **`G10` text 空白パディング hack。** #16 解決済み: `render_node` の `format!(" {content} ")` を撤廃し、paint-time 専用の `TextGlyphInset`（prepaint 原点を ¼px 右オフセット、レイアウト・コンテンツは不変）で先頭グリフのサブピクセル欠けを回避（`docs/troubleshooting.md` §2）。
 
 ---
 
 ## 3. コンポーネントモデルと状態管理
 
-- **`G11` コンポーネント抽象がない。** アプリは `click_id` の int を手配線し（`moonbit-bindings/app/app.mbt:108`）、状態はグローバル可変 `count : Array[Int]`（`app.mbt:28`）。props / local state / hooks / context / 再利用可能コンポーネントが皆無。
-- **`G12` イベントルーティングが手動 int switch。** ノード単位の型付きハンドラ/クロージャを張れない。根因は MoonBit native の callback 制約（スカラーのみ、クロージャの C 互換 export がない、codex §2）。
-- **`G13` 状態がグローバル可変配列。** 複数 view / 複数コンポーネントへスケールしない。
-- **`G14` reactive ループが `dispatch` 内にハードコード。** `changed == 1 → ツリー再構築`（`app.mbt:85-93`）。signal 等の宣言的リアクティブプリミティブがない。
+- **`G11` コンポーネント抽象がない。** アプリは `click_id` の int を手配線し（`moonbit-bindings/app/app.mbt:108`）、状態はグローバル可変 `count : Array[Int]`（`app.mbt:28`）。props / local state / hooks / context / 再利用可能コンポーネントが皆無。 **RFC**: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
+- **`G12` イベントルーティングが手動 int switch。** ノード単位の型付きハンドラ/クロージャを張れない。根因は MoonBit native の callback 制約（スカラーのみ、クロージャの C 互換 export がない、codex §2）。 **RFC**: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
+- **`G13` 状態がグローバル可変配列。** 複数 view / 複数コンポーネントへスケールしない。 **RFC**: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
+- **`G14` reactive ループが `dispatch` 内にハードコード。** `changed == 1 → ツリー再構築`（`app.mbt:85-93`）。signal 等の宣言的リアクティブプリミティブがない。 **RFC**: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
 
 ---
 
@@ -67,7 +67,7 @@
 
 - **`G15` 単一ウィンドウ・永久ブロック実行。** `run_window` は 1 ウィンドウを開きイベントループでブロックする（`moonbit-bindings/cmd/main/main.mbt:14`）。複数ウィンドウ、非ブロッキング実行、アプリ級ループ、quit 処理がない。
 - **`G16` ウィンドウ/アプリイベントの欠如。** resize / close / focus / menu / tray 等のイベント経路がない。
-- **`G17` イベントが view 単位でルーティングされない。** `architecture.md:85`「dispatch の 4 スロットに view id は無い」。issue #41 で `run_window` に view id を追加したが、**イベント側の view ルーティングは未解決**。マルチ view 化すると dispatch の配送先が曖昧になる。後戻りしにくい ABI 変更なので、API 表面が膨らむ前に確定させるべき。
+- **`G17` ~~イベントが view 単位でルーティングされない。~~** ✅ #49 解決済み（2026-07-25）: dispatch envelope を 5 スロット `(abi_version, event_kind, view, data_a, data_b)` に拡張（`ABI_VERSION=4`）。slot 2 が view id を運び、`app.dispatch` は view 単位で rebuild をルーティングする。
 
 ---
 
@@ -103,13 +103,13 @@
 「ライブラリ/フレームワークを目指す」なら、機能追加より**消費可能性の確立**が先。
 
 1. **~~【調査・最優先】`G3` パッケージングの成立性。~~** ✅ 検証済み（2026-07-24）。`--moonbit-unstable-prebuild` で成立。[スパイレポート](spikes/2026-07-24-packaging-feasibility.md)参照。次のアクション: 実際の gpui-sys で prebuild スクリプトのプロトタイプ実装（#48 の G2 に接続）。
-2. **`G17` マルチ view/ウィンドウのイベントルーティング。** view id をイベント envelope に載せる。後戻りしにくい ABI 変更なので、API 表面が膨らむ前に確定。
+2. **~~`G17` マルチ view/ウィンドウのイベントルーティング。~~** ✅ 完了（#49、2026-07-25）。5 スロット envelope（`ABI_VERSION=4`）で確定済み。
 3. **`G11`〜`G14` コンポーネント/状態抽象の設計。** click_id int 配線とグローバル可変状態を再利用可能な層へ。フレームワークの骨格。
 4. **`G6`〜`G10` API 表現力の拡充** と **`G18`/`G19` a11y/IME。** 3 の抽象の上に乗せる。
 5. **`G24`〜`G26` テスト基盤**（ヘッドレス layout 検証・ベンチ）。4 と #10 の安全網。
 6. **`G1`/`G2`/`G4`/`G5`/`G27`〜`G29` 配布整備**（マニフェスト・署名・semver・docs・example）。
 
-既存の残り issue は自然に合流する: **#10（インクリメンタル更新）は 5 のベンチ後**、**#16（text padding = `G10`）は 4 のテキスト API 設計時**。
+既存の残り issue は自然に合流する: **#10（インクリメンタル更新）は 5 のベンチ後**、~~**#16（text padding = `G10`）は 4 のテキスト API 設計時**~~ ✅ #16 解決済み。
 
 ---
 
@@ -117,6 +117,6 @@
 
 各 `G*` を issue 化する際の粒度案:
 
-- 単独 issue 向き: `G1`（マニフェスト整備）、~~`G3`（パッケージング調査・スパイク）~~ ✅ 完了（#47）、`G17`（view ルーティング ABI）、`G29`（空 README）。
+- 単独 issue 向き: `G1`（マニフェスト整備）✅、~~`G3`（パッケージング調査・スパイク）~~ ✅ 完了（#47）、`G17`（view ルーティング ABI）✅ 完了（#49）、`G29`（空 README）✅。
 - 設計 RFC 向き（単一 issue では大きすぎる）: `G11`〜`G14`（コンポーネントモデル）、`G6`〜`G9`（widget/style 体系）。
 - 既存 issue に統合: `G10` → #16、`G26` → #10 の前提。
