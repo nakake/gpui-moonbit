@@ -59,6 +59,14 @@
 #define gpui_GPUI_STATUS_DUPLICATE_KEY -9
 
 /**
+ * `gpui_update_text` found no node carrying the requested explicit key in the
+ * committed tree for the view (the view may have no tree, or the key is absent
+ * / belongs to a text node). Callers treat this as "fall back to a full
+ * `gpui_build_tree` rebuild".
+ */
+#define gpui_GPUI_STATUS_KEY_NOT_FOUND -10
+
+/**
  * Copy the text payload for a pending EVENT_TEXT dispatch.
  *
  * `token` is the index passed in `data_a`; `buf` must point to at least `len`
@@ -97,6 +105,31 @@ int32_t gpui_abi_probe(int32_t value);
  * untouched.
  */
 int32_t gpui_build_tree(int32_t view, const uint8_t *ptr, int32_t len);
+
+/**
+ * Update the text of a keyed node in the committed tree for `view` in place,
+ * without rebuilding the tree (issue #10: measurement-justified incremental
+ * update).
+ *
+ * `key_ptr`/`key_len` and `text_ptr`/`text_len` are UTF-8 byte slices (no NUL
+ * terminator; the explicit lengths carry the size, matching how `OP_SET_KEY`
+ * and `OP_TEXT` carry their strings). The function walks the retained
+ * `VIEWS[view]` tree for the div whose `OP_SET_KEY` value equals `key` and
+ * overwrites its first text child's content. The re-render still flows through
+ * the existing dispatch→notify path: `dispatch` returns 1, Rust calls
+ * `cx.notify()`, and `render_node` reads the now-updated `VIEWS[view]`.
+ *
+ * Returns `GPUI_STATUS_OK` on success. Returns `GPUI_STATUS_KEY_NOT_FOUND` when
+ * the view has no committed tree or no keyed text node matches — the caller
+ * (MoonBit) then falls back to a full `gpui_build_tree`. `GPUI_STATUS_INVALID_HANDLE`
+ * for a negative view, `GPUI_STATUS_TRUNCATED_BUFFER` for a null/negative
+ * pointer or length.
+ */
+int32_t gpui_update_text(int32_t view,
+                         const uint8_t *key_ptr,
+                         int32_t key_len,
+                         const uint8_t *text_ptr,
+                         int32_t text_len);
 
 /**
  * Open a window rendering the committed tree for `view` (index into

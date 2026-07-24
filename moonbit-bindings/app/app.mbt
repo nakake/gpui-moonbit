@@ -42,6 +42,13 @@ const BTN_INCREMENT : Int = 3
 ///|
 const BTN_INCREMENT_10 : Int = 4
 
+// Stable key for the count display card's text node. `update_text` addresses it
+// for the incremental in-place update (issue #10); the full `build_tree` path
+// keys the same div so the two stay consistent.
+
+///|
+const COUNT_KEY : String = "count-label"
+
 ///|
 priv enum Event {
   Click(Int) // click_id
@@ -84,13 +91,22 @@ fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
 pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
   let changed = apply_event(decode(version, kind, data_a, data_b))
   if changed == 1 {
-    // Rebuild the tree. On failure the Rust side keeps the old committed tree
-    // (atomic commit), so returning `changed` still lets GPUI re-render it.
-    match build_tree(view) {
+    // Incremental path (issue #10): the only state is `count`, and the only
+    // visible change is the count label text. Update that one keyed text node
+    // in place instead of re-encoding and re-decoding the whole tree. On any
+    // failure (tree not yet committed, key missing) fall back to the full
+    // `build_tree`, which is always correct. Either way, returning `changed`
+    // (1) lets Rust call `cx.notify()` so GPUI re-renders the (now updated)
+    // committed tree.
+    match @username/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{count[0]}") {
       Ok(_) => ()
-      Err(status) => println(
-        "app: build_tree failed: \{@username/gpui-bindings.classify_status(status).to_string()}",
-      )
+      Err(_) =>
+        match build_tree(view) {
+          Ok(_) => ()
+          Err(status) => println(
+            "app: build_tree failed: \{@username/gpui-bindings.classify_status(status).to_string()}",
+          )
+        }
     }
   }
   changed
@@ -251,7 +267,10 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.add_child() // attach the title wrapper to the root
 
   // Count display card: bordered, padded, rounded, with a soft shadow (G7/G9).
+  // Keyed so `update_text` can address its text child for the incremental
+  // in-place update (issue #10) without a full rebuild.
   cb.div()
+  cb.set_key(COUNT_KEY)
   cb.set_bg_color(@username/gpui-bindings.Color::rgb(38, 42, 52))
   cb.set_padding(16.0)
   cb.set_border(2.0, 120, 200, 255)

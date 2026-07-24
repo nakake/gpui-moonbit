@@ -74,6 +74,12 @@ pub const GPUI_STATUS_UNKNOWN_OPCODE: i32 = -7;
 pub const GPUI_STATUS_NO_ROOT: i32 = -8;
 /// Two or more nodes in the committed tree carry the same explicit key.
 pub const GPUI_STATUS_DUPLICATE_KEY: i32 = -9;
+/// `gpui_update_text` found no node carrying the requested explicit key in the
+/// committed tree for the view (the view may have no tree, or the key is absent
+/// / belongs to a text node). Callers treat this as "fall back to a full
+/// `gpui_build_tree` rebuild".
+pub const GPUI_STATUS_KEY_NOT_FOUND: i32 = -10;
+
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
 // symbol for an executable build, so we bind directly to the compiled MoonBit
@@ -1114,6 +1120,87 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
     }
     views[view] = Some(root_node);
     GPUI_STATUS_OK
+}
+
+/// Recursively locate the div carrying `key` and overwrite the `content` of its
+/// first `UiNode::Text` child in place. Returns `true` on a successful update.
+///
+/// A keyed div whose first child is a text node is the canonical "labelled
+/// value" shape (the Counter's count card: a keyed div wrapping one text node).
+/// Only that first text child is touched — sibling text nodes and the rest of
+/// the subtree are left untouched, so an incremental update is a single string
+/// assignment rather than a rebuild. A keyed div with no text child, or a key
+/// that resolves to a text node, yields no update (the caller falls back to a
+/// full rebuild).
+fn update_keyed_text(node: &mut UiNode, key: &str, text: &str) -> bool {
+    let UiNode::Div {
+        key: node_key,
+        children,
+        ..
+    } = node
+    else {
+        return false;
+    };
+    if node_key.as_deref() == Some(key) {
+        if let Some(UiNode::Text { content, .. }) = children.first_mut() {
+            *content = text.to_string();
+            return true;
+        }
+        return false;
+    }
+    children
+        .iter_mut()
+        .any(|child| update_keyed_text(child, key, text))
+}
+
+/// Update the text of a keyed node in the committed tree for `view` in place,
+/// without rebuilding the tree (issue #10: measurement-justified incremental
+/// update).
+///
+/// `key_ptr`/`key_len` and `text_ptr`/`text_len` are UTF-8 byte slices (no NUL
+/// terminator; the explicit lengths carry the size, matching how `OP_SET_KEY`
+/// and `OP_TEXT` carry their strings). The function walks the retained
+/// `VIEWS[view]` tree for the div whose `OP_SET_KEY` value equals `key` and
+/// overwrites its first text child's content. The re-render still flows through
+/// the existing dispatch→notify path: `dispatch` returns 1, Rust calls
+/// `cx.notify()`, and `render_node` reads the now-updated `VIEWS[view]`.
+///
+/// Returns `GPUI_STATUS_OK` on success. Returns `GPUI_STATUS_KEY_NOT_FOUND` when
+/// the view has no committed tree or no keyed text node matches — the caller
+/// (MoonBit) then falls back to a full `gpui_build_tree`. `GPUI_STATUS_INVALID_HANDLE`
+/// for a negative view, `GPUI_STATUS_TRUNCATED_BUFFER` for a null/negative
+/// pointer or length.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_update_text(
+    view: i32,
+    key_ptr: *const u8,
+    key_len: i32,
+    text_ptr: *const u8,
+    text_len: i32,
+) -> i32 {
+    ffi_export("gpui_update_text", || {
+        if view < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        if key_ptr.is_null() || key_len < 0 || text_ptr.is_null() || text_len < 0 {
+            return GPUI_STATUS_TRUNCATED_BUFFER;
+        }
+        let key_bytes = unsafe { std::slice::from_raw_parts(key_ptr, key_len as usize) };
+        let text_bytes = unsafe { std::slice::from_raw_parts(text_ptr, text_len as usize) };
+        let (Ok(key), Ok(text)) = (std::str::from_utf8(key_bytes), std::str::from_utf8(text_bytes))
+        else {
+            return GPUI_STATUS_TRUNCATED_BUFFER;
+        };
+        let mut views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(Some(root)) = views.get_mut(view as usize) else {
+            return GPUI_STATUS_KEY_NOT_FOUND;
+        };
+        if update_keyed_text(root, key, text) {
+            GPUI_STATUS_OK
+        } else {
+            GPUI_STATUS_KEY_NOT_FOUND
+        }
+    })
 }
 
 /// Open a window rendering the committed tree for `view` (index into
@@ -3529,6 +3616,169 @@ mod tests {
         let keyless_b = scroll_handle_for(&store, None);
         keyless_a.set_offset(point(px(0.0), px(-50.0)));
         assert_eq!(keyless_b.offset(), point(px(0.0), px(0.0)));
+    }
+
+    // --- Incremental keyed text update (issue #10) -------------------------
+
+    /// Commit a small tree: a keyed `count` div wrapping one text node, plus a
+    /// sibling keyed `static` div with its own text. Mirrors the Counter's
+    /// count-card shape (keyed div → single text child).
+    fn commit_count_tree(view: i32) {
+        let mut b = Buf::new();
+        b.div().op(OP_SET_KEY).str("root");
+        b.div().op(OP_SET_KEY).str("count");
+        b.text("Count: 0", 120, 200, 255, 44.0);
+        b.add_child(); // text -> count
+        b.add_child(); // count -> root
+        b.div().op(OP_SET_KEY).str("static");
+        b.text("keys: k j r", 130, 135, 148, 14.0);
+        b.add_child(); // text -> static
+        b.add_child(); // static -> root
+        b.set_root();
+        assert_eq!(b.build(view), GPUI_STATUS_OK);
+    }
+
+    /// Read the content of the first text child of the keyed div `key` in the
+    /// committed tree for `view`.
+    fn keyed_text(view: usize, key: &str) -> Option<String> {
+        fn find<'a>(node: &'a UiNode, key: &str) -> Option<&'a str> {
+            let UiNode::Div {
+                key: node_key,
+                children,
+                ..
+            } = node
+            else {
+                return None;
+            };
+            if node_key.as_deref() == Some(key) {
+                return match children.first() {
+                    Some(UiNode::Text { content, .. }) => Some(content.as_str()),
+                    _ => None,
+                };
+            }
+            children.iter().find_map(|c| find(c, key))
+        }
+        with_views(|views| {
+            views
+                .get(view)
+                .and_then(|slot| slot.as_ref())
+                .and_then(|root| find(root, key))
+                .map(str::to_string)
+        })
+    }
+
+    #[::core::prelude::v1::test]
+    fn update_text_updates_keyed_node_in_place() {
+        with_test(|| {
+            commit_count_tree(0);
+            assert_eq!(keyed_text(0, "count").as_deref(), Some("Count: 0"));
+
+            let key = b"count";
+            let text = b"Count: 42";
+            let status = gpui_update_text(
+                0,
+                key.as_ptr(),
+                key.len() as i32,
+                text.as_ptr(),
+                text.len() as i32,
+            );
+            assert_eq!(status, GPUI_STATUS_OK);
+            // The keyed node's text changed in place...
+            assert_eq!(keyed_text(0, "count").as_deref(), Some("Count: 42"));
+            // ...and the sibling subtree is untouched (no rebuild happened).
+            assert_eq!(keyed_text(0, "static").as_deref(), Some("keys: k j r"));
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn update_text_missing_key_returns_not_found() {
+        with_test(|| {
+            commit_count_tree(0);
+            let key = b"does-not-exist";
+            let text = b"x";
+            let status = gpui_update_text(
+                0,
+                key.as_ptr(),
+                key.len() as i32,
+                text.as_ptr(),
+                text.len() as i32,
+            );
+            assert_eq!(status, GPUI_STATUS_KEY_NOT_FOUND);
+            // Tree untouched.
+            assert_eq!(keyed_text(0, "count").as_deref(), Some("Count: 0"));
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn update_text_no_committed_tree_returns_not_found() {
+        with_test(|| {
+            // No build_tree call: the view slot is empty.
+            let key = b"count";
+            let text = b"x";
+            let status = gpui_update_text(
+                0,
+                key.as_ptr(),
+                key.len() as i32,
+                text.as_ptr(),
+                text.len() as i32,
+            );
+            assert_eq!(status, GPUI_STATUS_KEY_NOT_FOUND);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn update_text_rejects_bad_handles() {
+        with_test(|| {
+            commit_count_tree(0);
+            let key = b"count";
+            let text = b"x";
+            // Negative view.
+            assert_eq!(
+                gpui_update_text(
+                    -1,
+                    key.as_ptr(),
+                    key.len() as i32,
+                    text.as_ptr(),
+                    text.len() as i32,
+                ),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            // Null key pointer / negative length.
+            assert_eq!(
+                gpui_update_text(0, std::ptr::null(), 0, text.as_ptr(), text.len() as i32),
+                GPUI_STATUS_TRUNCATED_BUFFER
+            );
+            assert_eq!(
+                gpui_update_text(0, key.as_ptr(), -1, text.as_ptr(), text.len() as i32),
+                GPUI_STATUS_TRUNCATED_BUFFER
+            );
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn update_text_keyed_div_without_text_child_returns_not_found() {
+        with_test(|| {
+            // A keyed div whose only child is another div (no text child).
+            let mut b = Buf::new();
+            b.div().op(OP_SET_KEY).str("root");
+            b.div().op(OP_SET_KEY).str("empty");
+            b.div(); // non-text child
+            b.add_child(); // inner -> empty
+            b.add_child(); // empty -> root
+            b.set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+
+            let key = b"empty";
+            let text = b"x";
+            let status = gpui_update_text(
+                0,
+                key.as_ptr(),
+                key.len() as i32,
+                text.as_ptr(),
+                text.len() as i32,
+            );
+            assert_eq!(status, GPUI_STATUS_KEY_NOT_FOUND);
+        });
     }
 }
 

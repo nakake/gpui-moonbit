@@ -450,6 +450,7 @@ test "Int wraps at the i32 boundary (32-bit machine word)" {
 test "classify_status maps every GPUI_STATUS_* code" {
   assert_eq(classify_status(-1).code(), -1)
   assert_eq(classify_status(-9).code(), -9)
+  assert_eq(classify_status(-10).code(), -10)
   match classify_status(-1) {
     InvalidHandle => ()
     _ => fail("expected InvalidHandle")
@@ -457,6 +458,10 @@ test "classify_status maps every GPUI_STATUS_* code" {
   match classify_status(-9) {
     DuplicateKey => ()
     _ => fail("expected DuplicateKey")
+  }
+  match classify_status(-10) {
+    KeyNotFound => ()
+    _ => fail("expected KeyNotFound")
   }
   // Unmapped codes (including success 0) fall through to Unknown, kept verbatim.
   match classify_status(0) {
@@ -471,7 +476,7 @@ test "classify_status maps every GPUI_STATUS_* code" {
 
 ///|
 test "status_message is a non-empty one-liner per code" {
-  let codes = [-1, -2, -3, -4, -5, -6, -7, -8, -9, 0, -99]
+  let codes = [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, 0, -99]
   for c in codes {
     let msg = status_message(c)
     assert_true(msg.length() > 0)

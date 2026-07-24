@@ -23,7 +23,7 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use gpui::{TestAppContext, TestDispatcher};
 use gpui_sys::headless::layout_bounds;
-use gpui_sys::GPUI_STATUS_OK;
+use gpui_sys::{GPUI_STATUS_OK, GPUI_STATUS_KEY_NOT_FOUND, gpui_update_text};
 use rand::SeedableRng;
 use std::hint::black_box;
 
@@ -123,7 +123,6 @@ fn realistic_tree(rows: usize) -> Vec<u8> {
             .u8(120)
             .u8(200)
             .u8(255)
-            .op(OP_ADD_CHILD) // label -> row
             .op(OP_TEXT)
             .u32(text.len() as u32)
             .bytes(text.as_bytes())
@@ -131,7 +130,8 @@ fn realistic_tree(rows: usize) -> Vec<u8> {
             .u8(20)
             .u8(20)
             .f32(16.0)
-            .op(OP_ADD_CHILD); // text -> row
+            .op(OP_ADD_CHILD) // text -> label (keyed text node for issue #10)
+            .op(OP_ADD_CHILD); // label -> row
         b = b.op(OP_ADD_CHILD); // row -> root
     }
     b.op(OP_SET_ROOT).finish()
@@ -166,6 +166,56 @@ fn bench_decode(c: &mut Criterion) {
     group.finish();
 }
 
+/// Apply the incremental in-place text update to the keyed `label0` node in the
+/// private bench slot (9998). The tree must already be committed there (the
+/// baseline full-rebuild benches keep it populated). This is the issue #10
+/// targeted path: locate one keyed text node and overwrite its content without
+/// decoding or reallocating the rest of the tree.
+fn update_label() {
+    let key = b"label0";
+    let text = b"Item 0 (updated)";
+    let status = gpui_update_text(
+        9998,
+        key.as_ptr(),
+        key.len() as i32,
+        text.as_ptr(),
+        text.len() as i32,
+    );
+    assert_eq!(status, GPUI_STATUS_OK, "keyed label0 must exist after commit");
+}
+
+/// Issue #10: incremental keyed text update vs full-tree rebuild.
+///
+/// Both arms operate on the same 24-row realistic tree in the private slot
+/// (9998). `full_rebuild` re-decodes the entire command buffer (the current
+/// per-event behavior); `update_text` walks the retained tree and overwrites a
+/// single keyed text node in place. The ratio is the measured speedup of the
+/// incremental path — recorded in docs/framework-gaps.md.
+fn bench_incremental_update(c: &mut Criterion) {
+    let buf = realistic_tree(24);
+    // Commit once so the incremental arm has a populated tree to mutate.
+    decode(&buf);
+
+    let mut group = c.benchmark_group("incremental");
+    group.bench_function("full_rebuild_24rows", |b| {
+        b.iter(|| decode(black_box(&buf)))
+    });
+    group.bench_function("update_text_24rows", |b| b.iter(update_label));
+    group.finish();
+
+    // Sanity: the incremental path returns KEY_NOT_FOUND for an absent key,
+    // which is the signal the MoonBit side uses to fall back to a full rebuild.
+    let missing = b"no-such-key";
+    let status = gpui_update_text(
+        9998,
+        missing.as_ptr(),
+        missing.len() as i32,
+        b"x".as_ptr(),
+        1,
+    );
+    assert_eq!(status, GPUI_STATUS_KEY_NOT_FOUND);
+}
+
 fn bench_headless_render(c: &mut Criterion) {
     let buf = realistic_tree(24);
     // Selectors to read back: the root plus a few rows/labels, exercising the
@@ -188,5 +238,5 @@ fn bench_headless_render(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_decode, bench_headless_render);
+criterion_group!(benches, bench_decode, bench_headless_render, bench_incremental_update);
 criterion_main!(benches);

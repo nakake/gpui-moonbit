@@ -25,6 +25,16 @@ extern "C" fn gpui_abi_probe_ffi(value : Int) -> Int = "gpui_abi_probe"
 extern "C" fn gpui_build_tree_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "gpui_build_tree"
 
 ///|
+#borrow(key_ptr, text_ptr)
+extern "C" fn gpui_update_text_ffi(
+  view : Int,
+  key_ptr : Bytes,
+  key_len : Int,
+  text_ptr : Bytes,
+  text_len : Int,
+) -> Int = "gpui_update_text"
+
+///|
 extern "C" fn gpui_run_window_ffi(
   view : Int,
   width : Float,
