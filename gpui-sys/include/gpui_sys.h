@@ -78,6 +78,20 @@ int32_t gpui_event_copy_text(int32_t token, uint8_t *buf, int32_t len);
 int32_t gpui_debug_dump_text(int32_t view, uint8_t *buf, int32_t len);
 
 /**
+ * Cross-boundary ABI probe: echo `value` back unchanged.
+ *
+ * The whole bridge assumes MoonBit's native `Int` is ABI-compatible with
+ * Rust's `i32` (callback envelope, command-buffer operands, status codes).
+ * MoonBit's `main.mbt` type annotation anchors that at `moon check` time,
+ * but nothing verifies the actual register/stack width across the boundary.
+ * The headless round-trip test (issue #54, G23) sends boundary values
+ * (`i32::MAX`, `i32::MIN`, 0, -1) through this probe on every build; any
+ * width or sign-extension mismatch fails the build instead of corrupting
+ * silently at runtime.
+ */
+int32_t gpui_abi_probe(int32_t value);
+
+/**
  * Build and commit a tree for `view` from one command buffer. On any failure
  * the staging state is discarded and the previously committed tree is left
  * untouched.

@@ -18,6 +18,9 @@ extern "C" fn gpui_debug_dump_text_ffi(
 ) -> Int = "gpui_debug_dump_text"
 
 ///|
+extern "C" fn gpui_abi_probe_ffi(value : Int) -> Int = "gpui_abi_probe"
+
+///|
 #borrow(ptr)
 extern "C" fn gpui_build_tree_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "gpui_build_tree"
 

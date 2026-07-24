@@ -184,3 +184,13 @@ sequenceDiagram
 - ビルド/バンドルの orchestration: `build.sh`、`build.ps1`、`bundle.sh`
 - ヘッドレス往復テスト（issue #34）: `moonbit-bindings/cmd/roundtrip/main.mbt`
 - デバッグ用テキスト読み戻し export: `gpui-sys/src/lib.rs`（`gpui_debug_dump_text`）
+
+## 11. MoonBit native 実行時制約
+
+このブリッジは MoonBit native ランタイムの実装挙動に依存しており、以下の制約は API が強制しないため**呼び出し側が守る必要がある**。背景は [`docs/moonbit-native-notes.md`](./moonbit-native-notes.md) §4/§6 と codex レビュー [`docs/reviews/2026-07-16-codex-gpt5.6-sol.md`](./reviews/2026-07-16-codex-gpt5.6-sol.md) §2 に記録されている。
+
+- **callback はメインスレッド限定。** ランタイムは参照カウント方式で、RC は**非アトミック**（`moonbit.h` の `int32_t rc`）。したがって Rust→MoonBit の `app.dispatch` はメインスレッド（MoonBit が開始した GPUI イベントループの内側）からのみ呼んでよい。別スレッドから呼ぶとデータ競合になる。
+- **callback は素のトップレベル関数でなければならない。** MoonBit のクロージャは RC ヒープオブジェクト（`{code ptr + 環境}`）であり、C の関数ポインタとしてエクスポートできない（`#export_name` は実行ファイルビルドで C シンボルを出さない）。Rust→MoonBit は「マングル名を Rust から直参照して呼ぶ」の一択であり、渡す値はスカラに限定する。
+- **envelope はスカラのみ。** イベントは 5×`i32` の envelope（slot 0 = `ABI_VERSION`、slot 2 = view id）で届く。MoonBit のヒープオブジェクトを Rust 側に保持してはならない（incref/decref を避ける）。テキスト等のペイロードは Rust 所有のキューから `gpui_event_copy_text` で同期的にコピーする。
+- **MoonBit `Int` == Rust `i32`。** native の `Int` は 32-bit 2 の補数機械語であり、C 境界とコマンドバッファの wire format は i32/u32 little-endian である。これは実験的前提ではなく、`gpui_abi_probe` による境界値（`i32::MAX` / `i32::MIN` / 0 / -1）の往復がビルドのたびに機械検証する（`cmd/roundtrip`、issue #54 G23）。32-bit wrap セマンティクスは `gpui-bindings_wbtest.mbt` でも固定する。
+- **panic は process abort。** MoonBit の例外は FFI 境界を越えられない（panic はプロセス abort）。そのため callback / エクスポート関数は total に保つ。Rust 側は `ffi_export` が `catch_unwind` で panic を捕捉し、`GPUI_STATUS_INTERNAL_PANIC` を返して境界の外へ panic を漏らさない。

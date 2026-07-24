@@ -75,10 +75,10 @@
 
 - **`G18` アクセシビリティ（a11y）が皆無。**
 - **`G19` IME 合成 API が不十分。** `EVENT_TEXT` は確定テキストを運ぶが、preedit（合成中）イベント・候補ウィンドウ制御がない。
-- **`G20` エラーのアプリ側露出が貧弱。** demo は `build_tree` 失敗を `println` するだけ（`app.mbt:90`）。アプリ作者向けの構造化エラー型/診断 API がない。
-- **`G21` logging / diagnostics API がない。**
-- **`G22` MoonBit native の実行時制約を API が強制も文書化もしていない。** callback は main-thread 限定かつ全関数である必要（非 atomic RC・panic は process-abort、codex §2）。
-- **`G23` MoonBit `Int` == `i32` の ABI 互換が実験的前提。** 自動 ABI サイズチェックがない（codex §2）。`main.mbt:7` の型アノテーションは `moon check` 上のアンカーだが、ABI サイズ保証ではない。
+- **~~`G20` エラーのアプリ側露出が貧弱。~~** ✅ #54 解決済み: `GpuiError` enum + `classify_status` / `status_message` / `expect_ok` を追加し、demo の `println`・`abort` を構造化メッセージに置換。
+- **~~`G21` logging / diagnostics API がない。~~** ✅ #54 解決済み: `status_message`（コードごとの 1 行診断）と `debug_dump_text(view)` ラッパを公開。
+- **~~`G22` MoonBit native の実行時制約を API が強制も文書化もしていない。~~** ✅ #54 解決済み: `docs/architecture.md`「MoonBit native 実行時制約」と `moonbit-bindings/README.md` 制約・注意に文書化（codex §2 を引用）。
+- **~~`G23` MoonBit `Int` == `i32` の ABI 互換が実験的前提。~~** ✅ #54 解決済み: `gpui_abi_probe` の境界値往復（round-trip、ビルドのたび実行）+ 32-bit wrap セマンティクスの wbtest で機械的に検証。
 
 ---
 

@@ -134,6 +134,21 @@ pub extern "C" fn gpui_debug_dump_text(view: i32, buf: *mut u8, len: i32) -> i32
     copy_len as i32
 }
 
+/// Cross-boundary ABI probe: echo `value` back unchanged.
+///
+/// The whole bridge assumes MoonBit's native `Int` is ABI-compatible with
+/// Rust's `i32` (callback envelope, command-buffer operands, status codes).
+/// MoonBit's `main.mbt` type annotation anchors that at `moon check` time,
+/// but nothing verifies the actual register/stack width across the boundary.
+/// The headless round-trip test (issue #54, G23) sends boundary values
+/// (`i32::MAX`, `i32::MIN`, 0, -1) through this probe on every build; any
+/// width or sign-extension mismatch fails the build instead of corrupting
+/// silently at runtime.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_abi_probe(value: i32) -> i32 {
+    ffi_export("gpui_abi_probe", || value)
+}
+
 #[derive(Clone)]
 enum UiNode {
     Div {
@@ -1865,5 +1880,15 @@ mod tests {
         assert_eq!(named_key_id("space"), None);
         assert_eq!(named_key_id(""), None);
         assert_eq!(named_key_id("f13"), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn abi_probe_echoes_boundary_values() {
+        // The MoonBit side of this check lives in cmd/roundtrip (cross-boundary);
+        // here we pin the Rust half: the probe is a pure identity, including the
+        // i32 extremes the round-trip sends.
+        for v in [i32::MAX, i32::MIN, 0, -1, 42, -42] {
+            assert_eq!(gpui_abi_probe(v), v);
+        }
     }
 }

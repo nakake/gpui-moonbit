@@ -128,7 +128,7 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
 
 `dispatch` は状態が変わった場合に `1`、変わらない場合に `0` を返します。`1` のときだけツリーを再構築し、Rust 側が再描画通知（`cx.notify()`）を行います。再構築に失敗しても Rust 側は旧ツリーを保持しているため、`changed` をそのまま返して構いません。
 
-MoonBit の `Int` は native では 64-bit ですが、この callback とコマンドバッファの境界は **i32** です。値は i32 範囲で扱ってください。
+MoonBit native の `Int` は 32-bit であり、この callback とコマンドバッファの境界も **i32** です（`gpui_abi_probe` で機械検証済み）。値は i32 範囲で扱ってください。
 
 `main` 関数では、dead-code elimination が `dispatch` を消さないよう明示的に保持します（[`cmd/main/main.mbt`](cmd/main/main.mbt) を参照）。
 
@@ -150,10 +150,12 @@ MoonBit の `Int` は native では 64-bit ですが、この callback とコマ
 
 - **native バックエンド専用**です。wasm 等の他 target には対応しません。
 - **callback は単一固定契約**です。Rust→MoonBit のイベント経路は `app.dispatch(version, kind, view, data_a, data_b) -> Int`（5×i32 envelope、`ABI_VERSION` = 4）の 1 本だけです。パッケージ `app` と関数 `dispatch` を改名するとマングルシンボルが変わり、Rust 側と build driver の両方の更新が必要になります。
-- **境界の整数は i32** です。MoonBit native の `Int` は 64-bit ですが、FFI 境界とコマンドバッファの wire format は i32/u32 little-endian です。
+- **境界の整数は i32** です。MoonBit native の `Int` は 32-bit 2 の補数機械語であり、FFI 境界とコマンドバッファの wire format は i32/u32 little-endian です。この ABI 互換は `gpui_abi_probe` の境界値往復（ビルドのたびに実行）と wbtest で機械検証されています。
 - **ツリー更新は全再構築**です。状態変化のたびに `build_tree` でツリー全体をコミットし直します（インクリメンタル更新は未実装）。
 - **opcode と ABI 定数は生成物**です。`gpui-sys/abi.toml` を正本として build driver が生成します。`abi_constants.mbt` と `gpui-bindings-ffi.mbt` は手編集しません。
 - 負の status code の意味（無効 handle、バッファの magic/バージョン不一致、未知 opcode、ルート未指定、キー重複など）は [`docs/architecture.md`](../docs/architecture.md) を参照してください。
+- **callback はメインスレッド限定・total 関数**です。ランタイムは非アトミック参照カウントのため、`dispatch` はメインスレッドからのみ呼べます。MoonBit の panic は FFI 境界を越えられず process abort になるため、callback は例外を投げない全関数に保ってください。詳細は [`docs/architecture.md`](../docs/architecture.md) §11「MoonBit native 実行時制約」を参照。
+- **エラーは構造化できます**。`build_tree` / `run_window` の `Err(status)` は、`classify_status(status)` で `GpuiError` に変換でき、`status_message(status)` / `GpuiError::to_string` で 1 行の診断メッセージを得られます。回復できない失敗には `expect_ok(result, ctx)` が構造化メッセージ付きで abort します。
 
 ## ライセンス
 

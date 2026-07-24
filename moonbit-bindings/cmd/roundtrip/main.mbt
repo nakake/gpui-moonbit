@@ -12,6 +12,12 @@ extern "C" fn gpui_build_tree_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "
 #borrow(buf)
 extern "C" fn gpui_debug_dump_text_ffi(view : Int, buf : Bytes, len : Int) -> Int = "gpui_debug_dump_text"
 
+// Cross-boundary ABI probe (issue #54, G23): echo i32 boundary values through
+// Rust and back. MoonBit native `Int` must be ABI-compatible with Rust `i32`
+// for the whole bridge; a width/sign mismatch corrupts silently, so we fail
+// the build here instead.
+extern "C" fn gpui_abi_probe_ffi(value : Int) -> Int = "gpui_abi_probe"
+
 fn main {
   // Retain app.dispatch so the Rust staticlib's mb_dispatch reference resolves.
   let _keep : (Int, Int, Int, Int, Int) -> Int = @username/gpui-bindings/app.dispatch
@@ -66,6 +72,17 @@ fn main {
     }
     i = i + 1
   }
+
+  // Cross-boundary ABI probe (issue #54, G23): i32 boundary values must echo
+  // back unchanged. 0x7FFFFFFF = i32::MAX, -0x80000000 = i32::MIN.
+  let probe_values = [0x7FFFFFFF, -0x80000000, 0, -1, 42]
+  for v in probe_values {
+    let echoed = gpui_abi_probe_ffi(v)
+    if echoed != v {
+      abort("abi probe mismatch: sent \{v}, got \{echoed}")
+    }
+  }
+  println("PASS: abi probe verified (\{probe_values.length()} values)")
 
   println("PASS: round-trip verified (\{n} bytes)")
 }
