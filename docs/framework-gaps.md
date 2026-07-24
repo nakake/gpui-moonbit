@@ -47,9 +47,9 @@
 フレームワークとしての最大の実機能ギャップ。現状の描画要素は **div と text のみ**（`moonbit-bindings/gpui-bindings.mbt`）。
 
 - **`G6` widget 種の不足。** image / text input（編集可能ボックス）/ scroll / list（仮想化）/ stack（z-index）/ absolute 配置 / checkbox・toggle 等が皆無。
-- **`G7` style 表面の不足。** 現状は `size / bg / flex(row|col) / center / gap / rounded / padding / border` のみ。margin、辺別 padding/border、min/max/auto サイズ、flex-grow/shrink/basis、align/justify、overflow、opacity、shadow、transform、cursor 指定がない。
+- **`G7` style 表面の不足。** 現状は `size / bg / flex(row|col) / center / gap / rounded / padding / border` のみ。margin、辺別 padding/border、min/max/auto サイズ、flex-grow/shrink/basis、align/justify、overflow、opacity、shadow、transform、cursor 指定がない。✅ #51 part 1 で margin・min/max サイズ・flex-grow/shrink/basis・align/justify・overflow・opacity・shadow・cursor・absolute 配置+inset を追加（`OP_SET_MARGIN`/`OP_SET_MIN_SIZE`/`OP_SET_MAX_SIZE`/`OP_SET_FLEX_ITEM`/`OP_SET_ALIGN`/`OP_SET_OVERFLOW`/`OP_SET_OPACITY`/`OP_SET_SHADOW`/`OP_SET_CURSOR`/`OP_SET_POSITION`/`OP_SET_INSET`）。未実装: 辺別 padding/border（均一のみ）、transform（gpui 0.2.2 に Style レベルの transform フィールドが無いため意図的に見送り）。
 - **`G8` typography の不足。** text は単一 size + 単一 color のみ。weight / line-height / align / wrap 制御 / font family / rich text（部分装飾）がない。
-- **`G9` 色の抽象がない。** 全域が生の RGB `Int`（`set_bg(r, g, b)` 等）。alpha 通道なし、`Color` 型なし、テーマ/デザイントークンなし。
+- **`G9` 色の抽象がない。** 全域が生の RGB `Int`（`set_bg(r, g, b)` 等）。alpha 通道なし、`Color` 型なし、テーマ/デザイントークンなし。✅ #51 part 1 で `Color` 型（`rgb`/`rgba` + 命名プリセット）と alpha 付きの `set_bg_color`（`OP_SET_BG_COLOR`）を追加。既存の `set_bg(r, g, b)` は後方互換で維持。未実装: テーマ/デザイントークン。
 - **`G10` text 空白パディング hack。** #16 解決済み: `render_node` の `format!(" {content} ")` を撤廃し、paint-time 専用の `TextGlyphInset`（prepaint 原点を ¼px 右オフセット、レイアウト・コンテンツは不変）で先頭グリフのサブピクセル欠けを回避（`docs/troubleshooting.md` §2）。
 
 ---

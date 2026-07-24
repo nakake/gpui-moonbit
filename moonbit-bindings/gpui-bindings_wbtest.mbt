@@ -131,6 +131,182 @@ test "command buffer set_border wire format matches the Rust decoder layout" {
   assert_eq(b.length(), 16)
 }
 
+///|
+fn read_i32_le(b : Bytes, offset : Int) -> Int {
+  // MoonBit's Int is a 32-bit wrapping two's-complement word, so the four
+  // little-endian bytes assembled by read_u32_le already carry the correct
+  // signed i32 value (see the "Int wraps at the i32 boundary" test below).
+  read_u32_le(b, offset)
+}
+
+///|
+test "command buffer set_bg_color wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_bg_color(Color::rgba(10, 20, 30, 128))
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_BG_COLOR | r u8 | g u8 | b u8 | a u8.
+  assert_eq(b[8].to_int(), OP_SET_BG_COLOR)
+  assert_eq(b[9], b'\x0A')
+  assert_eq(b[10], b'\x14')
+  assert_eq(b[11], b'\x1E')
+  assert_eq(b[12], b'\x80')
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_margin wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_margin(1, 2, 3, 4)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_MARGIN | top i32 | right i32 | bottom i32 | left i32.
+  assert_eq(b[8].to_int(), OP_SET_MARGIN)
+  assert_eq(read_i32_le(b, 9), 1)
+  assert_eq(read_i32_le(b, 13), 2)
+  assert_eq(read_i32_le(b, 17), 3)
+  assert_eq(read_i32_le(b, 21), 4)
+  assert_eq(b.length(), 25)
+}
+
+///|
+test "command buffer set_flex wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_flex(1.5, 0.5, 100.0)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_FLEX_ITEM | grow_x1000 i32 | shrink_x1000 i32 | basis_px i32.
+  assert_eq(b[8].to_int(), OP_SET_FLEX_ITEM)
+  assert_eq(read_i32_le(b, 9), 1500) // 1.5 * 1000
+  assert_eq(read_i32_le(b, 13), 500) // 0.5 * 1000
+  assert_eq(read_i32_le(b, 17), 100) // basis px
+  assert_eq(b.length(), 21)
+}
+
+///|
+test "command buffer set_opacity wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_opacity(0.5)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_OPACITY | x1000 i32.
+  assert_eq(b[8].to_int(), OP_SET_OPACITY)
+  assert_eq(read_i32_le(b, 9), 500) // 0.5 * 1000
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_shadow wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_shadow(0, 4, 6, -1, Color::rgba(0, 0, 0, 64))
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_SHADOW | x i32 | y i32 | blur i32 | spread i32 | r u8 | g u8 | b u8 | a u8.
+  assert_eq(b[8].to_int(), OP_SET_SHADOW)
+  assert_eq(read_i32_le(b, 9), 0)
+  assert_eq(read_i32_le(b, 13), 4)
+  assert_eq(read_i32_le(b, 17), 6)
+  assert_eq(read_i32_le(b, 21), -1)
+  assert_eq(b[25], b'\x00')
+  assert_eq(b[26], b'\x00')
+  assert_eq(b[27], b'\x00')
+  assert_eq(b[28], b'\x40')
+  assert_eq(b.length(), 29)
+}
+
+///|
+test "command buffer set_align wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_align(ALIGN_CENTER, JUSTIFY_SPACE_BETWEEN)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_ALIGN | align_items i32 | justify_content i32.
+  assert_eq(b[8].to_int(), OP_SET_ALIGN)
+  assert_eq(read_i32_le(b, 9), ALIGN_CENTER)
+  assert_eq(read_i32_le(b, 13), JUSTIFY_SPACE_BETWEEN)
+  assert_eq(b.length(), 17)
+}
+
+///|
+test "command buffer set_overflow wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_overflow(OVERFLOW_HIDDEN, OVERFLOW_SCROLL)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_OVERFLOW | x_mode i32 | y_mode i32.
+  assert_eq(b[8].to_int(), OP_SET_OVERFLOW)
+  assert_eq(read_i32_le(b, 9), OVERFLOW_HIDDEN)
+  assert_eq(read_i32_le(b, 13), OVERFLOW_SCROLL)
+  assert_eq(b.length(), 17)
+}
+
+///|
+test "command buffer set_cursor wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_cursor(CURSOR_POINTER)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_CURSOR | kind i32.
+  assert_eq(b[8].to_int(), OP_SET_CURSOR)
+  assert_eq(read_i32_le(b, 9), CURSOR_POINTER)
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_absolute wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_absolute(POSITION_ABSOLUTE)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_POSITION | mode i32.
+  assert_eq(b[8].to_int(), OP_SET_POSITION)
+  assert_eq(read_i32_le(b, 9), POSITION_ABSOLUTE)
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_inset wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_inset(10, -1, 20, -1)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_INSET | top i32 | right i32 | bottom i32 | left i32.
+  assert_eq(b[8].to_int(), OP_SET_INSET)
+  assert_eq(read_i32_le(b, 9), 10)
+  assert_eq(read_i32_le(b, 13), -1)
+  assert_eq(read_i32_le(b, 17), 20)
+  assert_eq(read_i32_le(b, 21), -1)
+  assert_eq(b.length(), 25)
+}
+
+///|
+test "command buffer set_min_size wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_min_size(100, -1)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_MIN_SIZE | w i32 | h i32.
+  assert_eq(b[8].to_int(), OP_SET_MIN_SIZE)
+  assert_eq(read_i32_le(b, 9), 100)
+  assert_eq(read_i32_le(b, 13), -1)
+  assert_eq(b.length(), 17)
+}
+
+///|
+test "command buffer set_max_size wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_max_size(-1, 400)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_MAX_SIZE | w i32 | h i32.
+  assert_eq(b[8].to_int(), OP_SET_MAX_SIZE)
+  assert_eq(read_i32_le(b, 9), -1)
+  assert_eq(read_i32_le(b, 13), 400)
+  assert_eq(b.length(), 17)
+}
+
+///|
+test "command buffer set_padding_sides wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_padding_sides(5, 6, 7, 8)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_PADDING_SIDES | top i32 | right i32 | bottom i32 | left i32.
+  assert_eq(b[8].to_int(), OP_SET_PADDING_SIDES)
+  assert_eq(read_i32_le(b, 9), 5)
+  assert_eq(read_i32_le(b, 13), 6)
+  assert_eq(read_i32_le(b, 17), 7)
+  assert_eq(read_i32_le(b, 21), 8)
+  assert_eq(b.length(), 25)
+}
+
 // --- G23: MoonBit native Int is a 32-bit two's-complement machine word ------
 //
 // The whole Rust↔MoonBit bridge assumes `Int` == `i32` across the C boundary.

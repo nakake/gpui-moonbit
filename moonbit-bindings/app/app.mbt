@@ -245,11 +245,13 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.text("Counter", 236, 239, 245, 30.0)
   cb.add_child()
 
-  // Count display card: bordered, padded, rounded.
+  // Count display card: bordered, padded, rounded, with a soft shadow (G7/G9).
   cb.div()
+  cb.set_bg_color(@username/gpui-bindings.Color::rgb(38, 42, 52))
   cb.set_padding(16.0)
   cb.set_border(2.0, 120, 200, 255)
   cb.set_rounded(12.0)
+  cb.set_shadow(0, 4, 8, 0, @username/gpui-bindings.Color::rgba(0, 0, 0, 96))
   cb.text("Count: \{count[0]}", 120, 200, 255, 44.0)
   cb.add_child()
   cb.add_child() // attach the card to the root

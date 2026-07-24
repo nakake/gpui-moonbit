@@ -43,6 +43,62 @@ OP_ADD_CHILD = 11
 OP_SET_ROOT = 12
 OP_SET_PADDING = 13
 OP_SET_BORDER = 14
+OP_SET_BG_COLOR = 15
+OP_SET_MARGIN = 16
+OP_SET_MIN_SIZE = 17
+OP_SET_MAX_SIZE = 18
+OP_SET_FLEX_ITEM = 19
+OP_SET_ALIGN = 20
+OP_SET_OVERFLOW = 21
+OP_SET_OPACITY = 22
+OP_SET_SHADOW = 23
+OP_SET_CURSOR = 24
+OP_SET_POSITION = 25
+OP_SET_INSET = 26
+OP_SET_PADDING_SIDES = 27
+
+# G7 style enum values. These are operand values (not opcodes); they share the
+# same constant-generation + cross-boundary drift guard as the opcodes above so
+# the Rust decoder and the MoonBit encoder can never disagree on the mapping.
+# transform is intentionally absent: gpui 0.2.2 has no Style-level transform.
+
+[align_items]
+ALIGN_DEFAULT = 0
+ALIGN_START = 1
+ALIGN_CENTER = 2
+ALIGN_END = 3
+ALIGN_STRETCH = 4
+
+[justify_content]
+JUSTIFY_DEFAULT = 0
+JUSTIFY_START = 1
+JUSTIFY_CENTER = 2
+JUSTIFY_END = 3
+JUSTIFY_SPACE_BETWEEN = 4
+JUSTIFY_SPACE_AROUND = 5
+
+[overflow]
+OVERFLOW_VISIBLE = 0
+OVERFLOW_HIDDEN = 1
+OVERFLOW_SCROLL = 2
+
+[cursor]
+CURSOR_ARROW = 0
+CURSOR_POINTER = 1
+CURSOR_TEXT = 2
+CURSOR_CROSSHAIR = 3
+CURSOR_GRAB = 4
+CURSOR_GRABBING = 5
+CURSOR_NOT_ALLOWED = 6
+CURSOR_EW_RESIZE = 7
+CURSOR_NS_RESIZE = 8
+CURSOR_COL_RESIZE = 9
+CURSOR_ROW_RESIZE = 10
+CURSOR_NONE = 11
+
+[position]
+POSITION_RELATIVE = 0
+POSITION_ABSOLUTE = 1
 
 [buffer]
 BUFFER_VERSION = 1
