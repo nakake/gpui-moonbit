@@ -10,6 +10,17 @@
 
 - イベントの view 単位ルーティング: dispatch を 5 スロット envelope `app.dispatch(version, kind, view, data_a, data_b)` に拡張し、`ABI_VERSION` を 4 に bump（#49、24c3809）。
 - `moonbit-bindings/moon.mod` のメタデータ整備（`description` / `repository` / `keywords`）と、バージョニング方針文書 `docs/versioning.md`（#48、G1 / G4）。
+- コンポーネントモデルと状態管理の設計 RFC `docs/rfc/0001-component-model.md`（#50、G11–G14）。
+- 消費者向け getting-started: `moonbit-bindings/README.md` 充填、`examples/hello` 追加、公開 API への `///|` doc comment（#55、G27–G29）。
+- 構造化エラー `GpuiError` / `classify_status` / `status_message` / `expect_ok`、診断 `debug_dump_text`、MoonBit native 実行時制約の文書化（architecture.md §11）、`gpui_abi_probe` による自動 Int==i32 チェック（#54、G20–G23）。
+- widget / style 体系の拡充（#51）: `Color` 型（alpha 付き、G9）、margin / min-max / flex / align / overflow / opacity / shadow / cursor / absolute / inset / per-side padding の 13 opcode（G7、15–27）、typography 7 opcode（text size/color/weight/line-height/align/whitespace/family、G8、28–34）、keyed `ScrollHandle` 保持による本物の scroll と `checkbox` / `labeled_row` 合成 widget（G6）。
+- テスト基盤（#53）: gpui `test-support` によるヘッドレス layout golden テスト（G24）、in-crate シード PRNG ファジング + 任意の `fuzz/` scaffold（G25）、criterion ベンチ harness（G26）。
+- キーボードナビゲーション: `OP_SET_FOCUSABLE` / `OP_SET_TAB_INDEX` / `OP_SET_TAB_STOP`（35–37）と Tab / Shift+Tab トラバース。a11y / IME の境界を `docs/a11y-ime.md` に文書化（#52、G18 / G19）。
+- 計測で正当化したインクリメンタル更新: keyed in-place `gpui_update_text` FFI。24 行ツリーで full rebuild 比 約440x（11.4µs → 25.9ns）。汎用 vdom diff は意図的に未実装（#10）。
+
+### Fixed
+
+- テキストの空白パディング workaround を撤廃し、paint-time ¼px オフセット（`TextGlyphInset`）に置換。コンテンツ汚染を解消（#16、G10）。
 
 ## [0.1.0] - 2026-07-24
 
