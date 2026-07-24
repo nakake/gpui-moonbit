@@ -73,8 +73,8 @@
 
 ## 5. 堅牢性 / 本番品質
 
-- **`G18` アクセシビリティ（a11y）が皆無。**
-- **`G19` IME 合成 API が不十分。** `EVENT_TEXT` は確定テキストを運ぶが、preedit（合成中）イベント・候補ウィンドウ制御がない。
+- **`G18` アクセシビリティ（a11y）。** ✅ #52 でキーボードナビゲーションを実装（`OP_SET_FOCUSABLE`/`OP_SET_TAB_INDEX`/`OP_SET_TAB_STOP` + Tab/Shift+Tab トラバース、`window.rs:1413/1424`）。role/label/スクリーンリーダーは gpui 0.2.2 に API がなく上流ブロック（`element.rs:51` の Element trait は id/layout/paint のみ）。フォーカス可視化は `.focus` スタイルで対応可（`G7` の style 拡張、未配線）。詳細は [`docs/a11y-ime.md`](a11y-ime.md)。
+- **`G19` IME 合成。** 確定テキストは `EVENT_TEXT`（`key_char` 経路）で動作済み。preedit（合成中）/候補ウィンドウは `EntityInputHandler`（`input.rs:10`）+ `Window::handle_input`（`window.rs:3400`）+ ステートフルな Rust テキストモデルが必要で、テキスト入力 widget（#51c、`G6`）へ繰延。詳細は [`docs/a11y-ime.md`](a11y-ime.md)。
 - **~~`G20` エラーのアプリ側露出が貧弱。~~** ✅ #54 解決済み: `GpuiError` enum + `classify_status` / `status_message` / `expect_ok` を追加し、demo の `println`・`abort` を構造化メッセージに置換。
 - **~~`G21` logging / diagnostics API がない。~~** ✅ #54 解決済み: `status_message`（コードごとの 1 行診断）と `debug_dump_text(view)` ラッパを公開。
 - **~~`G22` MoonBit native の実行時制約を API が強制も文書化もしていない。~~** ✅ #54 解決済み: `docs/architecture.md`「MoonBit native 実行時制約」と `moonbit-bindings/README.md` 制約・注意に文書化（codex §2 を引用）。

@@ -172,6 +172,15 @@ pub const OP_SET_WHITESPACE : Int = 33
 pub const OP_SET_FONT_FAMILY : Int = 34
 
 ///|
+pub const OP_SET_FOCUSABLE : Int = 35
+
+///|
+pub const OP_SET_TAB_INDEX : Int = 36
+
+///|
+pub const OP_SET_TAB_STOP : Int = 37
+
+///|
 pub const ALIGN_DEFAULT : Int = 0
 
 ///|

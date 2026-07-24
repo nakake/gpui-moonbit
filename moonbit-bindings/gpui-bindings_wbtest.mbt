@@ -392,6 +392,41 @@ test "command buffer set_font_family wire format matches the Rust decoder layout
   assert_eq(b.length(), 16)
 }
 
+// --- Keyboard navigation / a11y wire format (issue #52) --------------------
+
+///|
+test "command buffer set_focusable wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_focusable(1)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_FOCUSABLE | mode i32.
+  assert_eq(b[8].to_int(), OP_SET_FOCUSABLE)
+  assert_eq(read_i32_le(b, 9), 1)
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_tab_index wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_tab_index(3)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_TAB_INDEX | index i32.
+  assert_eq(b[8].to_int(), OP_SET_TAB_INDEX)
+  assert_eq(read_i32_le(b, 9), 3)
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_tab_stop wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_tab_stop(0)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_TAB_STOP | mode i32.
+  assert_eq(b[8].to_int(), OP_SET_TAB_STOP)
+  assert_eq(read_i32_le(b, 9), 0)
+  assert_eq(b.length(), 13)
+}
+
 // --- G23: MoonBit native Int is a 32-bit two's-complement machine word ------
 //
 // The whole Rust↔MoonBit bridge assumes `Int` == `i32` across the C boundary.

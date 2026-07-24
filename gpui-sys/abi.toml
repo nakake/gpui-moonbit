@@ -63,6 +63,9 @@ OP_SET_LINE_HEIGHT = 31
 OP_SET_TEXT_ALIGN = 32
 OP_SET_WHITESPACE = 33
 OP_SET_FONT_FAMILY = 34
+OP_SET_FOCUSABLE = 35
+OP_SET_TAB_INDEX = 36
+OP_SET_TAB_STOP = 37
 
 # G7 style enum values. These are operand values (not opcodes); they share the
 # same constant-generation + cross-boundary drift guard as the opcodes above so
