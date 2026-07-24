@@ -30,13 +30,13 @@
 
 ---
 
-## 1. パッケージング — ライブラリとして消費できない【最重要・要調査】
+## 1. パッケージング — ライブラリとして消費できない【最重要】
 
 **現状、これはライブラリではなく「ビルドスクリプト付きリポジトリ」である。** 第三者が依存関係として追加し、自分のアプリからビルドする手段がない。
 
 - **`G1` モジュールマニフェストがプレースホルダ。** `moonbit-bindings/moon.mod:12-26` は `name = "username/gpui-bindings"`、`repository = ""`、`description = ""`、`keywords = []`。このままでは mooncakes への公開・`moon add` による消費ができない。
 - **`G2` ビルドがリポジトリ固有のドライバに依存。** Rust staticlib のリンク・マングルシンボル抽出・`native-static-libs` 注入はすべて `build.sh`/`build.ps1` の仕業で、**パッケージ機構で表現されていない**。利用者は `gpui-sys` の Rust ビルド + シンボル抽出 + リンクフラグ生成を自前で再現する必要がある。
-- **`G3` [推測・要調査] MoonBit native のパッケージ機構が Rust staticlib 依存を表現できるか未検証。** codex レビュー §2 は「Cargo と Moon は別依存グラフで、カスタムスクリプトがクロスビルド依存を模擬している」と指摘する。`moon.pkg` の `cc-link-flags` で外部アーカイブを指せるかは確認済みだが、**依存パッケージがそれを配布時に自動解決できるか**は未確認。ここが全項目の前提であり、最大の不確実性。不可なら配布形態自体の再設計（テンプレートリポジトリ / CLI スキャフォールド / vendored アーカイブ等）が必要。
+- **`G3` [検証済み 2026-07-24] MoonBit native のパッケージ機構で Rust staticlib 依存の配布は原理的に可能。** `cc-link-flags` は依存から伝播しない（[moon#1595](https://github.com/moonbitlang/moon/issues/1595)）。唯一の経路は実験的機能 `--moonbit-unstable-prebuild`（`moon.mod` に登録した JS/Python スクリプトが依存として消費された場合でも実行され、LinkConfig の `link_libs`/`link_search_paths` が dependents へ伝播する）。2 モジュール構成で実機検証済み（[スパイレポート](spikes/2026-07-24-packaging-feasibility.md)）。リスク: API が「extremely experimental」で変更の可能性。フォールバックとしてテンプレートリポジトリ方式（現状の `build.sh`）を併記する。
 - **`G4` バージョニング/release/changelog/semver が未整備。** C ABI（`abi.toml` の `ABI_VERSION`）と MoonBit モジュールバージョン（`moon.mod` の `0.1.0`）の関係が未定義。
 - **`G5` macOS 配布用の署名・entitlement・icon・パッケージングがない。** codex §3。現状の `.app` バンドルは開発専用（`build.sh` の `--bundle`、issue #40）。
 
@@ -102,7 +102,7 @@
 
 「ライブラリ/フレームワークを目指す」なら、機能追加より**消費可能性の確立**が先。
 
-1. **【調査・最優先】`G3` パッケージングの成立性。** MoonBit native のパッケージ機構で Rust staticlib 依存を表現できるかのツールチェーン調査。不可なら配布形態を再設計。**全項目の前提で、最大の不確実性。**
+1. **~~【調査・最優先】`G3` パッケージングの成立性。~~** ✅ 検証済み（2026-07-24）。`--moonbit-unstable-prebuild` で成立。[スパイレポート](spikes/2026-07-24-packaging-feasibility.md)参照。次のアクション: 実際の gpui-sys で prebuild スクリプトのプロトタイプ実装（#48 の G2 に接続）。
 2. **`G17` マルチ view/ウィンドウのイベントルーティング。** view id をイベント envelope に載せる。後戻りしにくい ABI 変更なので、API 表面が膨らむ前に確定。
 3. **`G11`〜`G14` コンポーネント/状態抽象の設計。** click_id int 配線とグローバル可変状態を再利用可能な層へ。フレームワークの骨格。
 4. **`G6`〜`G10` API 表現力の拡充** と **`G18`/`G19` a11y/IME。** 3 の抽象の上に乗せる。
@@ -117,6 +117,6 @@
 
 各 `G*` を issue 化する際の粒度案:
 
-- 単独 issue 向き: `G1`（マニフェスト整備）、`G3`（パッケージング調査・スパイク）、`G17`（view ルーティング ABI）、`G29`（空 README）。
+- 単独 issue 向き: `G1`（マニフェスト整備）、~~`G3`（パッケージング調査・スパイク）~~ ✅ 完了（#47）、`G17`（view ルーティング ABI）、`G29`（空 README）。
 - 設計 RFC 向き（単一 issue では大きすぎる）: `G11`〜`G14`（コンポーネントモデル）、`G6`〜`G9`（widget/style 体系）。
 - 既存 issue に統合: `G10` → #16、`G26` → #10 の前提。
