@@ -168,12 +168,12 @@ if ($prototypeMatches.Count -eq 0) { throw "could not find an int32_t prototype 
 $signatures = @($prototypeMatches | ForEach-Object {
   (($_.Groups[1].Value -replace '\s+', '') -replace 'int32_t[A-Za-z_][A-Za-z0-9_]*', 'int32_t')
 } | Sort-Object -Unique)
-if ($signatures.Count -ne 1 -or $signatures[0] -ne 'int32_t,int32_t,int32_t,int32_t') {
-  throw "generated MoonBit callback must have four int32_t parameters; found: $($signatures -join '; ')"
+if ($signatures.Count -ne 1 -or $signatures[0] -ne 'int32_t,int32_t,int32_t,int32_t,int32_t') {
+  throw "generated MoonBit callback must have five int32_t parameters; found: $($signatures -join '; ')"
 }
 Set-Content -NoNewline -Path (Join-Path $GSys 'mb_symbol.txt') -Value "$sym`n"
 Write-Host "    symbol / link_name : $sym"
-Write-Host '    signature : int32_t(int32_t, int32_t, int32_t, int32_t)'
+Write-Host '    signature : int32_t(int32_t, int32_t, int32_t, int32_t, int32_t)'
 
 Write-Host '==> [3/5] Build gpui-sys (cargo)'
 # Moon's native backend unconditionally compiles and links with /MT. Build the

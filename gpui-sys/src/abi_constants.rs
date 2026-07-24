@@ -1,6 +1,6 @@
 // Auto-generated from abi.toml by build.rs. Do not edit manually.
 
-pub(crate) const ABI_VERSION: i32 = 3;
+pub(crate) const ABI_VERSION: i32 = 4;
 pub(crate) const EVENT_CLICK: i32 = 1;
 pub(crate) const EVENT_KEY: i32 = 2;
 pub(crate) const EVENT_TEXT: i32 = 3;

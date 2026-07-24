@@ -1,10 +1,11 @@
 // Interactive app: state + logic, written in MoonBit.
 //
 // `dispatch` is the single event entry point that Rust (gpui-sys) calls via its
-// compiled symbol. The four i32 slots carry a versioned event envelope:
-//   (abi_version, event_kind, data_a, data_b)
+// compiled symbol. The five i32 slots carry a versioned event envelope:
+//   (abi_version, event_kind, view, data_a, data_b)
 // Slot 0 is always ABI_VERSION so a stale Rust binary is rejected at runtime.
-// Slot 1 selects the event kind; slots 2–3 are kind-dependent:
+// Slot 1 selects the event kind; slot 2 is the view id (routes the rebuild
+// target); slots 3–4 are kind-dependent:
 //   EVENT_CLICK: data_a = click_id, data_b = 0
 //   EVENT_KEY:   data_a = codepoint, data_b = modifier bits
 //   EVENT_TEXT:  data_a = token, data_b = byte length (copy via gpui_event_copy_text)
@@ -80,12 +81,12 @@ fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
 }
 
 ///|
-pub fn dispatch(version : Int, kind : Int, data_a : Int, data_b : Int) -> Int {
+pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
   let changed = apply_event(decode(version, kind, data_a, data_b))
   if changed == 1 {
     // Rebuild the tree. On failure the Rust side keeps the old committed tree
     // (atomic commit), so returning `changed` still lets GPUI re-render it.
-    match build_tree() {
+    match build_tree(view) {
       Ok(_) => ()
       Err(status) => println("app: build_tree failed with status \{status}")
     }
@@ -230,7 +231,7 @@ fn make_button(
 }
 
 ///|
-pub fn build_tree() -> Result[Unit, Int] {
+pub fn build_tree(view : Int) -> Result[Unit, Int] {
   let cb = @username/gpui-bindings.CommandBuffer::new()
   cb.div() // root
   cb.set_bg(28, 30, 38)
@@ -269,5 +270,5 @@ pub fn build_tree() -> Result[Unit, Int] {
   cb.add_child()
 
   cb.set_root()
-  @username/gpui-bindings.build_tree(0, cb)
+  @username/gpui-bindings.build_tree(view, cb)
 }

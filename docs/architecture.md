@@ -82,19 +82,19 @@ opcode と `BUFFER_VERSION` は `gpui-sys/abi.toml` の `[opcodes]`/`[buffer]` �
 | `GPUI_STATUS_NO_ROOT`（`-8`） | `OP_SET_ROOT` なしでバッファが終了した |
 | `GPUI_STATUS_DUPLICATE_KEY`（`-9`） | コミットするツリー内で 2 つ以上のノードが同じキーを持つ |
 
-`gpui_build_tree` と `gpui_run_window` はこれらのステータスを返す。高レベル MoonBit ラッパー `build_tree` と `run_window` は `Result[Unit, Int]` を返し、`Err(status)` で負の status code を呼び出し元に伝播する。`dispatch` 内の再構築失敗時はログ出力して `changed` をそのまま返す（Rust 側は旧ツリーを保持済みのため、`cx.notify()` で旧ツリーが再描画される）。イベントは現状ビュー単位でルーティングされない（dispatch の 4 スロットに view id は無い）。複数ウィンドウ本体の実装時に設計する（issue #41）。
+`gpui_build_tree` と `gpui_run_window` はこれらのステータスを返す。高レベル MoonBit ラッパー `build_tree` と `run_window` は `Result[Unit, Int]` を返し、`Err(status)` で負の status code を呼び出し元に伝播する。`dispatch` 内の再構築失敗時はログ出力して `changed` をそのまま返す（Rust 側は旧ツリーを保持済みのため、`cx.notify()` で旧ツリーが再描画される）。イベントはビュー単位でルーティングされる: dispatch の slot 2 は view id（`VIEWS` のインデックス、`FfiView.view` 由来）を運び、`build_tree(view)` がそのビューのツリーを再構築する（issue #41/#49）。
 
 ### 4b. Rust → MoonBit（イベントコールバック）
 
-- コールバックは 1つ: MoonBit の `app.dispatch(version, kind, data_a, data_b) -> Int`（`moonbit-bindings/app/app.mbt` 内）。
-- Rust 側の生成された extern はこれを `mb_dispatch(version, kind, data_a, data_b) -> i32` として呼ぶ。`gpui-sys/build.rs` は `gpui-sys/mb_symbol.txt` を読み取り、`#[link_name]` 宣言を出力する。
-- 4 スロットは**バージョニング済みイベントエンベロープ** `(abi_version, event_kind, data_a, data_b)` を運ぶ。slot 0 は常に `ABI_VERSION` で、MoonBit 側は不一致時に `Unknown` を返して古い Rust バイナリをランタイムに拒否する。戻り値 `1` は状態変化（ツリー再構築）、`0` は不変。Rust は `1` のときだけ `cx.notify()` を呼ぶ。
+- コールバックは 1つ: MoonBit の `app.dispatch(version, kind, view, data_a, data_b) -> Int`（`moonbit-bindings/app/app.mbt` 内）。
+- Rust 側の生成された extern はこれを `mb_dispatch(version, kind, view, data_a, data_b) -> i32` として呼ぶ。`gpui-sys/build.rs` は `gpui-sys/mb_symbol.txt` を読み取り、`#[link_name]` 宣言を出力する。
+- 5 スロットは**バージョニング済みイベントエンベロープ** `(abi_version, event_kind, view, data_a, data_b)` を運ぶ。slot 0 は常に `ABI_VERSION` で、MoonBit 側は不一致時に `Unknown` を返して古い Rust バイナリをランタイムに拒否する。slot 2 は view id（`VIEWS` のインデックス）で、再構築対象をルーティングする。戻り値 `1` は状態変化（ツリー再構築）、`0` は不変。Rust は `1` のときだけ `cx.notify()` を呼ぶ。
 - イベント種別・エンベロープ定数・コールバックのパラメータと戻り値型は `gpui-sys/abi.toml` に由来する。ドライバが定数を生成し、シグネチャを検証する。
 - `EVENT_TEXT` のペイロードは Rust 所有のイベントキューに格納され、`gpui_event_copy_text(token, buf, len)` C export 経由で MoonBit が同期的にコピーする。64 ビットポインタは i32 スロットに収まらないため、トークン＋コピー方式を採用する。
-- `EVENT_NAMED_KEY` は Enter/Escape/矢印などの名前付きキーを ABI id（`abi.toml` の `[named_keys]`）で運ぶ。1 文字キーは `key_code` がコードポイントへ変換し `EVENT_KEY` になるのに対し、`key_code` が 0 を返す名前付きキーを `named_key_id` が id へマップして `(3, EVENT_NAMED_KEY, named_key_id, mods_bits)` を送る。新しいイベント種別の追加は後方互換（古い MoonBit は未知 kind を `Unknown` として 0 を返す）なので `ABI_VERSION` は据え置き。
+- `EVENT_NAMED_KEY` は Enter/Escape/矢印などの名前付きキーを ABI id（`abi.toml` の `[named_keys]`）で運ぶ。1 文字キーは `key_code` がコードポイントへ変換し `EVENT_KEY` になるのに対し、`key_code` が 0 を返す名前付きキーを `named_key_id` が id へマップして `(4, EVENT_NAMED_KEY, view, named_key_id, mods_bits)` を送る。新しいイベント種別の追加は後方互換（古い MoonBit は未知 kind を `Unknown` として 0 を返す）なので `ABI_VERSION` は据え置き。
 - `cmd/main/main.mbt` は `app.dispatch` を `_keep` に束縛し、Rust からのみ参照される関数の dead-code elimination（不要コード削除）を防ぐ。
 
-ドライバは固定の `app.dispatch` に対する実際の現在のマングル名を抽出するため、ツールチェーンのマングル方式の変更にも追従する。これはパッケージ/関数名の自動リネームサポートではない。`app` や `dispatch` を変更する場合は、`build.sh` の `PKG_FN_SUFFIX`、`build.ps1` の `$PkgFnSuffix`、および `gpui-sys/build.rs` のコールバック ABI ポリシー/テンプレートを更新する必要がある。MoonBit のマングル名には型が含まれないため、ドライバは `main.c` が利用可能な場合、生成された C から `int32_t` の戻り値と 4 つの `int32_t` パラメータを別途検証する。
+ドライバは固定の `app.dispatch` に対する実際の現在のマングル名を抽出するため、ツールチェーンのマングル方式の変更にも追従する。これはパッケージ/関数名の自動リネームサポートではない。`app` や `dispatch` を変更する場合は、`build.sh` の `PKG_FN_SUFFIX`、`build.ps1` の `$PkgFnSuffix`、および `gpui-sys/build.rs` のコールバック ABI ポリシー/テンプレートを更新する必要がある。MoonBit のマングル名には型が含まれないため、ドライバは `main.c` が利用可能な場合、生成された C から `int32_t` の戻り値と 5 つの `int32_t` パラメータを別途検証する。
 
 ## 5. データフロー
 
@@ -104,12 +104,12 @@ sequenceDiagram
   participant A as app (MoonBit)
   participant S as gpui-sys (VIEWS + render)
   participant G as GPUI ループ
-  M->>A: build_tree()
+  M->>A: build_tree(0)
   A->>S: build_tree(view, コマンドバッファ) [1 FFI]
   M->>G: run_window(0, 600, 500) [ブロック]
   G->>S: FfiView::render が VIEWS をスナップショットしリスナーを配線
   Note over G: クリックまたはキー
-  G->>A: mb_dispatch(version, kind, data_a, data_b)
+  G->>A: mb_dispatch(version, kind, view, data_a, data_b)
   alt 状態が変化
     A->>A: count を変更
     A->>S: build_tree (コマンドバッファ再構築) [1 FFI]
@@ -121,7 +121,7 @@ sequenceDiagram
   end
 ```
 
-`EVENT_CLICK=1`、`EVENT_KEY=2`、`EVENT_TEXT=3`、`EVENT_NAMED_KEY=4` は `abi.toml` に由来する（`ABI_VERSION=3`）。クリックリスナーは `(3, EVENT_CLICK, click_id, 0)` を供給する。外側のフォーカスされたコンテナは 1 文字のキーをその Unicode コードポイントへマップし `(3, EVENT_KEY, codepoint, mods_bits)` を送る。`EVENT_TEXT` は `(3, EVENT_TEXT, token, byte_len)` を送り、MoonBit は `gpui_event_copy_text` で UTF-8 ペイロードをコピーする。`key_char`（IME/レイアウト処理後の実際の入力文字）を使用するため、複数文字や合成文字も正しく届く。名前付きキー（Enter/Escape/矢印/Tab/Backspace/Delete/Home/End/PageUp/PageDown）は `key_code` が 0 を返すため、`named_key_id` が `[named_keys]` の id へマップし `(3, EVENT_NAMED_KEY, named_key_id, mods_bits)` を送る。Enter は `key_char` が `"\n"` のため `EVENT_TEXT` も同時に発火するが、デモの `on_text` は非数字を無視するため二重カウントにはならない。意味の決定は MoonBit が行う: `BTN_DECREMENT=1`、`BTN_RESET=2`、`BTN_INCREMENT=3`、`BTN_INCREMENT_10=4`、`j=106`、`k=107`、`r=114`、`KEY_ENTER`/`KEY_UP`→+1、`KEY_DOWN`→-1、`KEY_ESCAPE`→reset。
+`EVENT_CLICK=1`、`EVENT_KEY=2`、`EVENT_TEXT=3`、`EVENT_NAMED_KEY=4` は `abi.toml` に由来する（`ABI_VERSION=4`）。クリックリスナーは `(4, EVENT_CLICK, view, click_id, 0)` を供給する。外側のフォーカスされたコンテナは 1 文字のキーをその Unicode コードポイントへマップし `(4, EVENT_KEY, view, codepoint, mods_bits)` を送る。`EVENT_TEXT` は `(4, EVENT_TEXT, view, token, byte_len)` を送り、MoonBit は `gpui_event_copy_text` で UTF-8 ペイロードをコピーする。`key_char`（IME/レイアウト処理後の実際の入力文字）を使用するため、複数文字や合成文字も正しく届く。名前付きキー（Enter/Escape/矢印/Tab/Backspace/Delete/Home/End/PageUp/PageDown）は `key_code` が 0 を返すため、`named_key_id` が `[named_keys]` の id へマップし `(4, EVENT_NAMED_KEY, view, named_key_id, mods_bits)` を送る。Enter は `key_char` が `"\n"` のため `EVENT_TEXT` も同時に発火するが、デモの `on_text` は非数字を無視するため二重カウントにはならない。意味の決定は MoonBit が行う: `BTN_DECREMENT=1`、`BTN_RESET=2`、`BTN_INCREMENT=3`、`BTN_INCREMENT_10=4`、`j=106`、`k=107`、`r=114`、`KEY_ENTER`/`KEY_UP`→+1、`KEY_DOWN`→-1、`KEY_ESCAPE`→reset。
 
 ## 6. ビルドと実行のパイプライン
 
@@ -134,7 +134,7 @@ sequenceDiagram
 1. ネイティブのホスト/ターゲットと、必要な MoonBit、Rust、コンパイラ/リンカ、シンボルツールを検証する。ツールチェーンのバージョンを表示し、診断とリンクのためにネイティブの Rust ホストと実際の Cargo ターゲットディレクトリを導出する。
 2. `gpui-sys/abi.toml` から MoonBit の ABI 定数を生成する。**現在生成されている** `gpui-sys/include/gpui_sys.h` に対して `bindgen-moonbit` を実行し、生成された MoonBit ファイルをフォーマットする。
 3. fatal な `moon check` を実行し、その後 Cargo 由来のネイティブライブラリをまだ持たない状態でコールドな `moon build` を行う。このブートストラップ段階ではネイティブリンクの失敗が想定される。完全な Cargo 一覧を用いる後のビルドが厳密なリンクのゲートである。
-4. `app.dispatch` のマングルされたシンボルをちょうど 1 つ抽出する。`main.c` が存在する場所では、生成された C のプロトタイプを `int32_t` の戻り値と 4 つの `int32_t` パラメータとして検証する。`cmd/main/main.mbt` の明示的な `_keep` 型が、全プラットフォームにおける MoonBit コンパイル時のシグネチャアンカーである。
+4. `app.dispatch` のマングルされたシンボルをちょうど 1 つ抽出する。`main.c` が存在する場所では、生成された C のプロトタイプを `int32_t` の戻り値と 5 つの `int32_t` パラメータとして検証する。`cmd/main/main.mbt` の明示的な `_keep` 型が、全プラットフォームにおける MoonBit コンパイル時のシグネチャアンカーである。
 5. 検出されたネイティブの Rust ホスト向けに `gpui-sys` をビルドし、`cargo rustc --lib --crate-type staticlib -- --print native-static-libs` を捕捉し、Cargo metadata が報告するターゲットディレクトリを使って最終的なプラットフォーム用 `moon.pkg` を生成する。`build.rs` は `mb_symbol.txt` を読み取り、コールバックの extern を生成し、Rust の ABI 定数を再生成し、cbindgen で `include/gpui_sys.h` を再生成する。
 6. MoonBit のリンク済み出力を削除して再度ビルドし、新しい Rust 静的ライブラリと Cargo 由来のネイティブ依存に対して強制的に再リンクする。
 7. リンケージを検証する。macOS/Linux は最終バイナリを調べ、コールバック定義がちょうど 1 つであることを確認する。Windows は、MoonBit の `main.obj` にコールバック定義が 1 つ、`gpui_sys.lib` に未解決参照が 1 つあること、および最終リンクが成功することを検証する（リンク済み PE は通常 COFF シンボルテーブルを省略するため）。
@@ -148,7 +148,7 @@ sequenceDiagram
 ## 7. 不変条件と落とし穴
 
 - **テキスト:** 借用した UTF-8 の `Bytes` と長さを渡す。MoonBit の `String` を C ポインタとして渡したり、NUL 終端の C 文字列契約を用いたりしてはならない。
-- **コールバック:** 現在のマングル名は抽出されるが、固定の `app.dispatch(version, kind, data_a, data_b) -> i32`、その 4 つの `i32` パラメータ（slot 0 = ABI_VERSION）、および `0`/`1` の結果ポリシーはチェックされる。パッケージ/関数名のリネームには、両ドライバの suffix 更新が必要である。
+- **コールバック:** 現在のマングル名は抽出されるが、固定の `app.dispatch(version, kind, view, data_a, data_b) -> i32`、その 5 つの `i32` パラメータ（slot 0 = ABI_VERSION、slot 2 = view id）、および `0`/`1` の結果ポリシーはチェックされる。パッケージ/関数名のリネームには、両ドライバの suffix 更新が必要である。
 - **再リンク:** `gpui-sys` を変更した後は、ルートのドライバを使うか、`moon build` の前に MoonBit のリンク済み出力を明示的にクリーンすること。
 - **ロック:** render は、リスナーが MoonBit コールバックを呼び出し得る前に、`VIEWS` をスナップショットして解放しなければならない。
 - **キーボード:** macOS では `.app` を実行すること。フォーカスは `render` 中ではなく、GPUI ビュー構築時に割り当てられる。

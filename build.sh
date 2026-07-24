@@ -263,11 +263,11 @@ if [ -n "$MAIN_C" ]; then
     | sed -E 's/int32_t[A-Za-z_][A-Za-z0-9_]*/int32_t/g' \
     | sort -u || true)"
   PROTOTYPE_COUNT="$(printf '%s\n' "$PROTOTYPES" | sed '/^$/d' | wc -l)"
-  if [ "$PROTOTYPE_COUNT" -ne 1 ] || [ "$PROTOTYPES" != "int32_t,int32_t,int32_t,int32_t" ]; then
-    echo "ERROR: generated MoonBit callback must be int32_t ${SYM}(int32_t, int32_t, int32_t, int32_t); found: ${PROTOTYPES:-none}" >&2
+  if [ "$PROTOTYPE_COUNT" -ne 1 ] || [ "$PROTOTYPES" != "int32_t,int32_t,int32_t,int32_t,int32_t" ]; then
+    echo "ERROR: generated MoonBit callback must be int32_t ${SYM}(int32_t, int32_t, int32_t, int32_t, int32_t); found: ${PROTOTYPES:-none}" >&2
     exit 1
   fi
-  echo "    signature : int32_t(int32_t, int32_t, int32_t, int32_t)"
+  echo "    signature : int32_t(int32_t, int32_t, int32_t, int32_t, int32_t)"
 else
   echo "    signature : skipped (generated main.c is unavailable on this platform)"
 fi
