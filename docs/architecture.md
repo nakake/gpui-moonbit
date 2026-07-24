@@ -33,6 +33,7 @@
 - 外側の Rust レンダリングコンテナ（MoonBit が生成したルートノードではない）は全サイズの flex column で、`FfiView.focus` を追跡し `on_key_down` を受け取る。各 div は安定キーがあればそれを GPUI `ElementId`（`"gpui_key:{key}"`）として使い、なければクリック可能 div に限り click_id から ID（`"gpui_click"`）を合成する。クリック可能な div には `on_click` リスナーが割り当てられる。
 - 状態変更イベントの後、MoonBit は新しいコマンドバッファでツリーをゼロから再構築して `build_tree` する。何もしないイベントは再構築も commit もスキップする。
 - **安定ノード識別（issue #9）**: `set_key(key)` は div に明示的な安定キーを設定する。設定されたキーは GPUI の `ElementId`（`"gpui_key:{key}"`）になり、クリック有無に関わらず再構築を跨いで stateful element の同一性を保つ。キー未設定のクリック可能 div は従来どおり click_id から ID を合成する（`"gpui_click"`）。click_id はアクションルーティング専用であり、キーとは独立（click_id の重複は許容、キーの重複は `build_tree` が拒否）。
+- **スクロール状態の保持（issue #51 G6）**: `OP_SET_OVERFLOW` で `SCROLL` を指定した軸を持つ div は実際のスクロールコンテナになる。`render_node` は各スクロール div に gpui の `ScrollHandle` を割り当てるが、ツリーは状態変更のたびにゼロから再構築されるため、ハンドルはツリーの外で保持される。保持先は view ごとの `FfiView.scroll_handles: Rc<RefCell<HashMap<String, ScrollHandle>>>` で、`OP_SET_KEY` の値をキーにする。`ScrollHandle` は `Rc` ベースで `Send` でないため、`Mutex` 下のグローバル `VIEWS` には置けず、メインスレッド専用である view エンティティ内に置く。キー付きスクロール div は再構築を跨いでスクロール位置を維持し、キーなしスクロール div は毎回の再構築で新しいハンドル（先頭位置）になる。スクロール追跡には element state が必要なため、スクロール div は常に GPUI id を持つ（キー付きは `"gpui_key:{key}"`、キーなしは一時 id `"gpui_scroll"`）。
 
 ## 4. FFI 契約（双方向）
 

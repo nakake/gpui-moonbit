@@ -432,8 +432,9 @@ pub fn CommandBuffer::set_align(
 ///|
 /// スタックトップの div の overflow（はみ出しの扱い）を軸別に設定します。
 /// `OVERFLOW_VISIBLE` / `OVERFLOW_HIDDEN` / `OVERFLOW_SCROLL` を渡します。
-/// 注: `SCROLL` はスクロールバー領域を予約しますが、ScrollHandle なしでは `HIDDEN`
-/// と同様にクリップするだけです（スクロール本体は未実装の scroll widget が必要です）。
+/// `SCROLL` を指定した軸は実際のスクロールになります。Rust 側はスクロール div に
+/// 保持された `ScrollHandle` を割り当て、`set_key` でキーを付けた div は再構築をまたいで
+/// スクロール位置を維持します（キーなしのスクロール div は毎回の再構築で先頭に戻ります）。
 pub fn CommandBuffer::set_overflow(
   self : CommandBuffer,
   x : Int,

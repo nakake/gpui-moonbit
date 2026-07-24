@@ -1,6 +1,9 @@
 use gpui::*;
 use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
 use std::sync::Mutex;
 
 mod abi_constants;
@@ -1069,7 +1072,11 @@ fn run_window(view: usize, width: f32, height: f32) {
                     // so key events never arrive.
                     let focus = cx.focus_handle();
                     window.focus(&focus);
-                    FfiView { focus, view }
+                    FfiView {
+                        focus,
+                        view,
+                        scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+                    }
                 })
             },
         )
@@ -1110,6 +1117,15 @@ struct FfiView {
     focus: FocusHandle,
     /// Index into `VIEWS` whose committed tree this view renders.
     view: usize,
+    /// Retained scroll handles, keyed by the div's `OP_SET_KEY` value. The tree
+    /// is rebuilt from scratch on every state change, so a scroll div's
+    /// position only survives the rebuild if its `ScrollHandle` lives outside
+    /// the tree. `ScrollHandle` is `Rc`-based (not `Send`), so the store lives
+    /// here in the per-view entity — which only ever runs on the main thread —
+    /// rather than in the `Mutex`-guarded `VIEWS` global. `render_node` looks
+    /// up (or inserts) the handle for keyed scroll divs; keyless scroll divs
+    /// get a fresh handle per render and reset to the top on each rebuild.
+    scroll_handles: Rc<RefCell<HashMap<String, ScrollHandle>>>,
 }
 
 impl Render for FfiView {
@@ -1156,7 +1172,7 @@ impl Render for FfiView {
                 }
             }));
         if let Some(node) = &root {
-            if let Some(el) = render_node(node, cx, true, self.view) {
+            if let Some(el) = render_node(node, cx, true, &self.scroll_handles, &Cell::new(0)) {
                 d = d.child(el);
             }
         }
@@ -1266,9 +1282,10 @@ fn map_justify_content(id: i32) -> Option<JustifyContent> {
 }
 
 /// Map an ABI `OVERFLOW_*` id to a gpui `Overflow`. Unknown ids map to `None`.
-/// Note: `Scroll` reserves scrollbar space (`Style::scrollbar_width`, default 0)
-/// but without a `ScrollHandle` it clips like `Hidden` — scrolling itself needs
-/// the (not-yet-exposed) scroll widget.
+/// `Scroll` becomes real scrolling in `render_node`: any div whose overflow is
+/// `Scroll` on either axis is tracked with a retained `ScrollHandle` (keyed by
+/// the node's `OP_SET_KEY` value when present), so scroll position survives the
+/// full tree rebuild that every state change triggers.
 fn map_overflow(id: i32) -> Option<Overflow> {
     match id {
         OVERFLOW_VISIBLE => Some(Overflow::Visible),
@@ -1327,11 +1344,38 @@ fn map_whitespace(id: i32) -> Option<WhiteSpace> {
     }
 }
 
+/// Look up (or create) the retained `ScrollHandle` for a scroll div. Keyed
+/// divs (those with an `OP_SET_KEY` value) reuse the same handle across every
+/// rebuild, so their scroll position persists; keyless divs get a fresh handle
+/// each render and reset to the top. Handles live in the per-view store because
+/// `ScrollHandle` is `Rc`-based and not `Send`, so it cannot sit in the
+/// `Mutex`-guarded `VIEWS` global.
+fn scroll_handle_for(
+    scroll_handles: &Rc<RefCell<HashMap<String, ScrollHandle>>>,
+    key: Option<&str>,
+) -> ScrollHandle {
+    match key {
+        Some(key) => scroll_handles
+            .borrow_mut()
+            .entry(key.to_owned())
+            .or_insert_with(ScrollHandle::new)
+            .clone(),
+        None => ScrollHandle::new(),
+    }
+}
+
+/// Build the GPUI element for one committed node. `scroll_handles` is the
+/// per-view retained-handle store (see `FfiView.scroll_handles`): scroll divs
+/// look up or insert their handle here so scroll position survives the full
+/// tree rebuild that every state change triggers. `keyless_scroll_id` hands
+/// out per-render ids for scroll divs without an `OP_SET_KEY` (their handle is
+/// ephemeral and their position resets on each rebuild).
 fn render_node(
     node: &UiNode,
     cx: &mut Context<FfiView>,
     fill_available_space: bool,
-    view: usize,
+    scroll_handles: &Rc<RefCell<HashMap<String, ScrollHandle>>>,
+    keyless_scroll_id: &Cell<usize>,
 ) -> Option<AnyElement> {
     match node {
         UiNode::Div {
@@ -1375,7 +1419,7 @@ fn render_node(
             // aliasing borrow.
             let mut child_elements: Vec<AnyElement> = Vec::new();
             for child in children {
-                if let Some(el) = render_node(child, cx, false, view) {
+                if let Some(el) = render_node(child, cx, false, scroll_handles, keyless_scroll_id) {
                     child_elements.push(el);
                 }
             }
@@ -1470,14 +1514,28 @@ fn render_node(
                     d.style().justify_content = Some(v);
                 }
             }
-            if let Some((x, y)) = overflow {
+            // G6 scroll: `Overflow::Scroll` on either axis makes this a real
+            // scroll container. The handle is retained per view (keyed by the
+            // node's `OP_SET_KEY` value) so the scroll position survives the
+            // full tree rebuild every state change triggers; keyless scroll
+            // divs get a fresh handle and reset to the top on each rebuild.
+            // The handle is applied in the identity branches below, where the
+            // element has an id (`track_scroll` needs `StatefulInteractiveElement`).
+            let scroll_handle = if let Some((x, y)) = overflow {
                 if let Some(v) = map_overflow(*x) {
                     d.style().overflow.x = Some(v);
                 }
                 if let Some(v) = map_overflow(*y) {
                     d.style().overflow.y = Some(v);
                 }
-            }
+                if *x == OVERFLOW_SCROLL || *y == OVERFLOW_SCROLL {
+                    Some(scroll_handle_for(scroll_handles, key.as_deref()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             if let Some(op) = opacity {
                 d = d.opacity(*op);
             }
@@ -1568,10 +1626,15 @@ fn render_node(
             // A keyed div gets an id even when not clickable, so stateful
             // elements that only need identity (not click routing) are stable
             // across rebuilds. Duplicate keys are rejected at commit, so ids
-            // never collide here.
+            // never collide here. A scroll div always gets an id (scroll
+            // tracking requires element state): keyed ones use their key,
+            // keyless scroll divs get an ephemeral per-render id.
             match (key.as_deref(), *on_click) {
                 (Some(key), on_click) => {
                     let mut d = d.id(SharedString::from(format!("gpui_key:{key}")));
+                    if let Some(handle) = &scroll_handle {
+                        d = d.track_scroll(handle);
+                    }
                     if let Some(cid) = on_click {
                         d = d
                             .cursor_pointer()
@@ -1585,8 +1648,11 @@ fn render_node(
                 }
                 (None, Some(cid)) => {
                     // Legacy: identity synthesized from the click id.
-                    let el = d
-                        .id(("gpui_click", cid as usize))
+                    let mut el = d.id(("gpui_click", cid as usize));
+                    if let Some(handle) = &scroll_handle {
+                        el = el.track_scroll(handle);
+                    }
+                    let el = el
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _ev: &ClickEvent, _win, cx| {
                             let view = this.view as i32;
@@ -1596,7 +1662,24 @@ fn render_node(
                         .into_any_element();
                     Some(el)
                 }
-                (None, None) => Some(d.into_any_element()),
+                (None, None) => match &scroll_handle {
+                    Some(handle) => {
+                        // Keyless scroll div: `track_scroll` needs element state,
+                        // which needs an id, so synthesize one. The counter only
+                        // disambiguates multiple keyless scroll divs within one
+                        // render; it resets each render. Position still resets on
+                        // every rebuild because the handle is fresh (a tracked
+                        // handle's offset comes from the handle, not element state).
+                        let id = keyless_scroll_id.get();
+                        keyless_scroll_id.set(id + 1);
+                        Some(
+                            d.id(("gpui_scroll", id))
+                                .track_scroll(handle)
+                                .into_any_element(),
+                        )
+                    }
+                    None => Some(d.into_any_element()),
+                },
             }
         }
         UiNode::Text {
@@ -3165,5 +3248,35 @@ mod tests {
                 assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
             }
         });
+    }
+
+    // --- G6 scroll handle retention (issue #51) ----------------------------
+
+    /// A keyed scroll div must reuse the same `ScrollHandle` across renders so
+    /// its scroll position survives the full tree rebuild every state change
+    /// triggers. `ScrollHandle` is `Rc`-based, so two lookups of the same key
+    /// share one underlying offset cell: mutating it through one handle is
+    /// visible through the other. This is the headless proof of the retention
+    /// contract (the real scroll wiring needs a window and is exercised by the
+    /// demo). Keyless divs get a fresh handle each call and share nothing.
+    #[::core::prelude::v1::test]
+    fn keyed_scroll_handle_is_retained_across_renders() {
+        let store = Rc::new(RefCell::new(HashMap::new()));
+
+        // Two renders of the same keyed div → the same retained handle.
+        let first = scroll_handle_for(&store, Some("list"));
+        let second = scroll_handle_for(&store, Some("list"));
+        first.set_offset(point(px(0.0), px(-120.0)));
+        assert_eq!(second.offset(), point(px(0.0), px(-120.0)));
+
+        // A distinct key gets an independent handle (still at the origin).
+        let other = scroll_handle_for(&store, Some("other"));
+        assert_eq!(other.offset(), point(px(0.0), px(0.0)));
+
+        // Keyless divs never retain: every call is a fresh, isolated handle.
+        let keyless_a = scroll_handle_for(&store, None);
+        let keyless_b = scroll_handle_for(&store, None);
+        keyless_a.set_offset(point(px(0.0), px(-50.0)));
+        assert_eq!(keyless_b.offset(), point(px(0.0), px(0.0)));
     }
 }
