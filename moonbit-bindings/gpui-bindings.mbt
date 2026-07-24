@@ -34,6 +34,7 @@ pub enum GpuiError {
   UnknownOpcode // GPUI_STATUS_UNKNOWN_OPCODE (-7)
   NoRoot // GPUI_STATUS_NO_ROOT (-8)
   DuplicateKey // GPUI_STATUS_DUPLICATE_KEY (-9)
+  KeyNotFound // GPUI_STATUS_KEY_NOT_FOUND (-10)
   Unknown(Int) // any other code
 }
 
@@ -52,6 +53,7 @@ pub fn classify_status(code : Int) -> GpuiError {
     -7 => UnknownOpcode
     -8 => NoRoot
     -9 => DuplicateKey
+    -10 => KeyNotFound
     _ => Unknown(code)
   }
 }
@@ -70,6 +72,7 @@ pub fn status_message(code : Int) -> String {
     UnknownOpcode => "command buffer names an unknown opcode"
     NoRoot => "command buffer committed without OP_SET_ROOT"
     DuplicateKey => "duplicate explicit key in the committed tree"
+    KeyNotFound => "no keyed text node matches in the committed tree"
     Unknown(c) => "unknown status code \{c}"
   }
 }
@@ -87,6 +90,7 @@ pub fn GpuiError::code(self : GpuiError) -> Int {
     UnknownOpcode => -7
     NoRoot => -8
     DuplicateKey => -9
+    KeyNotFound => -10
     Unknown(c) => c
   }
 }
@@ -695,6 +699,39 @@ pub fn CommandBuffer::to_bytes(self : CommandBuffer) -> Bytes {
 pub fn build_tree(view : Int, cb : CommandBuffer) -> Result[Unit, Int] {
   let bytes = cb.to_bytes()
   let status = gpui_build_tree_ffi(view, bytes, bytes.length())
+  if status == 0 {
+    Ok(())
+  } else {
+    Err(status)
+  }
+}
+
+///|
+/// `view` にコミット済みのツリーで、`key`（`set_key` で付けた安定 ID）を持つ div の
+/// テキストを**その場で**更新します（issue #10: 計測で正当化したインクリメンタル更新）。
+/// ツリー全体を再送信する `build_tree` とは異なり、キー付きノードのテキスト子だけを
+/// 書き換えるため、デコードもツリー再構築も起きません。再描画は既存の dispatch→notify
+/// 経路（`dispatch` が 1 を返す → Rust が `cx.notify()` → `render_node` が更新済みの
+/// `VIEWS[view]` を読む）でそのまま行われます。
+///
+/// 対象ノードが見つからない場合（ツリー未コミット、キー不一致、キー付き div にテキスト
+/// 子がない）は `Err(GPUI_STATUS_KEY_NOT_FOUND)` を返すので、呼び出し側は `build_tree` に
+/// フォールバックしてください。フルリビルド経路は引き続き既定の正しいフォールバック
+/// です。これは opt-in の最適化であり、汎用 vdom diff は意図的に実装していません。
+pub fn update_text(
+  view : Int,
+  key : String,
+  text : String,
+) -> Result[Unit, Int] {
+  let key_bytes = to_utf8_bytes(key)
+  let text_bytes = to_utf8_bytes(text)
+  let status = gpui_update_text_ffi(
+    view,
+    key_bytes,
+    key_bytes.length(),
+    text_bytes,
+    text_bytes.length(),
+  )
   if status == 0 {
     Ok(())
   } else {
