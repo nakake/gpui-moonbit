@@ -1,0 +1,187 @@
+//! G24 golden layout tests.
+//!
+//! Each test decodes a hand-built command buffer through the real decoder,
+//! renders it headlessly through the real `render_node` path, and asserts the
+//! exact laid-out bounds of keyed elements. The headless stack is fully
+//! deterministic (taffy rounding + gpui's `NoopTextSystem`: ascent 1025,
+//! descent 275 per 1000 units; glyph advance 600/1000·size), so the goldens
+//! below were captured from the first verified run and now serve as a
+//! regression net: any drift in decoding, style mapping, or gpui layout
+//! fails here with the offending selector named.
+//!
+//! The headless window is the `TestDisplay`'s 1920×1080; `FfiView`'s root
+//! fills it, so a root without an explicit size measures 1920×1080 and
+//! children lay out from the top-left corner.
+
+use crate::headless::{assert_bounds_eq, layout_bound, layout_bounds};
+use crate::abi_constants::{ALIGN_START, BUFFER_VERSION, JUSTIFY_DEFAULT, OP_ADD_CHILD, OP_DIV,
+    OP_SET_ALIGN, OP_SET_BORDER, OP_SET_FLEX, OP_SET_GAP, OP_SET_KEY, OP_SET_PADDING,
+    OP_SET_ROOT, OP_SET_SIZE, OP_TEXT};
+use crate::GPUI_STATUS_BAD_BUFFER_VERSION;
+use gpui::TestAppContext;
+
+/// Minimal command-buffer builder (little-endian, matching the wire layout
+/// documented on `build_tree_from_buffer`).
+struct Buf(Vec<u8>);
+
+impl Buf {
+    fn new() -> Self {
+        let mut b = Buf(Vec::new());
+        b.0.extend_from_slice(b"GPUI");
+        b.0.extend_from_slice(&BUFFER_VERSION.to_le_bytes());
+        b
+    }
+    fn op(mut self, opcode: i32) -> Self {
+        self.0.push(opcode as u8);
+        self
+    }
+    fn u8(self, v: u8) -> Self {
+        self.op(v as i32)
+    }
+    fn u32(mut self, v: u32) -> Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    fn f32(mut self, v: f32) -> Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    fn key(self, k: &str) -> Self {
+        self.op(OP_SET_KEY).u32(k.len() as u32).bytes(k.as_bytes())
+    }
+    fn bytes(mut self, bs: &[u8]) -> Self {
+        self.0.extend_from_slice(bs);
+        self
+    }
+    fn div(self) -> Self {
+        self.op(OP_DIV)
+    }
+    fn size(self, w: f32, h: f32) -> Self {
+        self.op(OP_SET_SIZE).f32(w).f32(h)
+    }
+    fn add_child(self) -> Self {
+        self.op(OP_ADD_CHILD)
+    }
+    fn root(self) -> Self {
+        self.op(OP_SET_ROOT)
+    }
+    fn finish(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+/// A fixed-size div at the window origin.
+#[gpui::test]
+fn sized_div(cx: &mut TestAppContext) {
+    let buf = Buf::new().div().key("box").size(100.0, 50.0).root().finish();
+    let b = layout_bound(cx, &buf, "box").expect("decode");
+    assert_bounds_eq("box", b, 0.0, 0.0, 100.0, 50.0);
+}
+
+/// A flex row with a gap and two fixed-size children: the row fills the
+/// window, children sit side by side with the gap between them.
+#[gpui::test]
+fn flex_row_gap_children(cx: &mut TestAppContext) {
+    let buf = Buf::new()
+        .div()
+        .key("row")
+        .op(OP_SET_FLEX)
+        .u8(0) // row
+        .op(OP_SET_GAP)
+        .f32(10.0)
+        .div()
+        .key("a")
+        .size(30.0, 20.0)
+        .add_child()
+        .div()
+        .key("b")
+        .size(40.0, 25.0)
+        .add_child()
+        .root()
+        .finish();
+    let bounds = layout_bounds(cx, &buf, &["row", "a", "b"]).expect("decode");
+    assert_bounds_eq("row", bounds["row"], 0.0, 0.0, 1920.0, 1080.0);
+    assert_bounds_eq("a", bounds["a"], 0.0, 0.0, 30.0, 20.0);
+    // b starts after a's width (30) plus the 10px gap.
+    assert_bounds_eq("b", bounds["b"], 40.0, 0.0, 40.0, 25.0);
+}
+
+/// Padding and border both inset children: a 200×100 box with 10px padding
+/// and a 2px border places its 50×30 child at (12, 12).
+#[gpui::test]
+fn padded_border_box(cx: &mut TestAppContext) {
+    let buf = Buf::new()
+        .div()
+        .key("box")
+        .size(200.0, 100.0)
+        .op(OP_SET_PADDING)
+        .f32(10.0)
+        .op(OP_SET_BORDER)
+        .f32(2.0)
+        .u8(0)
+        .u8(0)
+        .u8(0)
+        .div()
+        .key("inner")
+        .size(50.0, 30.0)
+        .add_child()
+        .root()
+        .finish();
+    let bounds = layout_bounds(cx, &buf, &["box", "inner"]).expect("decode");
+    assert_bounds_eq("box", bounds["box"], 0.0, 0.0, 200.0, 100.0);
+    assert_bounds_eq("inner", bounds["inner"], 12.0, 12.0, 50.0, 30.0);
+}
+
+/// A text node's natural size comes from the headless `NoopTextSystem`:
+/// advance 600/1000·size per glyph, ascent 1025/1000·size + descent
+/// 275/1000·size, so "Hello" at 20px is 5 × 12px = 60px wide. The line height
+/// is gpui's default `phi()` (1.618034 × size), which the text div rounds to
+/// 32.5px tall.
+///
+/// As a bare root the text div would be stretched to the window width by
+/// `FfiView`'s flex-col root (default `align: stretch`), so we wrap it in a
+/// column with `align_items: start` to read its natural width. The wrapper is
+/// the root and thus fills the 1920×1080 window.
+#[gpui::test]
+fn text_node_known_size(cx: &mut TestAppContext) {
+    let buf = Buf::new()
+        .div()
+        .key("wrap")
+        .op(OP_SET_FLEX)
+        .u8(1) // column
+        .op(OP_SET_ALIGN)
+        .u32(ALIGN_START as u32)
+        .u32(JUSTIFY_DEFAULT as u32)
+        .op(OP_TEXT)
+        .u32(5)
+        .bytes(b"Hello")
+        .u8(255)
+        .u8(255)
+        .u8(255)
+        .f32(20.0)
+        .add_child() // text -> wrap
+        .root()
+        .finish();
+    let bounds = layout_bounds(cx, &buf, &["wrap", "text:Hello"]).expect("decode");
+    assert_bounds_eq("wrap", bounds["wrap"], 0.0, 0.0, 1920.0, 1080.0);
+    // Natural text size: 60px wide (5 glyphs × 12px), 32.5px tall (phi line
+    // height). The x origin is 0.25px, not 0: `TextGlyphInset` shifts the
+    // text's paint origin by a fractional ¼px so the leading glyph escapes
+    // subpixel variant 0 (see its doc comment). Captured from the first
+    // verified headless run.
+    assert_bounds_eq("text:Hello", bounds["text:Hello"], 0.25, 0.0, 60.0, 32.5);
+}
+
+/// A rejected buffer surfaces the decoder status instead of rendering.
+#[gpui::test]
+fn decoder_rejection_surfaces_status(cx: &mut TestAppContext) {
+    let mut buf = Buf::new().div().key("box").size(10.0, 10.0).root().finish();
+    buf[0] = b'X'; // corrupt the magic
+    let err = layout_bound(cx, &buf, "box").expect_err("must reject");
+    assert_eq!(err, GPUI_STATUS_BAD_BUFFER_VERSION);
+    // Sanity: the uncorrupted buffer decodes and renders fine (through the
+    // lock-protected harness, like every other read of `VIEWS`).
+    buf[0] = b'G';
+    let b = layout_bound(cx, &buf, "box").expect("uncorrupted buffer must decode");
+    assert_bounds_eq("box", b, 0.0, 0.0, 10.0, 10.0);
+}
