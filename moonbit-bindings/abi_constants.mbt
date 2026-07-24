@@ -112,4 +112,178 @@ pub const OP_SET_PADDING : Int = 13
 pub const OP_SET_BORDER : Int = 14
 
 ///|
+pub const OP_SET_BG_COLOR : Int = 15
+
+///|
+pub const OP_SET_MARGIN : Int = 16
+
+///|
+pub const OP_SET_MIN_SIZE : Int = 17
+
+///|
+pub const OP_SET_MAX_SIZE : Int = 18
+
+///|
+pub const OP_SET_FLEX_ITEM : Int = 19
+
+///|
+pub const OP_SET_ALIGN : Int = 20
+
+///|
+pub const OP_SET_OVERFLOW : Int = 21
+
+///|
+pub const OP_SET_OPACITY : Int = 22
+
+///|
+pub const OP_SET_SHADOW : Int = 23
+
+///|
+pub const OP_SET_CURSOR : Int = 24
+
+///|
+pub const OP_SET_POSITION : Int = 25
+
+///|
+pub const OP_SET_INSET : Int = 26
+
+///|
+pub const OP_SET_PADDING_SIDES : Int = 27
+
+///|
+pub const OP_SET_TEXT_SIZE : Int = 28
+
+///|
+pub const OP_SET_TEXT_COLOR : Int = 29
+
+///|
+pub const OP_SET_FONT_WEIGHT : Int = 30
+
+///|
+pub const OP_SET_LINE_HEIGHT : Int = 31
+
+///|
+pub const OP_SET_TEXT_ALIGN : Int = 32
+
+///|
+pub const OP_SET_WHITESPACE : Int = 33
+
+///|
+pub const OP_SET_FONT_FAMILY : Int = 34
+
+///|
+pub const ALIGN_DEFAULT : Int = 0
+
+///|
+pub const ALIGN_START : Int = 1
+
+///|
+pub const ALIGN_CENTER : Int = 2
+
+///|
+pub const ALIGN_END : Int = 3
+
+///|
+pub const ALIGN_STRETCH : Int = 4
+
+///|
+pub const JUSTIFY_DEFAULT : Int = 0
+
+///|
+pub const JUSTIFY_START : Int = 1
+
+///|
+pub const JUSTIFY_CENTER : Int = 2
+
+///|
+pub const JUSTIFY_END : Int = 3
+
+///|
+pub const JUSTIFY_SPACE_BETWEEN : Int = 4
+
+///|
+pub const JUSTIFY_SPACE_AROUND : Int = 5
+
+///|
+pub const OVERFLOW_VISIBLE : Int = 0
+
+///|
+pub const OVERFLOW_HIDDEN : Int = 1
+
+///|
+pub const OVERFLOW_SCROLL : Int = 2
+
+///|
+pub const CURSOR_ARROW : Int = 0
+
+///|
+pub const CURSOR_POINTER : Int = 1
+
+///|
+pub const CURSOR_TEXT : Int = 2
+
+///|
+pub const CURSOR_CROSSHAIR : Int = 3
+
+///|
+pub const CURSOR_GRAB : Int = 4
+
+///|
+pub const CURSOR_GRABBING : Int = 5
+
+///|
+pub const CURSOR_NOT_ALLOWED : Int = 6
+
+///|
+pub const CURSOR_EW_RESIZE : Int = 7
+
+///|
+pub const CURSOR_NS_RESIZE : Int = 8
+
+///|
+pub const CURSOR_COL_RESIZE : Int = 9
+
+///|
+pub const CURSOR_ROW_RESIZE : Int = 10
+
+///|
+pub const CURSOR_NONE : Int = 11
+
+///|
+pub const POSITION_RELATIVE : Int = 0
+
+///|
+pub const POSITION_ABSOLUTE : Int = 1
+
+///|
+pub const TEXT_ALIGN_DEFAULT : Int = 0
+
+///|
+pub const TEXT_ALIGN_LEFT : Int = 1
+
+///|
+pub const TEXT_ALIGN_CENTER : Int = 2
+
+///|
+pub const TEXT_ALIGN_RIGHT : Int = 3
+
+///|
+pub const TEXT_ALIGN_JUSTIFY : Int = 4
+
+///|
+pub const WHITESPACE_DEFAULT : Int = 0
+
+///|
+pub const WHITESPACE_NORMAL : Int = 1
+
+///|
+pub const WHITESPACE_NOWRAP : Int = 2
+
+///|
+pub const WHITESPACE_PRE : Int = 3
+
+///|
+pub const WHITESPACE_PRE_WRAP : Int = 4
+
+///|
 pub const BUFFER_VERSION : Int = 1

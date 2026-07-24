@@ -242,20 +242,40 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_gap(28.0)
   cb.set_padding(32.0)
 
+  // Title: a wrapper div carries the bold weight (G8 typography), inherited by
+  // the text child.
+  cb.div()
+  cb.set_font_weight(700)
   cb.text("Counter", 236, 239, 245, 30.0)
   cb.add_child()
+  cb.add_child() // attach the title wrapper to the root
 
-  // Count display card: bordered, padded, rounded.
+  // Count display card: bordered, padded, rounded, with a soft shadow (G7/G9).
   cb.div()
+  cb.set_bg_color(@username/gpui-bindings.Color::rgb(38, 42, 52))
   cb.set_padding(16.0)
   cb.set_border(2.0, 120, 200, 255)
   cb.set_rounded(12.0)
+  cb.set_shadow(0, 4, 8, 0, @username/gpui-bindings.Color::rgba(0, 0, 0, 96))
   cb.text("Count: \{count[0]}", 120, 200, 255, 44.0)
   cb.add_child()
   cb.add_child() // attach the card to the root
 
-  // A row of buttons; each is a distinct click_id routed in on_click.
+  // A row of buttons; each is a distinct click_id routed in on_click. The row
+  // sits inside a keyed horizontal-scroll container (G6): its retained
+  // ScrollHandle keeps the scroll position across the rebuild every click
+  // triggers. The 404px row (4×92 + 3×12 gap) overflows the 300px container, so
+  // the wheel scrolls it sideways (a vertical wheel maps to the x-axis when only
+  // x scrolls).
+  cb.div() // scroll container
+  cb.set_key("button-scroll")
+  cb.set_size(300.0, 60.0)
+  cb.set_overflow(
+    @username/gpui-bindings.OVERFLOW_SCROLL,
+    @username/gpui-bindings.OVERFLOW_VISIBLE,
+  )
   cb.div() // row
+  cb.set_size(404.0, 56.0) // wider than the 300px container → horizontal overflow
   cb.set_flex_row()
   cb.set_gap(12.0)
   make_button(cb, "btn-decrement", "-1", BTN_DECREMENT, 200, 80, 80)
@@ -266,7 +286,8 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.add_child()
   make_button(cb, "btn-increment-10", "+10", BTN_INCREMENT_10, 70, 110, 230)
   cb.add_child()
-  cb.add_child() // attach the row to the root
+  cb.add_child() // attach the row to the scroll container
+  cb.add_child() // attach the scroll container to the root
 
   cb.text("keys:  k +1    j -1    r reset", 130, 135, 148, 14.0)
   cb.add_child()

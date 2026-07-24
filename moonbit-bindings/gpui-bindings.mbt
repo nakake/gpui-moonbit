@@ -128,6 +128,48 @@ fn clamp_color_component(value : Int) -> Int {
   }
 }
 
+// --- G9: color abstraction with alpha (issue #51) --------------------------
+
+///|
+/// RGBA 色。各成分は 0–255 の整数です（範囲外は送信時にクランプされます）。
+/// 従来の `set_bg(r, g, b)` に加え、alpha 通道を持つ色を `set_bg_color` で指定できます。
+pub struct Color {
+  red : Int
+  green : Int
+  blue : Int
+  alpha : Int
+}
+
+///|
+/// 不透明（alpha 255）な RGB 色を作成します。
+pub fn Color::rgb(red : Int, green : Int, blue : Int) -> Color {
+  { red, green, blue, alpha: 255 }
+}
+
+///|
+/// alpha 通道付きの RGBA 色を作成します。
+pub fn Color::rgba(red : Int, green : Int, blue : Int, alpha : Int) -> Color {
+  { red, green, blue, alpha }
+}
+
+///|
+/// 黒（不透明）。
+pub fn Color::black() -> Color {
+  Color::rgb(0, 0, 0)
+}
+
+///|
+/// 白（不透明）。
+pub fn Color::white() -> Color {
+  Color::rgb(255, 255, 255)
+}
+
+///|
+/// 完全透明。
+pub fn Color::transparent() -> Color {
+  Color::rgba(0, 0, 0, 0)
+}
+
 // MoonBit's native `String` is UTF-16, so encode it to UTF-8 for the byte-based
 // Rust FFI. The explicit byte length means no NUL terminator is needed.
 
@@ -298,6 +340,286 @@ pub fn CommandBuffer::set_border(
   self.buf.write_byte(clamp_color_component(r).to_byte())
   self.buf.write_byte(clamp_color_component(g).to_byte())
   self.buf.write_byte(clamp_color_component(b).to_byte())
+}
+
+// --- G7 core layout/style + G9 color (issue #51) ---------------------------
+
+///|
+/// スタックトップの div の背景色を `Color`（alpha 付き）で設定します。各成分は
+/// 0–255 にクランプされます。`set_bg(r, g, b)` は引き続き利用可能で、両方設定した
+/// 場合はこちらが優先されます。
+pub fn CommandBuffer::set_bg_color(self : CommandBuffer, color : Color) -> Unit {
+  self.op(OP_SET_BG_COLOR)
+  self.buf.write_byte(clamp_color_component(color.red).to_byte())
+  self.buf.write_byte(clamp_color_component(color.green).to_byte())
+  self.buf.write_byte(clamp_color_component(color.blue).to_byte())
+  self.buf.write_byte(clamp_color_component(color.alpha).to_byte())
+}
+
+///|
+/// スタックトップの div に辺別の margin（外余白、px）を設定します。
+/// 引数の順は top, right, bottom, left です。
+pub fn CommandBuffer::set_margin(
+  self : CommandBuffer,
+  top : Int,
+  right : Int,
+  bottom : Int,
+  left : Int,
+) -> Unit {
+  self.op(OP_SET_MARGIN)
+  self.buf.write_int_le(top)
+  self.buf.write_int_le(right)
+  self.buf.write_int_le(bottom)
+  self.buf.write_int_le(left)
+}
+
+///|
+/// スタックトップの div に最小サイズ（px）を設定します。辺ごとに負値（例: -1）を
+/// 渡すとその辺は auto（無指定）になります。
+pub fn CommandBuffer::set_min_size(
+  self : CommandBuffer,
+  w : Int,
+  h : Int,
+) -> Unit {
+  self.op(OP_SET_MIN_SIZE)
+  self.buf.write_int_le(w)
+  self.buf.write_int_le(h)
+}
+
+///|
+/// スタックトップの div に最大サイズ（px）を設定します。辺ごとに負値（例: -1）を
+/// 渡すとその辺は auto（無指定）になります。
+pub fn CommandBuffer::set_max_size(
+  self : CommandBuffer,
+  w : Int,
+  h : Int,
+) -> Unit {
+  self.op(OP_SET_MAX_SIZE)
+  self.buf.write_int_le(w)
+  self.buf.write_int_le(h)
+}
+
+///|
+/// スタックトップの div を flex item として設定します。`grow` / `shrink` は比率
+/// （Float、例: 1.0 / 0.5）で、内部では ×1000 の整数として送られます。`basis` は
+/// 主軸の初期サイズ（px）で、負値（例: -1.0）は auto を意味します。
+pub fn CommandBuffer::set_flex(
+  self : CommandBuffer,
+  grow : Float,
+  shrink : Float,
+  basis : Float,
+) -> Unit {
+  self.op(OP_SET_FLEX_ITEM)
+  self.buf.write_int_le((grow * 1000.0).to_int())
+  self.buf.write_int_le((shrink * 1000.0).to_int())
+  self.buf.write_int_le(basis.to_int())
+}
+
+///|
+/// スタックトップの div の子要素の整列を設定します。`align_items` は交差軸方向の
+/// 揃え（`ALIGN_*` 定数）、`justify_content` は主軸方向の配置（`JUSTIFY_*` 定数）です。
+/// それぞれ 0（`ALIGN_DEFAULT` / `JUSTIFY_DEFAULT`）を渡すとその軸は無指定のままです。
+pub fn CommandBuffer::set_align(
+  self : CommandBuffer,
+  align_items : Int,
+  justify_content : Int,
+) -> Unit {
+  self.op(OP_SET_ALIGN)
+  self.buf.write_int_le(align_items)
+  self.buf.write_int_le(justify_content)
+}
+
+///|
+/// スタックトップの div の overflow（はみ出しの扱い）を軸別に設定します。
+/// `OVERFLOW_VISIBLE` / `OVERFLOW_HIDDEN` / `OVERFLOW_SCROLL` を渡します。
+/// `SCROLL` を指定した軸は実際のスクロールになります。Rust 側はスクロール div に
+/// 保持された `ScrollHandle` を割り当て、`set_key` でキーを付けた div は再構築をまたいで
+/// スクロール位置を維持します（キーなしのスクロール div は毎回の再構築で先頭に戻ります）。
+pub fn CommandBuffer::set_overflow(
+  self : CommandBuffer,
+  x : Int,
+  y : Int,
+) -> Unit {
+  self.op(OP_SET_OVERFLOW)
+  self.buf.write_int_le(x)
+  self.buf.write_int_le(y)
+}
+
+///|
+/// スタックトップの div（とその子孫）の不透明度を設定します。0.0（完全透明）〜
+/// 1.0（完全不透明）の Float を取り、内部では ×1000 の整数として送られます。
+pub fn CommandBuffer::set_opacity(
+  self : CommandBuffer,
+  opacity : Float,
+) -> Unit {
+  self.op(OP_SET_OPACITY)
+  self.buf.write_int_le((opacity * 1000.0).to_int())
+}
+
+///|
+/// スタックトップの div にボックスシャドウを設定します。`x` / `y` はオフセット、
+/// `blur` はぼかし半径、`spread` は広がり（いずれも px、負値可）、`color` は影の色
+/// （alpha 付き）です。
+pub fn CommandBuffer::set_shadow(
+  self : CommandBuffer,
+  x : Int,
+  y : Int,
+  blur : Int,
+  spread : Int,
+  color : Color,
+) -> Unit {
+  self.op(OP_SET_SHADOW)
+  self.buf.write_int_le(x)
+  self.buf.write_int_le(y)
+  self.buf.write_int_le(blur)
+  self.buf.write_int_le(spread)
+  self.buf.write_byte(clamp_color_component(color.red).to_byte())
+  self.buf.write_byte(clamp_color_component(color.green).to_byte())
+  self.buf.write_byte(clamp_color_component(color.blue).to_byte())
+  self.buf.write_byte(clamp_color_component(color.alpha).to_byte())
+}
+
+///|
+/// スタックトップの div 上のマウスカーソル形状を設定します。`CURSOR_*` 定数
+/// （`CURSOR_ARROW` / `CURSOR_POINTER` / `CURSOR_TEXT` など）を渡します。クリック可能
+/// な div ではクリック時のポインタ表示が優先されます。
+pub fn CommandBuffer::set_cursor(self : CommandBuffer, kind : Int) -> Unit {
+  self.op(OP_SET_CURSOR)
+  self.buf.write_int_le(kind)
+}
+
+///|
+/// スタックトップの div を絶対配置（absolute position）にします。`POSITION_ABSOLUTE`
+/// を渡すとレイアウトから外れ、`set_inset` の値で位置が決まります。
+/// `POSITION_RELATIVE`（既定）に戻すこともできます。
+pub fn CommandBuffer::set_absolute(self : CommandBuffer, mode : Int) -> Unit {
+  self.op(OP_SET_POSITION)
+  self.buf.write_int_le(mode)
+}
+
+///|
+/// 配置済み要素の inset（top, right, bottom, left、px）を設定します。辺ごとに負値
+/// （例: -1）を渡すとその辺は auto になります。`set_absolute(POSITION_ABSOLUTE)` と
+/// 組み合わせて使います。
+pub fn CommandBuffer::set_inset(
+  self : CommandBuffer,
+  top : Int,
+  right : Int,
+  bottom : Int,
+  left : Int,
+) -> Unit {
+  self.op(OP_SET_INSET)
+  self.buf.write_int_le(top)
+  self.buf.write_int_le(right)
+  self.buf.write_int_le(bottom)
+  self.buf.write_int_le(left)
+}
+
+///|
+/// スタックトップの div に辺別の padding（内余白、px）を設定します。引数の順は
+/// top, right, bottom, left です。均一の `set_padding` より優先されます。
+pub fn CommandBuffer::set_padding_sides(
+  self : CommandBuffer,
+  top : Int,
+  right : Int,
+  bottom : Int,
+  left : Int,
+) -> Unit {
+  self.op(OP_SET_PADDING_SIDES)
+  self.buf.write_int_le(top)
+  self.buf.write_int_le(right)
+  self.buf.write_int_le(bottom)
+  self.buf.write_int_le(left)
+}
+
+// --- G8 typography (issue #51) ----------------------------------------------
+//
+// These setters apply to the div on top of the stack and are inherited by all
+// descendant text nodes: the Rust side stores them on the div's `Style.text`
+// refinement, which gpui pushes around child layout/paint. Rich text (partial
+// decoration within one text node) is out of scope — see docs/framework-gaps.md G8.
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のフォントサイズ（px）を設定します。
+/// テキストノード自体のサイズは `text` 呼び出しで指定しますが、この値は div 配下の
+/// すべてのテキストに継承されます。
+pub fn CommandBuffer::set_text_size(self : CommandBuffer, size : Int) -> Unit {
+  self.op(OP_SET_TEXT_SIZE)
+  self.buf.write_int_le(size)
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のテキスト色を `Color`（alpha 付き）
+/// で設定します。各成分は 0–255 にクランプされます。
+pub fn CommandBuffer::set_text_color(
+  self : CommandBuffer,
+  color : Color,
+) -> Unit {
+  self.op(OP_SET_TEXT_COLOR)
+  self.buf.write_byte(clamp_color_component(color.red).to_byte())
+  self.buf.write_byte(clamp_color_component(color.green).to_byte())
+  self.buf.write_byte(clamp_color_component(color.blue).to_byte())
+  self.buf.write_byte(clamp_color_component(color.alpha).to_byte())
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のフォントウェイトを設定します。
+/// 100（極細）〜900（極太）の整数で、400 が標準、700 が太字相当です。範囲外の値は
+/// Rust 側で 100–900 にクランプされます。
+pub fn CommandBuffer::set_font_weight(
+  self : CommandBuffer,
+  weight : Int,
+) -> Unit {
+  self.op(OP_SET_FONT_WEIGHT)
+  self.buf.write_int_le(weight)
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）の行の高さ（px）を設定します。
+/// Float で渡し、内部では ×1000 の整数として送られます（例: 1.5 → 1500）。負値
+/// （例: -1.0）は設定解除で、gpui の既定（黄金比）に戻ります。
+pub fn CommandBuffer::set_line_height(
+  self : CommandBuffer,
+  line_height : Float,
+) -> Unit {
+  self.op(OP_SET_LINE_HEIGHT)
+  self.buf.write_int_le((line_height * 1000.0).to_int())
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のテキスト配置を設定します。
+/// `TEXT_ALIGN_LEFT` / `TEXT_ALIGN_CENTER` / `TEXT_ALIGN_RIGHT` / `TEXT_ALIGN_JUSTIFY`
+/// を渡します。`TEXT_ALIGN_DEFAULT`（0）は無指定です。注: gpui 0.2.2 の `TextAlign`
+/// に `Justify` がないため、`TEXT_ALIGN_JUSTIFY` は左揃えとして描画されます。
+pub fn CommandBuffer::set_text_align(self : CommandBuffer, align : Int) -> Unit {
+  self.op(OP_SET_TEXT_ALIGN)
+  self.buf.write_int_le(align)
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）の空白・折り返しの扱いを設定します。
+/// `WHITESPACE_NORMAL`（幅に合わせて折り返す）/ `WHITESPACE_NOWRAP`（折り返さない）
+/// を渡します。`WHITESPACE_DEFAULT`（0）は無指定です。注: gpui 0.2.2 の `WhiteSpace`
+/// は Normal/Nowrap のみで、`WHITESPACE_PRE` は NOWRAP、`WHITESPACE_PRE_WRAP` は
+/// NORMAL として扱われます。
+pub fn CommandBuffer::set_whitespace(
+  self : CommandBuffer,
+  whitespace : Int,
+) -> Unit {
+  self.op(OP_SET_WHITESPACE)
+  self.buf.write_int_le(whitespace)
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のフォントファミリー名を設定します
+/// （例: "Fira Code"）。指定した名前のフォントがシステムに存在しない場合の代替挙動は
+/// gpui のフォント解決に依存します。
+pub fn CommandBuffer::set_font_family(
+  self : CommandBuffer,
+  family : String,
+) -> Unit {
+  self.op(OP_SET_FONT_FAMILY)
+  self.write_str(family)
 }
 
 ///|

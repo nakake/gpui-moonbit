@@ -1,16 +1,31 @@
 use gpui::*;
 use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
 use std::sync::Mutex;
 
 mod abi_constants;
 use abi_constants::{
-    ABI_VERSION, BUFFER_VERSION, EVENT_CLICK, EVENT_KEY, EVENT_NAMED_KEY, EVENT_TEXT,
-    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT,
-    KEY_PAGEUP, KEY_PAGEDOWN, KEY_RIGHT, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION,
-    MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV, OP_SET_BG, OP_SET_BORDER, OP_SET_CENTER,
-    OP_SET_FLEX, OP_SET_GAP, OP_SET_KEY, OP_SET_ON_CLICK, OP_SET_PADDING, OP_SET_ROOT,
-    OP_SET_ROUNDED, OP_SET_SIZE, OP_TEXT,
+    ABI_VERSION, ALIGN_CENTER, ALIGN_DEFAULT, ALIGN_END, ALIGN_START, ALIGN_STRETCH,
+    BUFFER_VERSION, CURSOR_ARROW, CURSOR_COL_RESIZE, CURSOR_CROSSHAIR, CURSOR_EW_RESIZE,
+    CURSOR_GRAB, CURSOR_GRABBING, CURSOR_NONE, CURSOR_NOT_ALLOWED, CURSOR_NS_RESIZE,
+    CURSOR_POINTER, CURSOR_ROW_RESIZE, CURSOR_TEXT, EVENT_CLICK, EVENT_KEY, EVENT_NAMED_KEY,
+    EVENT_TEXT, JUSTIFY_CENTER, JUSTIFY_DEFAULT, JUSTIFY_END, JUSTIFY_SPACE_AROUND,
+    JUSTIFY_SPACE_BETWEEN, JUSTIFY_START, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
+    KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN, KEY_RIGHT, KEY_TAB,
+    KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV,
+    OP_SET_ALIGN, OP_SET_BG, OP_SET_BG_COLOR, OP_SET_BORDER, OP_SET_CENTER, OP_SET_CURSOR,
+    OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT, OP_SET_GAP,
+    OP_SET_INSET, OP_SET_KEY, OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE,
+    OP_SET_MIN_SIZE, OP_SET_ON_CLICK, OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING,
+    OP_SET_PADDING_SIDES, OP_SET_POSITION, OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW,
+    OP_SET_SIZE, OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE, OP_SET_WHITESPACE,
+    OP_TEXT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE,
+    POSITION_RELATIVE, TEXT_ALIGN_CENTER, TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY,
+    TEXT_ALIGN_LEFT, TEXT_ALIGN_RIGHT, WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP,
+    WHITESPACE_PRE, WHITESPACE_PRE_WRAP,
 };
 
 // Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
@@ -149,6 +164,18 @@ pub extern "C" fn gpui_abi_probe(value: i32) -> i32 {
     ffi_export("gpui_abi_probe", || value)
 }
 
+/// A single box shadow decoded from `OP_SET_SHADOW`. Offsets, blur, and spread
+/// are pixel values; color is RGBA (0–255). `render_node` maps it onto a gpui
+/// `BoxShadow` (offset/blur_radius/spread_radius + `Hsla` color).
+#[derive(Clone, PartialEq, Debug)]
+struct Shadow {
+    x: f32,
+    y: f32,
+    blur: f32,
+    spread: f32,
+    color: (u8, u8, u8, u8),
+}
+
 #[derive(Clone)]
 enum UiNode {
     Div {
@@ -163,6 +190,49 @@ enum UiNode {
         padding: f32,
         border_width: f32,
         border_color: Option<(u8, u8, u8)>,
+        // --- G7 core layout/style + G9 color (issue #51) -----------------
+        /// Background with alpha (G9). Takes precedence over `bg` when both set.
+        bg_color: Option<(u8, u8, u8, u8)>,
+        /// Per-side margin in px (top, right, bottom, left).
+        margin: Option<(f32, f32, f32, f32)>,
+        /// Minimum (width, height) in px; a negative component means auto.
+        min_size: Option<(f32, f32)>,
+        /// Maximum (width, height) in px; a negative component means auto.
+        max_size: Option<(f32, f32)>,
+        /// Flex item params: (grow, shrink, basis_px); basis < 0 means auto.
+        flex_item: Option<(f32, f32, f32)>,
+        /// (align_items, justify_content) as ABI enum ids; 0 = default (unset).
+        align: Option<(i32, i32)>,
+        /// (overflow_x, overflow_y) as ABI enum ids.
+        overflow: Option<(i32, i32)>,
+        /// Opacity 0.0–1.0.
+        opacity: Option<f32>,
+        /// Box shadow.
+        shadow: Option<Shadow>,
+        /// Cursor style as an ABI enum id.
+        cursor: Option<i32>,
+        /// Position mode as an ABI enum id (0 relative, 1 absolute).
+        position: Option<i32>,
+        /// Per-side inset in px (top, right, bottom, left); negative = auto.
+        inset: Option<(f32, f32, f32, f32)>,
+        /// Per-side padding in px (top, right, bottom, left). Takes precedence
+        /// over the uniform `padding` when both are set.
+        padding_sides: Option<(f32, f32, f32, f32)>,
+        // --- G8 typography (issue #51) -----------------------------------
+        /// Font size in px for descendant text (inherited via `Style.text`).
+        text_size: Option<f32>,
+        /// Text color RGBA (0–255) for descendant text.
+        text_color: Option<(u8, u8, u8, u8)>,
+        /// Font weight 100–900 (clamped at decode time).
+        font_weight: Option<i32>,
+        /// Line height in px; `None` keeps gpui's default (the golden ratio).
+        line_height: Option<f32>,
+        /// Text alignment as an ABI enum id; 0 = default (unset).
+        text_align: Option<i32>,
+        /// Whitespace/wrap handling as an ABI enum id; 0 = default (unset).
+        whitespace: Option<i32>,
+        /// Font family name for descendant text.
+        font_family: Option<String>,
         on_click: Option<i32>,
         /// Explicit stable identity, independent of click routing. When set,
         /// `render_node` uses it as the GPUI `ElementId`; duplicate keys within
@@ -244,6 +314,26 @@ fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
 //   OP_SET_KEY        u8 | len u32 | utf8[len]
 //   OP_SET_PADDING    u8 | padding f32
 //   OP_SET_BORDER     u8 | width f32 | r u8 | g u8 | b u8
+//   OP_SET_BG_COLOR   u8 | r u8 | g u8 | b u8 | a u8          (G9: alpha)
+//   OP_SET_MARGIN     u8 | top i32 | right i32 | bottom i32 | left i32   (px)
+//   OP_SET_MIN_SIZE   u8 | w i32 | h i32                    (px; -1 = auto)
+//   OP_SET_MAX_SIZE   u8 | w i32 | h i32                    (px; -1 = auto)
+//   OP_SET_FLEX_ITEM  u8 | grow i32 | shrink i32 | basis i32 (grow/shrink ×1000; basis px, -1 = auto)
+//   OP_SET_ALIGN      u8 | align_items i32 | justify_content i32  (ALIGN_*/JUSTIFY_* ids)
+//   OP_SET_OVERFLOW   u8 | x i32 | y i32                    (OVERFLOW_* ids)
+//   OP_SET_OPACITY    u8 | x1000 i32                        (0–1000 → 0.0–1.0)
+//   OP_SET_SHADOW     u8 | x i32 | y i32 | blur i32 | spread i32 | r u8 | g u8 | b u8 | a u8  (px + RGBA)
+//   OP_SET_CURSOR     u8 | kind i32                         (CURSOR_* ids)
+//   OP_SET_POSITION   u8 | mode i32                         (POSITION_* ids)
+//   OP_SET_INSET      u8 | top i32 | right i32 | bottom i32 | left i32   (px; -1 = auto)
+//   OP_SET_PADDING_SIDES u8 | top i32 | right i32 | bottom i32 | left i32   (px; overrides uniform padding)
+//   OP_SET_TEXT_SIZE  u8 | size i32                         (px; G8 typography)
+//   OP_SET_TEXT_COLOR u8 | r u8 | g u8 | b u8 | a u8        (G8: RGBA text color)
+//   OP_SET_FONT_WEIGHT u8 | weight i32                      (100–900; clamped)
+//   OP_SET_LINE_HEIGHT u8 | px_x1000 i32                    (px×1000; negative = unset)
+//   OP_SET_TEXT_ALIGN u8 | id i32                           (TEXT_ALIGN_* ids)
+//   OP_SET_WHITESPACE u8 | id i32                           (WHITESPACE_* ids)
+//   OP_SET_FONT_FAMILY u8 | len u32 | utf8[len]             (font family name)
 //   OP_ADD_CHILD      u8            (pops child, then parent; re-pushes parent)
 //   OP_SET_ROOT       u8            (pops the root)
 //
@@ -372,6 +462,26 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                         padding: 0.0,
                         border_width: 0.0,
                         border_color: None,
+                        bg_color: None,
+                        margin: None,
+                        min_size: None,
+                        max_size: None,
+                        flex_item: None,
+                        align: None,
+                        overflow: None,
+                        opacity: None,
+                        shadow: None,
+                        cursor: None,
+                        position: None,
+                        inset: None,
+                        padding_sides: None,
+                        text_size: None,
+                        text_color: None,
+                        font_weight: None,
+                        line_height: None,
+                        text_align: None,
+                        whitespace: None,
+                        font_family: None,
                         on_click: None,
                         key: None,
                         children: Vec::new(),
@@ -538,6 +648,316 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                     _ => unreachable!("with_top_div guarantees a div"),
                 })
             }
+            OP_SET_BG_COLOR => {
+                let (Some(r), Some(g), Some(b), Some(a)) = (
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { bg_color, .. } => {
+                        *bg_color = Some((r, g, b, a));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_MARGIN => {
+                let (Some(top), Some(right), Some(bottom), Some(left)) = (
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { margin, .. } => {
+                        *margin = Some((top as f32, right as f32, bottom as f32, left as f32));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_MIN_SIZE => {
+                let (Some(w), Some(h)) = (reader.read_i32(), reader.read_i32()) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { min_size, .. } => {
+                        *min_size = Some((w as f32, h as f32));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_MAX_SIZE => {
+                let (Some(w), Some(h)) = (reader.read_i32(), reader.read_i32()) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { max_size, .. } => {
+                        *max_size = Some((w as f32, h as f32));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_FLEX_ITEM => {
+                let (Some(grow), Some(shrink), Some(basis)) = (
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { flex_item, .. } => {
+                        *flex_item = Some((
+                            grow as f32 / 1000.0,
+                            shrink as f32 / 1000.0,
+                            basis as f32,
+                        ));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_ALIGN => {
+                let (Some(align_items), Some(justify_content)) =
+                    (reader.read_i32(), reader.read_i32())
+                else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { align, .. } => {
+                        *align = Some((align_items, justify_content));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_OVERFLOW => {
+                let (Some(x), Some(y)) = (reader.read_i32(), reader.read_i32()) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { overflow, .. } => {
+                        *overflow = Some((x, y));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_OPACITY => {
+                let Some(x1000) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { opacity, .. } => {
+                        *opacity = Some(x1000 as f32 / 1000.0);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_SHADOW => {
+                let (
+                    Some(x),
+                    Some(y),
+                    Some(blur),
+                    Some(spread),
+                    Some(r),
+                    Some(g),
+                    Some(b),
+                    Some(a),
+                ) = (
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { shadow, .. } => {
+                        *shadow = Some(Shadow {
+                            x: x as f32,
+                            y: y as f32,
+                            blur: blur as f32,
+                            spread: spread as f32,
+                            color: (r, g, b, a),
+                        });
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_CURSOR => {
+                let Some(kind) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { cursor, .. } => {
+                        *cursor = Some(kind);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_POSITION => {
+                let Some(mode) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { position, .. } => {
+                        *position = Some(mode);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_INSET => {
+                let (Some(top), Some(right), Some(bottom), Some(left)) = (
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { inset, .. } => {
+                        *inset = Some((top as f32, right as f32, bottom as f32, left as f32));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_PADDING_SIDES => {
+                let (Some(top), Some(right), Some(bottom), Some(left)) = (
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                    reader.read_i32(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { padding_sides, .. } => {
+                        *padding_sides =
+                            Some((top as f32, right as f32, bottom as f32, left as f32));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_TEXT_SIZE => {
+                let Some(size) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { text_size, .. } => {
+                        *text_size = Some(size as f32);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_TEXT_COLOR => {
+                let (Some(r), Some(g), Some(b), Some(a)) = (
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { text_color, .. } => {
+                        *text_color = Some((r, g, b, a));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_FONT_WEIGHT => {
+                let Some(weight) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { font_weight, .. } => {
+                        // gpui's FontWeight is a free f32, but the CSS-style
+                        // 100–900 range is the documented contract; clamp
+                        // out-of-range operands rather than reject them.
+                        *font_weight = Some(weight.clamp(100, 900));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_LINE_HEIGHT => {
+                let Some(px_x1000) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { line_height, .. } => {
+                        // Negative = unset (restores gpui's default line
+                        // height); the px×1000 fixed-point matches the
+                        // opacity/flex milliunit convention.
+                        *line_height = if px_x1000 < 0 {
+                            None
+                        } else {
+                            Some(px_x1000 as f32 / 1000.0)
+                        };
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_TEXT_ALIGN => {
+                let Some(id) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { text_align, .. } => {
+                        *text_align = Some(id);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_WHITESPACE => {
+                let Some(id) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { whitespace, .. } => {
+                        *whitespace = Some(id);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_FONT_FAMILY => {
+                let Some(family) = reader.read_string() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { font_family, .. } => {
+                        *font_family = Some(family);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
             OP_ADD_CHILD => {
                 let (Some(child), Some(parent)) = (stack.pop(), stack.pop()) else {
                     return GPUI_STATUS_INVALID_HANDLE;
@@ -652,7 +1072,11 @@ fn run_window(view: usize, width: f32, height: f32) {
                     // so key events never arrive.
                     let focus = cx.focus_handle();
                     window.focus(&focus);
-                    FfiView { focus, view }
+                    FfiView {
+                        focus,
+                        view,
+                        scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+                    }
                 })
             },
         )
@@ -693,6 +1117,15 @@ struct FfiView {
     focus: FocusHandle,
     /// Index into `VIEWS` whose committed tree this view renders.
     view: usize,
+    /// Retained scroll handles, keyed by the div's `OP_SET_KEY` value. The tree
+    /// is rebuilt from scratch on every state change, so a scroll div's
+    /// position only survives the rebuild if its `ScrollHandle` lives outside
+    /// the tree. `ScrollHandle` is `Rc`-based (not `Send`), so the store lives
+    /// here in the per-view entity — which only ever runs on the main thread —
+    /// rather than in the `Mutex`-guarded `VIEWS` global. `render_node` looks
+    /// up (or inserts) the handle for keyed scroll divs; keyless scroll divs
+    /// get a fresh handle per render and reset to the top on each rebuild.
+    scroll_handles: Rc<RefCell<HashMap<String, ScrollHandle>>>,
 }
 
 impl Render for FfiView {
@@ -739,7 +1172,7 @@ impl Render for FfiView {
                 }
             }));
         if let Some(node) = &root {
-            if let Some(el) = render_node(node, cx, true, self.view) {
+            if let Some(el) = render_node(node, cx, true, &self.scroll_handles, &Cell::new(0)) {
                 d = d.child(el);
             }
         }
@@ -812,11 +1245,137 @@ fn notify_if_changed(changed: i32, notify: impl FnOnce()) {
     }
 }
 
+/// A non-negative pixel value as a definite `Length`; a negative sentinel maps to
+/// `Length::Auto` (the "unset/auto" encoding used by inset operands).
+fn px_or_auto(v: f32) -> Length {
+    if v >= 0.0 {
+        px(v).into()
+    } else {
+        Length::Auto
+    }
+}
+
+/// Map an ABI `ALIGN_*` id to a gpui `AlignItems`. `ALIGN_DEFAULT` (0) and any
+fn map_align_items(id: i32) -> Option<AlignItems> {
+    match id {
+        ALIGN_DEFAULT => None,
+        ALIGN_START => Some(AlignItems::Start),
+        ALIGN_CENTER => Some(AlignItems::Center),
+        ALIGN_END => Some(AlignItems::End),
+        ALIGN_STRETCH => Some(AlignItems::Stretch),
+        _ => None,
+    }
+}
+
+/// Map an ABI `JUSTIFY_*` id to a gpui `JustifyContent` (an `AlignContent`).
+/// `JUSTIFY_DEFAULT` (0) and any unknown id map to `None`.
+fn map_justify_content(id: i32) -> Option<JustifyContent> {
+    match id {
+        JUSTIFY_DEFAULT => None,
+        JUSTIFY_START => Some(JustifyContent::Start),
+        JUSTIFY_CENTER => Some(JustifyContent::Center),
+        JUSTIFY_END => Some(JustifyContent::End),
+        JUSTIFY_SPACE_BETWEEN => Some(JustifyContent::SpaceBetween),
+        JUSTIFY_SPACE_AROUND => Some(JustifyContent::SpaceAround),
+        _ => None,
+    }
+}
+
+/// Map an ABI `OVERFLOW_*` id to a gpui `Overflow`. Unknown ids map to `None`.
+/// `Scroll` becomes real scrolling in `render_node`: any div whose overflow is
+/// `Scroll` on either axis is tracked with a retained `ScrollHandle` (keyed by
+/// the node's `OP_SET_KEY` value when present), so scroll position survives the
+/// full tree rebuild that every state change triggers.
+fn map_overflow(id: i32) -> Option<Overflow> {
+    match id {
+        OVERFLOW_VISIBLE => Some(Overflow::Visible),
+        OVERFLOW_HIDDEN => Some(Overflow::Hidden),
+        OVERFLOW_SCROLL => Some(Overflow::Scroll),
+        _ => None,
+    }
+}
+
+/// Map an ABI `CURSOR_*` id to a gpui `CursorStyle`. Unknown ids map to `None`.
+fn map_cursor(id: i32) -> Option<CursorStyle> {
+    match id {
+        CURSOR_ARROW => Some(CursorStyle::Arrow),
+        CURSOR_POINTER => Some(CursorStyle::PointingHand),
+        CURSOR_TEXT => Some(CursorStyle::IBeam),
+        CURSOR_CROSSHAIR => Some(CursorStyle::Crosshair),
+        CURSOR_GRAB => Some(CursorStyle::OpenHand),
+        CURSOR_GRABBING => Some(CursorStyle::ClosedHand),
+        CURSOR_NOT_ALLOWED => Some(CursorStyle::OperationNotAllowed),
+        CURSOR_EW_RESIZE => Some(CursorStyle::ResizeLeftRight),
+        CURSOR_NS_RESIZE => Some(CursorStyle::ResizeUpDown),
+        CURSOR_COL_RESIZE => Some(CursorStyle::ResizeColumn),
+        CURSOR_ROW_RESIZE => Some(CursorStyle::ResizeRow),
+        CURSOR_NONE => Some(CursorStyle::None),
+        _ => None,
+    }
+}
+
+/// Map an ABI `TEXT_ALIGN_*` id to a gpui `TextAlign`. `TEXT_ALIGN_DEFAULT` (0)
+/// and unknown ids map to `None`. `TEXT_ALIGN_JUSTIFY` maps to `Left`: gpui
+/// 0.2.2's `TextAlign` has no `Justify` variant, so the closest supported
+/// alignment is used (see `docs/framework-gaps.md` G8).
+fn map_text_align(id: i32) -> Option<TextAlign> {
+    match id {
+        TEXT_ALIGN_DEFAULT => None,
+        TEXT_ALIGN_LEFT => Some(TextAlign::Left),
+        TEXT_ALIGN_CENTER => Some(TextAlign::Center),
+        TEXT_ALIGN_RIGHT => Some(TextAlign::Right),
+        TEXT_ALIGN_JUSTIFY => Some(TextAlign::Left),
+        _ => None,
+    }
+}
+
+/// Map an ABI `WHITESPACE_*` id to a gpui `WhiteSpace`. `WHITESPACE_DEFAULT`
+/// (0) and unknown ids map to `None`. `PRE`/`PRE_WRAP` map to `Nowrap`/`Normal`:
+/// gpui 0.2.2's `WhiteSpace` has only `Normal` (wrap) and `Nowrap` (no wrap);
+/// literal-whitespace preservation is a property of the text content itself.
+fn map_whitespace(id: i32) -> Option<WhiteSpace> {
+    match id {
+        WHITESPACE_DEFAULT => None,
+        WHITESPACE_NORMAL => Some(WhiteSpace::Normal),
+        WHITESPACE_NOWRAP => Some(WhiteSpace::Nowrap),
+        WHITESPACE_PRE => Some(WhiteSpace::Nowrap),
+        WHITESPACE_PRE_WRAP => Some(WhiteSpace::Normal),
+        _ => None,
+    }
+}
+
+/// Look up (or create) the retained `ScrollHandle` for a scroll div. Keyed
+/// divs (those with an `OP_SET_KEY` value) reuse the same handle across every
+/// rebuild, so their scroll position persists; keyless divs get a fresh handle
+/// each render and reset to the top. Handles live in the per-view store because
+/// `ScrollHandle` is `Rc`-based and not `Send`, so it cannot sit in the
+/// `Mutex`-guarded `VIEWS` global.
+fn scroll_handle_for(
+    scroll_handles: &Rc<RefCell<HashMap<String, ScrollHandle>>>,
+    key: Option<&str>,
+) -> ScrollHandle {
+    match key {
+        Some(key) => scroll_handles
+            .borrow_mut()
+            .entry(key.to_owned())
+            .or_insert_with(ScrollHandle::new)
+            .clone(),
+        None => ScrollHandle::new(),
+    }
+}
+
+/// Build the GPUI element for one committed node. `scroll_handles` is the
+/// per-view retained-handle store (see `FfiView.scroll_handles`): scroll divs
+/// look up or insert their handle here so scroll position survives the full
+/// tree rebuild that every state change triggers. `keyless_scroll_id` hands
+/// out per-render ids for scroll divs without an `OP_SET_KEY` (their handle is
+/// ephemeral and their position resets on each rebuild).
 fn render_node(
     node: &UiNode,
     cx: &mut Context<FfiView>,
     fill_available_space: bool,
-    view: usize,
+    scroll_handles: &Rc<RefCell<HashMap<String, ScrollHandle>>>,
+    keyless_scroll_id: &Cell<usize>,
 ) -> Option<AnyElement> {
     match node {
         UiNode::Div {
@@ -831,6 +1390,26 @@ fn render_node(
             padding,
             border_width,
             border_color,
+            bg_color,
+            margin,
+            min_size,
+            max_size,
+            flex_item,
+            align,
+            overflow,
+            opacity,
+            shadow,
+            cursor,
+            position,
+            inset,
+            padding_sides,
+            text_size,
+            text_color,
+            font_weight,
+            line_height,
+            text_align,
+            whitespace,
+            font_family,
             on_click,
             key,
             children,
@@ -840,7 +1419,7 @@ fn render_node(
             // aliasing borrow.
             let mut child_elements: Vec<AnyElement> = Vec::new();
             for child in children {
-                if let Some(el) = render_node(child, cx, false, view) {
+                if let Some(el) = render_node(child, cx, false, scroll_handles, keyless_scroll_id) {
                     child_elements.push(el);
                 }
             }
@@ -851,7 +1430,16 @@ fn render_node(
             if *width > 0.0 && *height > 0.0 {
                 d = d.w(px(*width)).h(px(*height));
             }
-            if let Some((r, g, b)) = bg {
+            if let Some((r, g, b, a)) = bg_color {
+                // G9: RGBA background with alpha. `rgba()` packs 0xRRGGBBAA
+                // (big-endian byte order), so alpha rides in the low byte.
+                d = d.bg(rgba(
+                    ((*r as u32) << 24)
+                        | ((*g as u32) << 16)
+                        | ((*b as u32) << 8)
+                        | (*a as u32),
+                ));
+            } else if let Some((r, g, b)) = bg {
                 d = d.bg(rgb(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32)));
             }
             if *flex {
@@ -869,7 +1457,13 @@ fn render_node(
             if *rounded > 0.0 {
                 d = d.rounded(px(*rounded));
             }
-            if *padding > 0.0 {
+            if let Some((top, right, bottom, left)) = padding_sides {
+                // Per-side padding (G7) overrides the uniform `padding` above.
+                d.style().padding.top = Some(px(*top).into());
+                d.style().padding.right = Some(px(*right).into());
+                d.style().padding.bottom = Some(px(*bottom).into());
+                d.style().padding.left = Some(px(*left).into());
+            } else if *padding > 0.0 {
                 d = d.p(px(*padding));
             }
             if *border_width > 0.0 {
@@ -880,6 +1474,151 @@ fn render_node(
                     ));
                 }
             }
+            // --- G7 core layout/style (issue #51) -------------------------
+            if let Some((top, right, bottom, left)) = margin {
+                d.style().margin.top = Some(px(*top).into());
+                d.style().margin.right = Some(px(*right).into());
+                d.style().margin.bottom = Some(px(*bottom).into());
+                d.style().margin.left = Some(px(*left).into());
+            }
+            if let Some((w, h)) = min_size {
+                if *w >= 0.0 {
+                    d.style().min_size.width = Some(px(*w).into());
+                }
+                if *h >= 0.0 {
+                    d.style().min_size.height = Some(px(*h).into());
+                }
+            }
+            if let Some((w, h)) = max_size {
+                if *w >= 0.0 {
+                    d.style().max_size.width = Some(px(*w).into());
+                }
+                if *h >= 0.0 {
+                    d.style().max_size.height = Some(px(*h).into());
+                }
+            }
+            if let Some((grow, shrink, basis)) = flex_item {
+                d.style().flex_grow = Some(*grow);
+                d.style().flex_shrink = Some(*shrink);
+                d.style().flex_basis = Some(if *basis >= 0.0 {
+                    px(*basis).into()
+                } else {
+                    Length::Auto
+                });
+            }
+            if let Some((align_items, justify_content)) = align {
+                if let Some(v) = map_align_items(*align_items) {
+                    d.style().align_items = Some(v);
+                }
+                if let Some(v) = map_justify_content(*justify_content) {
+                    d.style().justify_content = Some(v);
+                }
+            }
+            // G6 scroll: `Overflow::Scroll` on either axis makes this a real
+            // scroll container. The handle is retained per view (keyed by the
+            // node's `OP_SET_KEY` value) so the scroll position survives the
+            // full tree rebuild every state change triggers; keyless scroll
+            // divs get a fresh handle and reset to the top on each rebuild.
+            // The handle is applied in the identity branches below, where the
+            // element has an id (`track_scroll` needs `StatefulInteractiveElement`).
+            let scroll_handle = if let Some((x, y)) = overflow {
+                if let Some(v) = map_overflow(*x) {
+                    d.style().overflow.x = Some(v);
+                }
+                if let Some(v) = map_overflow(*y) {
+                    d.style().overflow.y = Some(v);
+                }
+                if *x == OVERFLOW_SCROLL || *y == OVERFLOW_SCROLL {
+                    Some(scroll_handle_for(scroll_handles, key.as_deref()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(op) = opacity {
+                d = d.opacity(*op);
+            }
+            if let Some(shadow) = shadow {
+                let (r, g, b, a) = shadow.color;
+                let color = rgba(
+                    ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32),
+                );
+                d = d.shadow(vec![BoxShadow {
+                    color: color.into(),
+                    offset: point(px(shadow.x), px(shadow.y)),
+                    blur_radius: px(shadow.blur),
+                    spread_radius: px(shadow.spread),
+                }]);
+            }
+            if let Some(mode) = position {
+                if *mode == POSITION_ABSOLUTE {
+                    d.style().position = Some(Position::Absolute);
+                } else if *mode == POSITION_RELATIVE {
+                    d.style().position = Some(Position::Relative);
+                }
+            }
+            if let Some((top, right, bottom, left)) = inset {
+                d.style().inset.top = Some(px_or_auto(*top));
+                d.style().inset.right = Some(px_or_auto(*right));
+                d.style().inset.bottom = Some(px_or_auto(*bottom));
+                d.style().inset.left = Some(px_or_auto(*left));
+            }
+            if let Some(kind) = cursor {
+                // An explicit cursor on a clickable div is superseded by the
+                // pointer applied in the identity/click branches below.
+                if let Some(v) = map_cursor(*kind) {
+                    d.style().mouse_cursor = Some(v);
+                }
+            }
+            // --- G8 typography (issue #51) --------------------------------
+            // Applied to the div's `Style.text` refinement: gpui pushes it via
+            // `with_text_style` around child layout/paint (div.rs), and the
+            // text element reads the folded stack (`window.text_style()`), so
+            // every descendant text node inherits these values.
+            if text_size.is_some()
+                || text_color.is_some()
+                || font_weight.is_some()
+                || line_height.is_some()
+                || text_align.is_some()
+                || whitespace.is_some()
+                || font_family.is_some()
+            {
+                let text = d.style().text.get_or_insert_with(Default::default);
+                if let Some(size) = text_size {
+                    text.font_size = Some(AbsoluteLength::Pixels(px(*size)));
+                }
+                if let Some((r, g, b, a)) = text_color {
+                    text.color = Some(
+                        rgba(
+                            ((*r as u32) << 24)
+                                | ((*g as u32) << 16)
+                                | ((*b as u32) << 8)
+                                | (*a as u32),
+                        )
+                        .into(),
+                    );
+                }
+                if let Some(weight) = font_weight {
+                    text.font_weight = Some(FontWeight(*weight as f32));
+                }
+                if let Some(lh) = line_height {
+                    text.line_height = Some(px(*lh).into());
+                }
+                if let Some(id) = text_align {
+                    if let Some(v) = map_text_align(*id) {
+                        text.text_align = Some(v);
+                    }
+                }
+                if let Some(id) = whitespace {
+                    if let Some(v) = map_whitespace(*id) {
+                        text.white_space = Some(v);
+                    }
+                }
+                if let Some(family) = font_family {
+                    text.font_family = Some(SharedString::from(family.clone()));
+                }
+            }
             d.extend(child_elements);
             // Element identity: an explicit key (set via `gpui_set_key`) is the
             // stable identity, independent of click routing. Without a key, a
@@ -887,10 +1626,15 @@ fn render_node(
             // A keyed div gets an id even when not clickable, so stateful
             // elements that only need identity (not click routing) are stable
             // across rebuilds. Duplicate keys are rejected at commit, so ids
-            // never collide here.
+            // never collide here. A scroll div always gets an id (scroll
+            // tracking requires element state): keyed ones use their key,
+            // keyless scroll divs get an ephemeral per-render id.
             match (key.as_deref(), *on_click) {
                 (Some(key), on_click) => {
                     let mut d = d.id(SharedString::from(format!("gpui_key:{key}")));
+                    if let Some(handle) = &scroll_handle {
+                        d = d.track_scroll(handle);
+                    }
                     if let Some(cid) = on_click {
                         d = d
                             .cursor_pointer()
@@ -904,8 +1648,11 @@ fn render_node(
                 }
                 (None, Some(cid)) => {
                     // Legacy: identity synthesized from the click id.
-                    let el = d
-                        .id(("gpui_click", cid as usize))
+                    let mut el = d.id(("gpui_click", cid as usize));
+                    if let Some(handle) = &scroll_handle {
+                        el = el.track_scroll(handle);
+                    }
+                    let el = el
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _ev: &ClickEvent, _win, cx| {
                             let view = this.view as i32;
@@ -915,7 +1662,24 @@ fn render_node(
                         .into_any_element();
                     Some(el)
                 }
-                (None, None) => Some(d.into_any_element()),
+                (None, None) => match &scroll_handle {
+                    Some(handle) => {
+                        // Keyless scroll div: `track_scroll` needs element state,
+                        // which needs an id, so synthesize one. The counter only
+                        // disambiguates multiple keyless scroll divs within one
+                        // render; it resets each render. Position still resets on
+                        // every rebuild because the handle is fresh (a tracked
+                        // handle's offset comes from the handle, not element state).
+                        let id = keyless_scroll_id.get();
+                        keyless_scroll_id.set(id + 1);
+                        Some(
+                            d.id(("gpui_scroll", id))
+                                .track_scroll(handle)
+                                .into_any_element(),
+                        )
+                    }
+                    None => Some(d.into_any_element()),
+                },
             }
         }
         UiNode::Text {
@@ -1185,6 +1949,7 @@ mod tests {
                     on_click: None,
                     key: Some(root_key),
                     children,
+                    ..
                 }) = &views[0]
                 else {
                     panic!("root div mismatch");
@@ -1773,6 +2538,64 @@ mod tests {
             ("OP_SET_KEY", OP_SET_KEY),
             ("OP_SET_PADDING", OP_SET_PADDING),
             ("OP_SET_BORDER", OP_SET_BORDER),
+            ("OP_SET_BG_COLOR", OP_SET_BG_COLOR),
+            ("OP_SET_MARGIN", OP_SET_MARGIN),
+            ("OP_SET_MIN_SIZE", OP_SET_MIN_SIZE),
+            ("OP_SET_MAX_SIZE", OP_SET_MAX_SIZE),
+            ("OP_SET_FLEX_ITEM", OP_SET_FLEX_ITEM),
+            ("OP_SET_ALIGN", OP_SET_ALIGN),
+            ("OP_SET_OVERFLOW", OP_SET_OVERFLOW),
+            ("OP_SET_OPACITY", OP_SET_OPACITY),
+            ("OP_SET_SHADOW", OP_SET_SHADOW),
+            ("OP_SET_CURSOR", OP_SET_CURSOR),
+            ("OP_SET_POSITION", OP_SET_POSITION),
+            ("OP_SET_INSET", OP_SET_INSET),
+            ("OP_SET_PADDING_SIDES", OP_SET_PADDING_SIDES),
+            ("ALIGN_DEFAULT", ALIGN_DEFAULT),
+            ("ALIGN_START", ALIGN_START),
+            ("ALIGN_CENTER", ALIGN_CENTER),
+            ("ALIGN_END", ALIGN_END),
+            ("ALIGN_STRETCH", ALIGN_STRETCH),
+            ("JUSTIFY_DEFAULT", JUSTIFY_DEFAULT),
+            ("JUSTIFY_START", JUSTIFY_START),
+            ("JUSTIFY_CENTER", JUSTIFY_CENTER),
+            ("JUSTIFY_END", JUSTIFY_END),
+            ("JUSTIFY_SPACE_BETWEEN", JUSTIFY_SPACE_BETWEEN),
+            ("JUSTIFY_SPACE_AROUND", JUSTIFY_SPACE_AROUND),
+            ("OVERFLOW_VISIBLE", OVERFLOW_VISIBLE),
+            ("OVERFLOW_HIDDEN", OVERFLOW_HIDDEN),
+            ("OVERFLOW_SCROLL", OVERFLOW_SCROLL),
+            ("CURSOR_ARROW", CURSOR_ARROW),
+            ("CURSOR_POINTER", CURSOR_POINTER),
+            ("CURSOR_TEXT", CURSOR_TEXT),
+            ("CURSOR_CROSSHAIR", CURSOR_CROSSHAIR),
+            ("CURSOR_GRAB", CURSOR_GRAB),
+            ("CURSOR_GRABBING", CURSOR_GRABBING),
+            ("CURSOR_NOT_ALLOWED", CURSOR_NOT_ALLOWED),
+            ("CURSOR_EW_RESIZE", CURSOR_EW_RESIZE),
+            ("CURSOR_NS_RESIZE", CURSOR_NS_RESIZE),
+            ("CURSOR_COL_RESIZE", CURSOR_COL_RESIZE),
+            ("CURSOR_ROW_RESIZE", CURSOR_ROW_RESIZE),
+            ("CURSOR_NONE", CURSOR_NONE),
+            ("POSITION_RELATIVE", POSITION_RELATIVE),
+            ("POSITION_ABSOLUTE", POSITION_ABSOLUTE),
+            ("OP_SET_TEXT_SIZE", OP_SET_TEXT_SIZE),
+            ("OP_SET_TEXT_COLOR", OP_SET_TEXT_COLOR),
+            ("OP_SET_FONT_WEIGHT", OP_SET_FONT_WEIGHT),
+            ("OP_SET_LINE_HEIGHT", OP_SET_LINE_HEIGHT),
+            ("OP_SET_TEXT_ALIGN", OP_SET_TEXT_ALIGN),
+            ("OP_SET_WHITESPACE", OP_SET_WHITESPACE),
+            ("OP_SET_FONT_FAMILY", OP_SET_FONT_FAMILY),
+            ("TEXT_ALIGN_DEFAULT", TEXT_ALIGN_DEFAULT),
+            ("TEXT_ALIGN_LEFT", TEXT_ALIGN_LEFT),
+            ("TEXT_ALIGN_CENTER", TEXT_ALIGN_CENTER),
+            ("TEXT_ALIGN_RIGHT", TEXT_ALIGN_RIGHT),
+            ("TEXT_ALIGN_JUSTIFY", TEXT_ALIGN_JUSTIFY),
+            ("WHITESPACE_DEFAULT", WHITESPACE_DEFAULT),
+            ("WHITESPACE_NORMAL", WHITESPACE_NORMAL),
+            ("WHITESPACE_NOWRAP", WHITESPACE_NOWRAP),
+            ("WHITESPACE_PRE", WHITESPACE_PRE),
+            ("WHITESPACE_PRE_WRAP", WHITESPACE_PRE_WRAP),
             ("OP_ADD_CHILD", OP_ADD_CHILD),
             ("OP_SET_ROOT", OP_SET_ROOT),
             ("BUFFER_VERSION", BUFFER_VERSION),
@@ -1890,5 +2713,570 @@ mod tests {
         for v in [i32::MAX, i32::MIN, 0, -1, 42, -42] {
             assert_eq!(gpui_abi_probe(v), v);
         }
+    }
+
+    // --- G7 core layout/style + G9 color (issue #51) ----------------------
+
+    #[::core::prelude::v1::test]
+    fn set_bg_color_decodes_rgba() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_BG_COLOR).u8(1).u8(2).u8(3).u8(128).set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        bg_color: Some((1, 2, 3, 128)),
+                        bg: None,
+                        ..
+                    })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_bg_color_truncated_fails() {
+        with_test(|| {
+            // OP_SET_BG_COLOR needs 4 bytes; supply only 3.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_BG_COLOR).u8(1).u8(2).u8(3);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_margin_decodes_four_sides() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_MARGIN)
+                .i32(1)
+                .i32(2)
+                .i32(3)
+                .i32(4)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        margin: Some(m),
+                        ..
+                    }) if *m == (1.0, 2.0, 3.0, 4.0)
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_margin_truncated_fails() {
+        with_test(|| {
+            // OP_SET_MARGIN needs 4 i32; supply only 3.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_MARGIN).i32(1).i32(2).i32(3);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_padding_sides_decodes_four_sides() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_PADDING_SIDES)
+                .i32(5)
+                .i32(6)
+                .i32(7)
+                .i32(8)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        padding_sides: Some(p),
+                        ..
+                    }) if *p == (5.0, 6.0, 7.0, 8.0)
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_padding_sides_truncated_fails() {
+        with_test(|| {
+            // OP_SET_PADDING_SIDES needs 4 i32; supply only 3.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_PADDING_SIDES).i32(1).i32(2).i32(3);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_flex_item_scales_milliunits() {
+        with_test(|| {
+            let mut b = Buf::new();
+            // grow 1.5 (1500), shrink 0.5 (500), basis 100px.
+            b.div()
+                .op(OP_SET_FLEX_ITEM)
+                .i32(1500)
+                .i32(500)
+                .i32(100)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        flex_item: Some(f),
+                        ..
+                    }) if *f == (1.5, 0.5, 100.0)
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_flex_item_truncated_fails() {
+        with_test(|| {
+            // OP_SET_FLEX_ITEM needs 3 i32; supply only 2.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_FLEX_ITEM).i32(1000).i32(1000);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_opacity_scales_milliunits() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_OPACITY).i32(500).set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        opacity: Some(o),
+                        ..
+                    }) if (*o - 0.5).abs() < 1e-6
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_opacity_truncated_fails() {
+        with_test(|| {
+            // OP_SET_OPACITY needs an i32; end the buffer right after the opcode.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_OPACITY);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_shadow_decodes_geometry_and_color() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_SHADOW)
+                .i32(0)
+                .i32(4)
+                .i32(6)
+                .i32(-1)
+                .u8(0)
+                .u8(0)
+                .u8(0)
+                .u8(64)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        shadow: Some(s),
+                        ..
+                    }) if s.x == 0.0
+                        && s.y == 4.0
+                        && s.blur == 6.0
+                        && s.spread == -1.0
+                        && s.color == (0, 0, 0, 64)
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_shadow_truncated_fails() {
+        with_test(|| {
+            // OP_SET_SHADOW needs 4 i32 + 4 bytes; supply geometry + 2 bytes.
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_SHADOW)
+                .i32(0)
+                .i32(0)
+                .i32(0)
+                .i32(0)
+                .u8(0)
+                .u8(0);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_align_overflow_cursor_position_inset_decode() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_ALIGN)
+                .i32(ALIGN_CENTER)
+                .i32(JUSTIFY_SPACE_BETWEEN)
+                .op(OP_SET_OVERFLOW)
+                .i32(OVERFLOW_HIDDEN)
+                .i32(OVERFLOW_SCROLL)
+                .op(OP_SET_CURSOR)
+                .i32(CURSOR_POINTER)
+                .op(OP_SET_POSITION)
+                .i32(POSITION_ABSOLUTE)
+                .op(OP_SET_INSET)
+                .i32(10)
+                .i32(-1)
+                .i32(20)
+                .i32(-1)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        align: Some((a, j)),
+                        overflow: Some((ox, oy)),
+                        cursor: Some(c),
+                        position: Some(p),
+                        inset: Some(ins),
+                        ..
+                    }) if *a == ALIGN_CENTER
+                        && *j == JUSTIFY_SPACE_BETWEEN
+                        && *ox == OVERFLOW_HIDDEN
+                        && *oy == OVERFLOW_SCROLL
+                        && *c == CURSOR_POINTER
+                        && *p == POSITION_ABSOLUTE
+                        && *ins == (10.0, -1.0, 20.0, -1.0)
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_min_max_size_decode_with_auto_sentinel() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_MIN_SIZE)
+                .i32(100)
+                .i32(-1)
+                .op(OP_SET_MAX_SIZE)
+                .i32(-1)
+                .i32(400)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        min_size: Some(mn),
+                        max_size: Some(mx),
+                        ..
+                    }) if *mn == (100.0, -1.0) && *mx == (-1.0, 400.0)
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn new_setters_on_text_top_fail() {
+        with_test(|| {
+            // Every new setter routes through with_top_div, so a text top must
+            // be rejected with WRONG_NODE_KIND rather than corrupting state.
+            let cases: Vec<Box<dyn Fn(&mut Buf)>> = vec![
+                Box::new(|b| { b.op(OP_SET_BG_COLOR).u8(0).u8(0).u8(0).u8(0); }),
+                Box::new(|b| { b.op(OP_SET_MARGIN).i32(0).i32(0).i32(0).i32(0); }),
+                Box::new(|b| { b.op(OP_SET_OPACITY).i32(1000); }),
+                Box::new(|b| { b.op(OP_SET_CURSOR).i32(CURSOR_POINTER); }),
+                Box::new(|b| { b.op(OP_SET_TEXT_SIZE).i32(14); }),
+                Box::new(|b| { b.op(OP_SET_FONT_FAMILY).str("Arial"); }),
+            ];
+            for apply in cases {
+                let mut b = Buf::new();
+                b.text("x", 0, 0, 0, 12.0);
+                apply(&mut b);
+                assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
+            }
+        });
+    }
+
+    // --- G8 typography (issue #51) -----------------------------------------
+
+    #[::core::prelude::v1::test]
+    fn set_text_size_decodes_px() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TEXT_SIZE).i32(18).set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { text_size: Some(s), .. }) if *s == 18.0
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_size_truncated_fails() {
+        with_test(|| {
+            // OP_SET_TEXT_SIZE needs an i32; end the buffer right after the opcode.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TEXT_SIZE);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_color_decodes_rgba() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_TEXT_COLOR)
+                .u8(10)
+                .u8(20)
+                .u8(30)
+                .u8(128)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        text_color: Some((10, 20, 30, 128)),
+                        ..
+                    })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_color_truncated_fails() {
+        with_test(|| {
+            // OP_SET_TEXT_COLOR needs 4 bytes; supply only 3.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TEXT_COLOR).u8(1).u8(2).u8(3);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_font_weight_clamps_out_of_range() {
+        with_test(|| {
+            let mut b = Buf::new();
+            // 50 clamps up to 100; 1000 clamps down to 900; 700 passes through.
+            b.div()
+                .op(OP_SET_FONT_WEIGHT)
+                .i32(50)
+                .op(OP_SET_FONT_WEIGHT)
+                .i32(1000)
+                .op(OP_SET_FONT_WEIGHT)
+                .i32(700)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { font_weight: Some(700), .. })
+                ));
+            });
+            // The clamp is observable on the first two writes too: rebuild a
+            // tree that stops at each clamp boundary.
+            let mut lo = Buf::new();
+            lo.div().op(OP_SET_FONT_WEIGHT).i32(50).set_root();
+            assert_eq!(lo.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { font_weight: Some(100), .. })
+                ));
+            });
+            let mut hi = Buf::new();
+            hi.div().op(OP_SET_FONT_WEIGHT).i32(1000).set_root();
+            assert_eq!(hi.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { font_weight: Some(900), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_font_weight_truncated_fails() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_FONT_WEIGHT);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_line_height_scales_milliunits_and_negative_unsets() {
+        with_test(|| {
+            let mut b = Buf::new();
+            // 1500 → 1.5px; a later negative operand unsets it again.
+            b.div()
+                .op(OP_SET_LINE_HEIGHT)
+                .i32(1500)
+                .op(OP_SET_LINE_HEIGHT)
+                .i32(-1)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { line_height: None, .. })
+                ));
+            });
+            let mut set = Buf::new();
+            set.div().op(OP_SET_LINE_HEIGHT).i32(2250).set_root();
+            assert_eq!(set.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { line_height: Some(lh), .. }) if *lh == 2.25
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_line_height_truncated_fails() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_LINE_HEIGHT);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_align_and_whitespace_decode_ids() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_TEXT_ALIGN)
+                .i32(TEXT_ALIGN_CENTER)
+                .op(OP_SET_WHITESPACE)
+                .i32(WHITESPACE_NOWRAP)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        text_align: Some(TEXT_ALIGN_CENTER),
+                        whitespace: Some(WHITESPACE_NOWRAP),
+                        ..
+                    })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_align_truncated_fails() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TEXT_ALIGN);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_font_family_decodes_string() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_FONT_FAMILY).str("Fira Code").set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { font_family: Some(f), .. }) if f == "Fira Code"
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_font_family_truncated_fails() {
+        with_test(|| {
+            // Declares a 16-byte string but the buffer ends before the payload.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_FONT_FAMILY).u32(16);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn typography_setters_on_text_top_fail() {
+        with_test(|| {
+            // The G8 setters route through with_top_div like every other
+            // setter, so a text top must be rejected with WRONG_NODE_KIND.
+            let cases: Vec<Box<dyn Fn(&mut Buf)>> = vec![
+                Box::new(|b| { b.op(OP_SET_TEXT_SIZE).i32(14); }),
+                Box::new(|b| { b.op(OP_SET_TEXT_COLOR).u8(0).u8(0).u8(0).u8(0); }),
+                Box::new(|b| { b.op(OP_SET_FONT_WEIGHT).i32(400); }),
+                Box::new(|b| { b.op(OP_SET_LINE_HEIGHT).i32(1500); }),
+                Box::new(|b| { b.op(OP_SET_TEXT_ALIGN).i32(TEXT_ALIGN_LEFT); }),
+                Box::new(|b| { b.op(OP_SET_WHITESPACE).i32(WHITESPACE_NORMAL); }),
+                Box::new(|b| { b.op(OP_SET_FONT_FAMILY).str("Arial"); }),
+            ];
+            for apply in cases {
+                let mut b = Buf::new();
+                b.text("x", 0, 0, 0, 12.0);
+                apply(&mut b);
+                assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
+            }
+        });
+    }
+
+    // --- G6 scroll handle retention (issue #51) ----------------------------
+
+    /// A keyed scroll div must reuse the same `ScrollHandle` across renders so
+    /// its scroll position survives the full tree rebuild every state change
+    /// triggers. `ScrollHandle` is `Rc`-based, so two lookups of the same key
+    /// share one underlying offset cell: mutating it through one handle is
+    /// visible through the other. This is the headless proof of the retention
+    /// contract (the real scroll wiring needs a window and is exercised by the
+    /// demo). Keyless divs get a fresh handle each call and share nothing.
+    #[::core::prelude::v1::test]
+    fn keyed_scroll_handle_is_retained_across_renders() {
+        let store = Rc::new(RefCell::new(HashMap::new()));
+
+        // Two renders of the same keyed div → the same retained handle.
+        let first = scroll_handle_for(&store, Some("list"));
+        let second = scroll_handle_for(&store, Some("list"));
+        first.set_offset(point(px(0.0), px(-120.0)));
+        assert_eq!(second.offset(), point(px(0.0), px(-120.0)));
+
+        // A distinct key gets an independent handle (still at the origin).
+        let other = scroll_handle_for(&store, Some("other"));
+        assert_eq!(other.offset(), point(px(0.0), px(0.0)));
+
+        // Keyless divs never retain: every call is a fresh, isolated handle.
+        let keyless_a = scroll_handle_for(&store, None);
+        let keyless_b = scroll_handle_for(&store, None);
+        keyless_a.set_offset(point(px(0.0), px(-50.0)));
+        assert_eq!(keyless_b.offset(), point(px(0.0), px(0.0)));
     }
 }
