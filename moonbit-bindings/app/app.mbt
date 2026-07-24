@@ -242,8 +242,13 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_gap(28.0)
   cb.set_padding(32.0)
 
+  // Title: a wrapper div carries the bold weight (G8 typography), inherited by
+  // the text child.
+  cb.div()
+  cb.set_font_weight(700)
   cb.text("Counter", 236, 239, 245, 30.0)
   cb.add_child()
+  cb.add_child() // attach the title wrapper to the root
 
   // Count display card: bordered, padded, rounded, with a soft shadow (G7/G9).
   cb.div()

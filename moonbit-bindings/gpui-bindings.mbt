@@ -531,6 +531,96 @@ pub fn CommandBuffer::set_padding_sides(
   self.buf.write_int_le(left)
 }
 
+// --- G8 typography (issue #51) ----------------------------------------------
+//
+// These setters apply to the div on top of the stack and are inherited by all
+// descendant text nodes: the Rust side stores them on the div's `Style.text`
+// refinement, which gpui pushes around child layout/paint. Rich text (partial
+// decoration within one text node) is out of scope — see docs/framework-gaps.md G8.
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のフォントサイズ（px）を設定します。
+/// テキストノード自体のサイズは `text` 呼び出しで指定しますが、この値は div 配下の
+/// すべてのテキストに継承されます。
+pub fn CommandBuffer::set_text_size(self : CommandBuffer, size : Int) -> Unit {
+  self.op(OP_SET_TEXT_SIZE)
+  self.buf.write_int_le(size)
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のテキスト色を `Color`（alpha 付き）
+/// で設定します。各成分は 0–255 にクランプされます。
+pub fn CommandBuffer::set_text_color(
+  self : CommandBuffer,
+  color : Color,
+) -> Unit {
+  self.op(OP_SET_TEXT_COLOR)
+  self.buf.write_byte(clamp_color_component(color.red).to_byte())
+  self.buf.write_byte(clamp_color_component(color.green).to_byte())
+  self.buf.write_byte(clamp_color_component(color.blue).to_byte())
+  self.buf.write_byte(clamp_color_component(color.alpha).to_byte())
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のフォントウェイトを設定します。
+/// 100（極細）〜900（極太）の整数で、400 が標準、700 が太字相当です。範囲外の値は
+/// Rust 側で 100–900 にクランプされます。
+pub fn CommandBuffer::set_font_weight(
+  self : CommandBuffer,
+  weight : Int,
+) -> Unit {
+  self.op(OP_SET_FONT_WEIGHT)
+  self.buf.write_int_le(weight)
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）の行の高さ（px）を設定します。
+/// Float で渡し、内部では ×1000 の整数として送られます（例: 1.5 → 1500）。負値
+/// （例: -1.0）は設定解除で、gpui の既定（黄金比）に戻ります。
+pub fn CommandBuffer::set_line_height(
+  self : CommandBuffer,
+  line_height : Float,
+) -> Unit {
+  self.op(OP_SET_LINE_HEIGHT)
+  self.buf.write_int_le((line_height * 1000.0).to_int())
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のテキスト配置を設定します。
+/// `TEXT_ALIGN_LEFT` / `TEXT_ALIGN_CENTER` / `TEXT_ALIGN_RIGHT` / `TEXT_ALIGN_JUSTIFY`
+/// を渡します。`TEXT_ALIGN_DEFAULT`（0）は無指定です。注: gpui 0.2.2 の `TextAlign`
+/// に `Justify` がないため、`TEXT_ALIGN_JUSTIFY` は左揃えとして描画されます。
+pub fn CommandBuffer::set_text_align(self : CommandBuffer, align : Int) -> Unit {
+  self.op(OP_SET_TEXT_ALIGN)
+  self.buf.write_int_le(align)
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）の空白・折り返しの扱いを設定します。
+/// `WHITESPACE_NORMAL`（幅に合わせて折り返す）/ `WHITESPACE_NOWRAP`（折り返さない）
+/// を渡します。`WHITESPACE_DEFAULT`（0）は無指定です。注: gpui 0.2.2 の `WhiteSpace`
+/// は Normal/Nowrap のみで、`WHITESPACE_PRE` は NOWRAP、`WHITESPACE_PRE_WRAP` は
+/// NORMAL として扱われます。
+pub fn CommandBuffer::set_whitespace(
+  self : CommandBuffer,
+  whitespace : Int,
+) -> Unit {
+  self.op(OP_SET_WHITESPACE)
+  self.buf.write_int_le(whitespace)
+}
+
+///|
+/// スタックトップの div（とその子孫のテキスト）のフォントファミリー名を設定します
+/// （例: "Fira Code"）。指定した名前のフォントがシステムに存在しない場合の代替挙動は
+/// gpui のフォント解決に依存します。
+pub fn CommandBuffer::set_font_family(
+  self : CommandBuffer,
+  family : String,
+) -> Unit {
+  self.op(OP_SET_FONT_FAMILY)
+  self.write_str(family)
+}
+
 ///|
 /// スタックトップのノード（子）をその 1 つ下のノード（親）に接続します。
 /// 親はスタックトップに残るため、続けて別の子を接続できます。

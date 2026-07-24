@@ -307,6 +307,91 @@ test "command buffer set_padding_sides wire format matches the Rust decoder layo
   assert_eq(b.length(), 25)
 }
 
+// --- G8 typography wire format (issue #51) ---------------------------------
+
+///|
+test "command buffer set_text_size wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_text_size(18)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_TEXT_SIZE | size i32.
+  assert_eq(b[8].to_int(), OP_SET_TEXT_SIZE)
+  assert_eq(read_i32_le(b, 9), 18)
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_text_color wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_text_color(Color::rgba(10, 20, 30, 128))
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_TEXT_COLOR | r u8 | g u8 | b u8 | a u8.
+  assert_eq(b[8].to_int(), OP_SET_TEXT_COLOR)
+  assert_eq(b[9], b'\x0A')
+  assert_eq(b[10], b'\x14')
+  assert_eq(b[11], b'\x1E')
+  assert_eq(b[12], b'\x80')
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_font_weight wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_font_weight(700)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_FONT_WEIGHT | weight i32.
+  assert_eq(b[8].to_int(), OP_SET_FONT_WEIGHT)
+  assert_eq(read_i32_le(b, 9), 700)
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_line_height wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_line_height(1.5)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_LINE_HEIGHT | px_x1000 i32.
+  assert_eq(b[8].to_int(), OP_SET_LINE_HEIGHT)
+  assert_eq(read_i32_le(b, 9), 1500) // 1.5 * 1000
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_text_align wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_text_align(TEXT_ALIGN_CENTER)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_TEXT_ALIGN | id i32.
+  assert_eq(b[8].to_int(), OP_SET_TEXT_ALIGN)
+  assert_eq(read_i32_le(b, 9), TEXT_ALIGN_CENTER)
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_whitespace wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_whitespace(WHITESPACE_NOWRAP)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_WHITESPACE | id i32.
+  assert_eq(b[8].to_int(), OP_SET_WHITESPACE)
+  assert_eq(read_i32_le(b, 9), WHITESPACE_NOWRAP)
+  assert_eq(b.length(), 13)
+}
+
+///|
+test "command buffer set_font_family wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_font_family("あ")
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_FONT_FAMILY | u32 length | UTF-8 payload.
+  assert_eq(b[8].to_int(), OP_SET_FONT_FAMILY)
+  assert_eq(read_u32_le(b, 9), 3) // "あ" = E3 81 82
+  assert_eq(b[13], b'\xE3')
+  assert_eq(b[14], b'\x81')
+  assert_eq(b[15], b'\x82')
+  assert_eq(b.length(), 16)
+}
+
 // --- G23: MoonBit native Int is a 32-bit two's-complement machine word ------
 //
 // The whole Rust↔MoonBit bridge assumes `Int` == `i32` across the C boundary.

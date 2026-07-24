@@ -151,6 +151,27 @@ pub const OP_SET_INSET : Int = 26
 pub const OP_SET_PADDING_SIDES : Int = 27
 
 ///|
+pub const OP_SET_TEXT_SIZE : Int = 28
+
+///|
+pub const OP_SET_TEXT_COLOR : Int = 29
+
+///|
+pub const OP_SET_FONT_WEIGHT : Int = 30
+
+///|
+pub const OP_SET_LINE_HEIGHT : Int = 31
+
+///|
+pub const OP_SET_TEXT_ALIGN : Int = 32
+
+///|
+pub const OP_SET_WHITESPACE : Int = 33
+
+///|
+pub const OP_SET_FONT_FAMILY : Int = 34
+
+///|
 pub const ALIGN_DEFAULT : Int = 0
 
 ///|
@@ -233,6 +254,36 @@ pub const POSITION_RELATIVE : Int = 0
 
 ///|
 pub const POSITION_ABSOLUTE : Int = 1
+
+///|
+pub const TEXT_ALIGN_DEFAULT : Int = 0
+
+///|
+pub const TEXT_ALIGN_LEFT : Int = 1
+
+///|
+pub const TEXT_ALIGN_CENTER : Int = 2
+
+///|
+pub const TEXT_ALIGN_RIGHT : Int = 3
+
+///|
+pub const TEXT_ALIGN_JUSTIFY : Int = 4
+
+///|
+pub const WHITESPACE_DEFAULT : Int = 0
+
+///|
+pub const WHITESPACE_NORMAL : Int = 1
+
+///|
+pub const WHITESPACE_NOWRAP : Int = 2
+
+///|
+pub const WHITESPACE_PRE : Int = 3
+
+///|
+pub const WHITESPACE_PRE_WRAP : Int = 4
 
 ///|
 pub const BUFFER_VERSION : Int = 1

@@ -14,12 +14,15 @@ use abi_constants::{
     KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN, KEY_RIGHT, KEY_TAB,
     KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV,
     OP_SET_ALIGN, OP_SET_BG, OP_SET_BG_COLOR, OP_SET_BORDER, OP_SET_CENTER, OP_SET_CURSOR,
-    OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_GAP, OP_SET_INSET, OP_SET_KEY, OP_SET_MARGIN,
-    OP_SET_MAX_SIZE, OP_SET_MIN_SIZE, OP_SET_ON_CLICK, OP_SET_OPACITY, OP_SET_OVERFLOW,
-    OP_SET_PADDING, OP_SET_PADDING_SIDES, OP_SET_POSITION, OP_SET_ROOT, OP_SET_ROUNDED,
-    OP_SET_SHADOW, OP_SET_SIZE,
+    OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT, OP_SET_GAP,
+    OP_SET_INSET, OP_SET_KEY, OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE,
+    OP_SET_MIN_SIZE, OP_SET_ON_CLICK, OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING,
+    OP_SET_PADDING_SIDES, OP_SET_POSITION, OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW,
+    OP_SET_SIZE, OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE, OP_SET_WHITESPACE,
     OP_TEXT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE,
-    POSITION_RELATIVE,
+    POSITION_RELATIVE, TEXT_ALIGN_CENTER, TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY,
+    TEXT_ALIGN_LEFT, TEXT_ALIGN_RIGHT, WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP,
+    WHITESPACE_PRE, WHITESPACE_PRE_WRAP,
 };
 
 // Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
@@ -212,6 +215,21 @@ enum UiNode {
         /// Per-side padding in px (top, right, bottom, left). Takes precedence
         /// over the uniform `padding` when both are set.
         padding_sides: Option<(f32, f32, f32, f32)>,
+        // --- G8 typography (issue #51) -----------------------------------
+        /// Font size in px for descendant text (inherited via `Style.text`).
+        text_size: Option<f32>,
+        /// Text color RGBA (0–255) for descendant text.
+        text_color: Option<(u8, u8, u8, u8)>,
+        /// Font weight 100–900 (clamped at decode time).
+        font_weight: Option<i32>,
+        /// Line height in px; `None` keeps gpui's default (the golden ratio).
+        line_height: Option<f32>,
+        /// Text alignment as an ABI enum id; 0 = default (unset).
+        text_align: Option<i32>,
+        /// Whitespace/wrap handling as an ABI enum id; 0 = default (unset).
+        whitespace: Option<i32>,
+        /// Font family name for descendant text.
+        font_family: Option<String>,
         on_click: Option<i32>,
         /// Explicit stable identity, independent of click routing. When set,
         /// `render_node` uses it as the GPUI `ElementId`; duplicate keys within
@@ -306,6 +324,13 @@ fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
 //   OP_SET_POSITION   u8 | mode i32                         (POSITION_* ids)
 //   OP_SET_INSET      u8 | top i32 | right i32 | bottom i32 | left i32   (px; -1 = auto)
 //   OP_SET_PADDING_SIDES u8 | top i32 | right i32 | bottom i32 | left i32   (px; overrides uniform padding)
+//   OP_SET_TEXT_SIZE  u8 | size i32                         (px; G8 typography)
+//   OP_SET_TEXT_COLOR u8 | r u8 | g u8 | b u8 | a u8        (G8: RGBA text color)
+//   OP_SET_FONT_WEIGHT u8 | weight i32                      (100–900; clamped)
+//   OP_SET_LINE_HEIGHT u8 | px_x1000 i32                    (px×1000; negative = unset)
+//   OP_SET_TEXT_ALIGN u8 | id i32                           (TEXT_ALIGN_* ids)
+//   OP_SET_WHITESPACE u8 | id i32                           (WHITESPACE_* ids)
+//   OP_SET_FONT_FAMILY u8 | len u32 | utf8[len]             (font family name)
 //   OP_ADD_CHILD      u8            (pops child, then parent; re-pushes parent)
 //   OP_SET_ROOT       u8            (pops the root)
 //
@@ -447,6 +472,13 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                         position: None,
                         inset: None,
                         padding_sides: None,
+                        text_size: None,
+                        text_color: None,
+                        font_weight: None,
+                        line_height: None,
+                        text_align: None,
+                        whitespace: None,
+                        font_family: None,
                         on_click: None,
                         key: None,
                         children: Vec::new(),
@@ -824,6 +856,105 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                     _ => unreachable!("with_top_div guarantees a div"),
                 })
             }
+            OP_SET_TEXT_SIZE => {
+                let Some(size) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { text_size, .. } => {
+                        *text_size = Some(size as f32);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_TEXT_COLOR => {
+                let (Some(r), Some(g), Some(b), Some(a)) = (
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { text_color, .. } => {
+                        *text_color = Some((r, g, b, a));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_FONT_WEIGHT => {
+                let Some(weight) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { font_weight, .. } => {
+                        // gpui's FontWeight is a free f32, but the CSS-style
+                        // 100–900 range is the documented contract; clamp
+                        // out-of-range operands rather than reject them.
+                        *font_weight = Some(weight.clamp(100, 900));
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_LINE_HEIGHT => {
+                let Some(px_x1000) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { line_height, .. } => {
+                        // Negative = unset (restores gpui's default line
+                        // height); the px×1000 fixed-point matches the
+                        // opacity/flex milliunit convention.
+                        *line_height = if px_x1000 < 0 {
+                            None
+                        } else {
+                            Some(px_x1000 as f32 / 1000.0)
+                        };
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_TEXT_ALIGN => {
+                let Some(id) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { text_align, .. } => {
+                        *text_align = Some(id);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_WHITESPACE => {
+                let Some(id) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { whitespace, .. } => {
+                        *whitespace = Some(id);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_FONT_FAMILY => {
+                let Some(family) = reader.read_string() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { font_family, .. } => {
+                        *font_family = Some(family);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
             OP_ADD_CHILD => {
                 let (Some(child), Some(parent)) = (stack.pop(), stack.pop()) else {
                     return GPUI_STATUS_INVALID_HANDLE;
@@ -1166,6 +1297,36 @@ fn map_cursor(id: i32) -> Option<CursorStyle> {
     }
 }
 
+/// Map an ABI `TEXT_ALIGN_*` id to a gpui `TextAlign`. `TEXT_ALIGN_DEFAULT` (0)
+/// and unknown ids map to `None`. `TEXT_ALIGN_JUSTIFY` maps to `Left`: gpui
+/// 0.2.2's `TextAlign` has no `Justify` variant, so the closest supported
+/// alignment is used (see `docs/framework-gaps.md` G8).
+fn map_text_align(id: i32) -> Option<TextAlign> {
+    match id {
+        TEXT_ALIGN_DEFAULT => None,
+        TEXT_ALIGN_LEFT => Some(TextAlign::Left),
+        TEXT_ALIGN_CENTER => Some(TextAlign::Center),
+        TEXT_ALIGN_RIGHT => Some(TextAlign::Right),
+        TEXT_ALIGN_JUSTIFY => Some(TextAlign::Left),
+        _ => None,
+    }
+}
+
+/// Map an ABI `WHITESPACE_*` id to a gpui `WhiteSpace`. `WHITESPACE_DEFAULT`
+/// (0) and unknown ids map to `None`. `PRE`/`PRE_WRAP` map to `Nowrap`/`Normal`:
+/// gpui 0.2.2's `WhiteSpace` has only `Normal` (wrap) and `Nowrap` (no wrap);
+/// literal-whitespace preservation is a property of the text content itself.
+fn map_whitespace(id: i32) -> Option<WhiteSpace> {
+    match id {
+        WHITESPACE_DEFAULT => None,
+        WHITESPACE_NORMAL => Some(WhiteSpace::Normal),
+        WHITESPACE_NOWRAP => Some(WhiteSpace::Nowrap),
+        WHITESPACE_PRE => Some(WhiteSpace::Nowrap),
+        WHITESPACE_PRE_WRAP => Some(WhiteSpace::Normal),
+        _ => None,
+    }
+}
+
 fn render_node(
     node: &UiNode,
     cx: &mut Context<FfiView>,
@@ -1198,6 +1359,13 @@ fn render_node(
             position,
             inset,
             padding_sides,
+            text_size,
+            text_color,
+            font_weight,
+            line_height,
+            text_align,
+            whitespace,
+            font_family,
             on_click,
             key,
             children,
@@ -1343,6 +1511,54 @@ fn render_node(
                 // pointer applied in the identity/click branches below.
                 if let Some(v) = map_cursor(*kind) {
                     d.style().mouse_cursor = Some(v);
+                }
+            }
+            // --- G8 typography (issue #51) --------------------------------
+            // Applied to the div's `Style.text` refinement: gpui pushes it via
+            // `with_text_style` around child layout/paint (div.rs), and the
+            // text element reads the folded stack (`window.text_style()`), so
+            // every descendant text node inherits these values.
+            if text_size.is_some()
+                || text_color.is_some()
+                || font_weight.is_some()
+                || line_height.is_some()
+                || text_align.is_some()
+                || whitespace.is_some()
+                || font_family.is_some()
+            {
+                let text = d.style().text.get_or_insert_with(Default::default);
+                if let Some(size) = text_size {
+                    text.font_size = Some(AbsoluteLength::Pixels(px(*size)));
+                }
+                if let Some((r, g, b, a)) = text_color {
+                    text.color = Some(
+                        rgba(
+                            ((*r as u32) << 24)
+                                | ((*g as u32) << 16)
+                                | ((*b as u32) << 8)
+                                | (*a as u32),
+                        )
+                        .into(),
+                    );
+                }
+                if let Some(weight) = font_weight {
+                    text.font_weight = Some(FontWeight(*weight as f32));
+                }
+                if let Some(lh) = line_height {
+                    text.line_height = Some(px(*lh).into());
+                }
+                if let Some(id) = text_align {
+                    if let Some(v) = map_text_align(*id) {
+                        text.text_align = Some(v);
+                    }
+                }
+                if let Some(id) = whitespace {
+                    if let Some(v) = map_whitespace(*id) {
+                        text.white_space = Some(v);
+                    }
+                }
+                if let Some(family) = font_family {
+                    text.font_family = Some(SharedString::from(family.clone()));
                 }
             }
             d.extend(child_elements);
@@ -2280,6 +2496,23 @@ mod tests {
             ("CURSOR_NONE", CURSOR_NONE),
             ("POSITION_RELATIVE", POSITION_RELATIVE),
             ("POSITION_ABSOLUTE", POSITION_ABSOLUTE),
+            ("OP_SET_TEXT_SIZE", OP_SET_TEXT_SIZE),
+            ("OP_SET_TEXT_COLOR", OP_SET_TEXT_COLOR),
+            ("OP_SET_FONT_WEIGHT", OP_SET_FONT_WEIGHT),
+            ("OP_SET_LINE_HEIGHT", OP_SET_LINE_HEIGHT),
+            ("OP_SET_TEXT_ALIGN", OP_SET_TEXT_ALIGN),
+            ("OP_SET_WHITESPACE", OP_SET_WHITESPACE),
+            ("OP_SET_FONT_FAMILY", OP_SET_FONT_FAMILY),
+            ("TEXT_ALIGN_DEFAULT", TEXT_ALIGN_DEFAULT),
+            ("TEXT_ALIGN_LEFT", TEXT_ALIGN_LEFT),
+            ("TEXT_ALIGN_CENTER", TEXT_ALIGN_CENTER),
+            ("TEXT_ALIGN_RIGHT", TEXT_ALIGN_RIGHT),
+            ("TEXT_ALIGN_JUSTIFY", TEXT_ALIGN_JUSTIFY),
+            ("WHITESPACE_DEFAULT", WHITESPACE_DEFAULT),
+            ("WHITESPACE_NORMAL", WHITESPACE_NORMAL),
+            ("WHITESPACE_NOWRAP", WHITESPACE_NOWRAP),
+            ("WHITESPACE_PRE", WHITESPACE_PRE),
+            ("WHITESPACE_PRE_WRAP", WHITESPACE_PRE_WRAP),
             ("OP_ADD_CHILD", OP_ADD_CHILD),
             ("OP_SET_ROOT", OP_SET_ROOT),
             ("BUFFER_VERSION", BUFFER_VERSION),
@@ -2689,6 +2922,241 @@ mod tests {
                 Box::new(|b| { b.op(OP_SET_MARGIN).i32(0).i32(0).i32(0).i32(0); }),
                 Box::new(|b| { b.op(OP_SET_OPACITY).i32(1000); }),
                 Box::new(|b| { b.op(OP_SET_CURSOR).i32(CURSOR_POINTER); }),
+                Box::new(|b| { b.op(OP_SET_TEXT_SIZE).i32(14); }),
+                Box::new(|b| { b.op(OP_SET_FONT_FAMILY).str("Arial"); }),
+            ];
+            for apply in cases {
+                let mut b = Buf::new();
+                b.text("x", 0, 0, 0, 12.0);
+                apply(&mut b);
+                assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
+            }
+        });
+    }
+
+    // --- G8 typography (issue #51) -----------------------------------------
+
+    #[::core::prelude::v1::test]
+    fn set_text_size_decodes_px() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TEXT_SIZE).i32(18).set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { text_size: Some(s), .. }) if *s == 18.0
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_size_truncated_fails() {
+        with_test(|| {
+            // OP_SET_TEXT_SIZE needs an i32; end the buffer right after the opcode.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TEXT_SIZE);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_color_decodes_rgba() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_TEXT_COLOR)
+                .u8(10)
+                .u8(20)
+                .u8(30)
+                .u8(128)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        text_color: Some((10, 20, 30, 128)),
+                        ..
+                    })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_color_truncated_fails() {
+        with_test(|| {
+            // OP_SET_TEXT_COLOR needs 4 bytes; supply only 3.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TEXT_COLOR).u8(1).u8(2).u8(3);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_font_weight_clamps_out_of_range() {
+        with_test(|| {
+            let mut b = Buf::new();
+            // 50 clamps up to 100; 1000 clamps down to 900; 700 passes through.
+            b.div()
+                .op(OP_SET_FONT_WEIGHT)
+                .i32(50)
+                .op(OP_SET_FONT_WEIGHT)
+                .i32(1000)
+                .op(OP_SET_FONT_WEIGHT)
+                .i32(700)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { font_weight: Some(700), .. })
+                ));
+            });
+            // The clamp is observable on the first two writes too: rebuild a
+            // tree that stops at each clamp boundary.
+            let mut lo = Buf::new();
+            lo.div().op(OP_SET_FONT_WEIGHT).i32(50).set_root();
+            assert_eq!(lo.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { font_weight: Some(100), .. })
+                ));
+            });
+            let mut hi = Buf::new();
+            hi.div().op(OP_SET_FONT_WEIGHT).i32(1000).set_root();
+            assert_eq!(hi.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { font_weight: Some(900), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_font_weight_truncated_fails() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_FONT_WEIGHT);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_line_height_scales_milliunits_and_negative_unsets() {
+        with_test(|| {
+            let mut b = Buf::new();
+            // 1500 → 1.5px; a later negative operand unsets it again.
+            b.div()
+                .op(OP_SET_LINE_HEIGHT)
+                .i32(1500)
+                .op(OP_SET_LINE_HEIGHT)
+                .i32(-1)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { line_height: None, .. })
+                ));
+            });
+            let mut set = Buf::new();
+            set.div().op(OP_SET_LINE_HEIGHT).i32(2250).set_root();
+            assert_eq!(set.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { line_height: Some(lh), .. }) if *lh == 2.25
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_line_height_truncated_fails() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_LINE_HEIGHT);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_align_and_whitespace_decode_ids() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_TEXT_ALIGN)
+                .i32(TEXT_ALIGN_CENTER)
+                .op(OP_SET_WHITESPACE)
+                .i32(WHITESPACE_NOWRAP)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div {
+                        text_align: Some(TEXT_ALIGN_CENTER),
+                        whitespace: Some(WHITESPACE_NOWRAP),
+                        ..
+                    })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_align_truncated_fails() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TEXT_ALIGN);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_font_family_decodes_string() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_FONT_FAMILY).str("Fira Code").set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { font_family: Some(f), .. }) if f == "Fira Code"
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_font_family_truncated_fails() {
+        with_test(|| {
+            // Declares a 16-byte string but the buffer ends before the payload.
+            let mut b = Buf::new();
+            b.div().op(OP_SET_FONT_FAMILY).u32(16);
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn typography_setters_on_text_top_fail() {
+        with_test(|| {
+            // The G8 setters route through with_top_div like every other
+            // setter, so a text top must be rejected with WRONG_NODE_KIND.
+            let cases: Vec<Box<dyn Fn(&mut Buf)>> = vec![
+                Box::new(|b| { b.op(OP_SET_TEXT_SIZE).i32(14); }),
+                Box::new(|b| { b.op(OP_SET_TEXT_COLOR).u8(0).u8(0).u8(0).u8(0); }),
+                Box::new(|b| { b.op(OP_SET_FONT_WEIGHT).i32(400); }),
+                Box::new(|b| { b.op(OP_SET_LINE_HEIGHT).i32(1500); }),
+                Box::new(|b| { b.op(OP_SET_TEXT_ALIGN).i32(TEXT_ALIGN_LEFT); }),
+                Box::new(|b| { b.op(OP_SET_WHITESPACE).i32(WHITESPACE_NORMAL); }),
+                Box::new(|b| { b.op(OP_SET_FONT_FAMILY).str("Arial"); }),
             ];
             for apply in cases {
                 let mut b = Buf::new();
