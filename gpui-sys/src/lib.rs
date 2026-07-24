@@ -6,6 +6,14 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Mutex;
 
+/// Headless layout harness (G24): decode a command buffer through the real
+/// decoder, render it in a gpui `TestAppContext` window (no GPU, no display),
+/// and read element geometry back via `debug_bounds`. Compiled for unit tests
+/// and for the `test-support` feature (benches / integration tests); the
+/// staticlib build has neither and stays free of gpui's `test-support`.
+#[cfg(any(test, feature = "test-support"))]
+pub mod headless;
+
 mod abi_constants;
 use abi_constants::{
     ABI_VERSION, ALIGN_CENTER, ALIGN_DEFAULT, ALIGN_END, ALIGN_START, ALIGN_STRETCH,
@@ -35,6 +43,16 @@ const _: () = assert!(ABI_VERSION > 0);
 /// view; a successful `gpui_build_tree` swaps a freshly built tree into it.
 /// `None` = no tree committed yet (the view renders empty).
 static VIEWS: Mutex<Vec<Option<UiNode>>> = Mutex::new(Vec::new());
+
+/// Serializes every test that mutates the process-global `VIEWS`. The unit
+/// tests (`mod tests`), the headless golden tests (`headless_tests`, via
+/// `headless::layout_bounds`), and the fuzz tests (`fuzz_tests`) all commit
+/// into `VIEWS`; without one shared lock they would run concurrently and
+/// clobber each other's trees (e.g. `mod tests`'s `clear_state()` wiping a
+/// slot mid-render). One lock, held for the duration of each test, keeps them
+/// mutually exclusive.
+#[cfg(any(test, feature = "test-support"))]
+static TEST_VIEWS_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Operation completed successfully.
 pub const GPUI_STATUS_OK: i32 = 0;
@@ -1632,6 +1650,11 @@ fn render_node(
             match (key.as_deref(), *on_click) {
                 (Some(key), on_click) => {
                     let mut d = d.id(SharedString::from(format!("gpui_key:{key}")));
+                    // G24 headless harness: expose this div's laid-out bounds to
+                    // `VisualTestContext::debug_bounds` under its key. Compiles
+                    // to a no-op without gpui's `test-support` feature, so the
+                    // shipped staticlib pays nothing.
+                    d = d.debug_selector(|| key.to_string());
                     if let Some(handle) = &scroll_handle {
                         d = d.track_scroll(handle);
                     }
@@ -1694,6 +1717,9 @@ fn render_node(
             let text = div()
                 .text_color(rgb(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32)))
                 .text_size(px(*size))
+                // G24 headless harness: expose this text element's laid-out
+                // bounds under `text:<content>` (no-op without `test-support`).
+                .debug_selector(|| format!("text:{content}"))
                 .child(content.clone());
             let inset = TextGlyphInset {
                 child: text.into_any_element(),
@@ -1792,11 +1818,14 @@ impl IntoElement for TextGlyphInset {
     }
 }
 
+/// G24 golden layout tests: decode → headless render → assert exact bounds.
+#[cfg(test)]
+mod headless_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     fn clear_state() {
         VIEWS.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -1811,7 +1840,7 @@ mod tests {
     }
 
     fn with_test(f: impl FnOnce()) {
-        let _lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = TEST_VIEWS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         clear_state();
         let _reset = TestReset;
         f();
@@ -3280,3 +3309,8 @@ mod tests {
         assert_eq!(keyless_b.offset(), point(px(0.0), px(0.0)));
     }
 }
+
+/// G25 decoder fuzzing: deterministic seeded PRNG over random and
+/// structurally-plausible command buffers; the decoder must never panic.
+#[cfg(test)]
+mod fuzz_tests;

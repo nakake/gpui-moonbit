@@ -7,15 +7,43 @@ edition = "2024"
 # Unit-test-only callback replacement; build.rs also requires the explicit
 # GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 opt-in so --all-features cannot ship it.
 test-dispatch-stub = []
+# Headless layout/render harness (`gpui_sys::headless`) for benches and
+# integration tests. Pulls in gpui's `test-support` (TestAppContext, headless
+# TestWindow, `debug_bounds`). Unit tests get the same machinery through the
+# dev-dependency below; neither path is enabled in the staticlib build.
+test-support = ["gpui/test-support"]
 
 [lib]
-# staticlib only: the archive references `mb_dispatch` (provided by the MoonBit
-# `app` package) as an undefined external, resolved at the final executable link.
-# A cdylib would fail to build on that undefined symbol.
-crate-type = ["staticlib"]
+# staticlib is the shipped artifact: the archive references `mb_dispatch`
+# (provided by the MoonBit `app` package) as an undefined external, resolved
+# at the final executable link. A cdylib would fail to build on that undefined
+# symbol. The rlib exists only so out-of-crate dev targets (benches,
+# integration tests) can link the crate; `build.sh` links the staticlib and
+# ignores the rlib.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 gpui = "0.2"
 
 [build-dependencies]
 cbindgen = "0.28"
+
+[dev-dependencies]
+# Test-only: gpui's headless TestAppContext harness backs the G24 golden
+# layout tests and the G25 fuzz harness. Dev-dependency features never leak
+# into the staticlib build (`cargo build` keeps gpui without test-support).
+gpui = { version = "0.2", features = ["test-support"] }
+criterion = "0.8"
+# Same version gpui's `test-support` uses, for seeding the headless
+# `TestDispatcher` in the render bench.
+rand = "0.9"
+
+[[bench]]
+name = "decode_bench"
+harness = false
+# The bench binary links this crate, whose code references the MoonBit
+# callback symbol; `test-dispatch-stub` resolves it without a MoonBit build
+# (run with GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1). `test-support` enables the
+# headless render/layout bench. A bare `cargo bench` skips this target
+# (required-features unmet) instead of failing the link.
+required-features = ["test-dispatch-stub", "test-support"]

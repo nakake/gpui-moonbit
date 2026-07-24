@@ -66,6 +66,18 @@ jobs:
           GPUI_SYS_ALLOW_TEST_DISPATCH_STUB: "1"
         run: cargo test --features test-dispatch-stub
 
+      # G26: compile the criterion bench harness without running it (benches
+      # are not run in CI). `--no-run` only builds; `required-features` means a
+      # bare `cargo bench` would skip the target, so we pass the features
+      # explicitly. Linux-only to keep the release-profile compile off the
+      # slower runners and within the 30-min budget.
+      - name: Bench compile check (Linux)
+        if: runner.os == 'Linux'
+        working-directory: gpui-sys
+        env:
+          GPUI_SYS_ALLOW_TEST_DISPATCH_STUB: "1"
+        run: cargo bench --no-run --features test-dispatch-stub,test-support
+
       - name: MoonBit tests
         working-directory: moonbit-bindings
         run: moon test

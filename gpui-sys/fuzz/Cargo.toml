@@ -1,0 +1,47 @@
+# Coverage-guided fuzz scaffold (G25), for nightly `cargo-fuzz`.
+#
+# This is a SEPARATE crate with its own empty `[workspace]` table, so it is
+# fully isolated from the main `gpui-sys` build: `cargo build`/`cargo test` in
+# `gpui-sys/` never descend here, and `build.sh` is unaffected. It only builds
+# when you explicitly run `cargo fuzz` inside this directory.
+#
+# Usage (requires nightly Rust + cargo-fuzz, neither of which the main build
+# needs):
+#   rustup toolchain install nightly
+#   cargo install cargo-fuzz
+#   cd gpui-sys/fuzz
+#   # The decoder references the MoonBit callback symbol; the stub feature +
+#   # env var resolve it without a MoonBit build (same as the unit tests).
+#   env GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 \
+#       cargo +nightly fuzz run decode
+#
+# It complements the in-crate deterministic fuzzer (`gpui-sys/src/fuzz_tests.rs`,
+# which runs on stable via `cargo test`): that one proves the decoder never
+# panics over seeded inputs; this one adds coverage-guided mutation + ASan
+# memory-safety checking over arbitrary inputs.
+[package]
+name = "gpui-sys-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# `test-dispatch-stub` resolves the MoonBit callback symbol without a MoonBit
+# build (run with GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1). The rlib crate-type on
+# gpui-sys lets this link the decoder.
+gpui-sys = { path = "..", features = ["test-dispatch-stub"] }
+
+# Isolate from any parent workspace so this never interferes with gpui-sys.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
