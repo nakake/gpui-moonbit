@@ -10,6 +10,7 @@
 // FFI declarations are auto-generated in gpui-bindings-ffi.mbt.
 
 ///|
+/// Rust 側の retained node tree のノードを指すハンドルです。現行の高水準 API はノードをスタックで暗黙に管理するため、この型を直接取り回す必要はありません。
 pub type NodeHandle = Int
 
 ///|
@@ -32,16 +33,18 @@ fn to_utf8_bytes(text : String) -> Bytes {
 }
 
 ///|
-/// A length-delimited command buffer describing one UI tree. Node creation
-/// pushes a handle onto an internal stack (Rust-side); setters apply to the top
-/// of the stack; `add_child` pops child then parent and re-pushes the parent;
-/// `set_root` pops the root. All multi-byte values are little-endian. Submit
-/// with `build_tree`.
+/// 1 つの UI ツリーを記述する length-delimited なコマンドバッファです。ノード生成は
+/// 内部スタック（Rust 側）へハンドルをプッシュし、setter はスタックトップに適用
+/// されます。`add_child` は子→親の順にポップして親を再プッシュし、`set_root` は
+/// ルートをポップします。複数バイト値はすべて little-endian です。`build_tree` で
+/// 送信します。
 pub struct CommandBuffer {
   buf : @buffer.Buffer
 }
 
 ///|
+/// 空のコマンドバッファを作成します。ヘッダ（magic "GPUI" と BUFFER_VERSION、
+/// u32 little-endian）を自動的に書き込みます。
 pub fn CommandBuffer::new() -> CommandBuffer {
   let buf = Buffer()
   // Header: magic "GPUI" + BUFFER_VERSION (u32 LE).
@@ -63,13 +66,13 @@ fn CommandBuffer::write_str(self : CommandBuffer, text : String) -> Unit {
 }
 
 ///|
-/// Push a new div; it becomes the top of the stack.
+/// 新しい div をプッシュします。プッシュしたノードはスタックトップになります。
 pub fn CommandBuffer::div(self : CommandBuffer) -> Unit {
   self.op(OP_DIV)
 }
 
 ///|
-/// Push a new text node (RGB components clamped to 0-255); it becomes the top.
+/// 新しいテキストノードをプッシュします（RGB 各成分は 0–255 にクランプ）。プッシュしたノードはスタックトップになります。
 pub fn CommandBuffer::text(
   self : CommandBuffer,
   content : String,
@@ -87,7 +90,7 @@ pub fn CommandBuffer::text(
 }
 
 ///|
-/// Set the size of the div on top of the stack.
+/// スタックトップの div にサイズ（幅・高さ）を設定します。
 pub fn CommandBuffer::set_size(
   self : CommandBuffer,
   w : Float,
@@ -99,7 +102,7 @@ pub fn CommandBuffer::set_size(
 }
 
 ///|
-/// Set the background color of the div on top of the stack (clamped to 0-255).
+/// スタックトップの div の背景色を設定します（RGB 各成分は 0–255 にクランプ）。
 pub fn CommandBuffer::set_bg(
   self : CommandBuffer,
   r : Int,
@@ -113,42 +116,42 @@ pub fn CommandBuffer::set_bg(
 }
 
 ///|
-/// Lay out the div on top of the stack as a flex row.
+/// スタックトップの div を flex row（横並び）レイアウトにします。
 pub fn CommandBuffer::set_flex_row(self : CommandBuffer) -> Unit {
   self.op(OP_SET_FLEX)
   self.buf.write_byte(b'\x00')
 }
 
 ///|
-/// Lay out the div on top of the stack as a flex column.
+/// スタックトップの div を flex column（縦並び）レイアウトにします。
 pub fn CommandBuffer::set_flex_col(self : CommandBuffer) -> Unit {
   self.op(OP_SET_FLEX)
   self.buf.write_byte(b'\x01')
 }
 
 ///|
-/// Center the children of the div on top of the stack.
+/// スタックトップの div の子要素を中央揃えにします。
 pub fn CommandBuffer::set_center(self : CommandBuffer) -> Unit {
   self.op(OP_SET_CENTER)
 }
 
 ///|
-/// Set the gap of the div on top of the stack.
+/// スタックトップの div の子要素間ギャップを設定します。
 pub fn CommandBuffer::set_gap(self : CommandBuffer, gap : Float) -> Unit {
   self.op(OP_SET_GAP)
   self.buf.write_float_le(gap)
 }
 
 ///|
-/// Set the corner radius of the div on top of the stack.
+/// スタックトップの div の角丸半径を設定します。
 pub fn CommandBuffer::set_rounded(self : CommandBuffer, radius : Float) -> Unit {
   self.op(OP_SET_ROUNDED)
   self.buf.write_float_le(radius)
 }
 
 ///|
-/// Make the div on top of the stack clickable; `click_id` is routed to
-/// `dispatch` on click.
+/// スタックトップの div をクリック可能にします。`click_id` はクリック時に
+/// `dispatch` の `data_a` としてルーティングされます。
 pub fn CommandBuffer::set_on_click(
   self : CommandBuffer,
   click_id : Int,
@@ -158,16 +161,16 @@ pub fn CommandBuffer::set_on_click(
 }
 
 ///|
-/// Set an explicit stable identity for the div on top of the stack, independent
-/// of click routing. The key becomes the GPUI element id so stateful-element
-/// identity survives rebuilds. Duplicate keys within one tree are rejected.
+/// スタックトップの div に、クリックルーティングとは独立した安定した識別子を
+/// 付与します。キーは GPUI の element id となり、再構築をまたいで stateful element
+/// の識別を維持します。1 ツリー内のキー重複は拒否されます。
 pub fn CommandBuffer::set_key(self : CommandBuffer, key : String) -> Unit {
   self.op(OP_SET_KEY)
   self.write_str(key)
 }
 
 ///|
-/// Set the uniform padding of the div on top of the stack.
+/// スタックトップの div に均一な padding を設定します。
 pub fn CommandBuffer::set_padding(
   self : CommandBuffer,
   padding : Float,
@@ -177,8 +180,8 @@ pub fn CommandBuffer::set_padding(
 }
 
 ///|
-/// Set the border of the div on top of the stack: a uniform width plus an RGB
-/// color (clamped to 0-255). A non-positive width renders no border.
+/// スタックトップの div に枠線を設定します。均一な太さと RGB 色（0–255 にクランプ）
+/// を取ります。太さが 0 以下の場合は枠線を描画しません。
 pub fn CommandBuffer::set_border(
   self : CommandBuffer,
   width : Float,
@@ -194,29 +197,29 @@ pub fn CommandBuffer::set_border(
 }
 
 ///|
-/// Attach the node on top of the stack (child) to the one below it (parent).
-/// The parent stays on top so further children can be attached.
+/// スタックトップのノード（子）をその 1 つ下のノード（親）に接続します。
+/// 親はスタックトップに残るため、続けて別の子を接続できます。
 pub fn CommandBuffer::add_child(self : CommandBuffer) -> Unit {
   self.op(OP_ADD_CHILD)
 }
 
 ///|
-/// Designate the node on top of the stack as the tree root.
+/// スタックトップのノードをツリーのルートに指定します。
 pub fn CommandBuffer::set_root(self : CommandBuffer) -> Unit {
   self.op(OP_SET_ROOT)
 }
 
 ///|
-/// Serialize the accumulated commands to their wire bytes.
+/// 蓄積したコマンドをワイヤ形式のバイト列にシリアライズします。
 pub fn CommandBuffer::to_bytes(self : CommandBuffer) -> Bytes {
   self.buf.to_bytes()
 }
 
 ///|
-/// Build and commit the tree for `view` from one command buffer, replacing the
-/// previously committed tree. This is the single FFI crossing for the whole
-/// tree. Returns `Err(status)` with a negative `GPUI_STATUS_*` code on failure;
-/// the previously committed tree is left untouched.
+/// `view` 用のツリーを 1 つのコマンドバッファから構築・コミットし、前回コミット済み
+/// のツリーを置き換えます。ツリー全体の送信はこの 1 回の FFI 呼び出しで行います。
+/// 失敗時は負の `GPUI_STATUS_*` コードを `Err(status)` で返し、前回コミット済みの
+/// ツリーはそのまま保持されます（atomic commit）。
 pub fn build_tree(view : Int, cb : CommandBuffer) -> Result[Unit, Int] {
   let bytes = cb.to_bytes()
   let status = gpui_build_tree_ffi(view, bytes, bytes.length())
@@ -228,10 +231,10 @@ pub fn build_tree(view : Int, cb : CommandBuffer) -> Result[Unit, Int] {
 }
 
 ///|
-/// Open a GPUI window rendering the committed tree for `view` (index into the
-/// Rust-side view slots set by `build_tree`) and block in the event loop.
-/// Returns `Err(status)` if the window could not be created or the event loop
-/// panicked.
+/// GPUI ウィンドウを開き、`view` にコミット済みのツリーを描画してイベントループで
+/// ブロックします。`view` は `build_tree` が設定する Rust 側 view slot の index です。
+/// ウィンドウ生成に失敗した場合、またはイベントループが panic した場合は
+/// `Err(status)` を返します。
 pub fn run_window(
   view : Int,
   width : Float,
