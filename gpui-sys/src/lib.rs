@@ -25,15 +25,15 @@ use abi_constants::{
     KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN, KEY_RIGHT, KEY_TAB,
     KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV,
     OP_SET_ALIGN, OP_SET_BG, OP_SET_BG_COLOR, OP_SET_BORDER, OP_SET_CENTER, OP_SET_CURSOR,
-    OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT, OP_SET_GAP,
-    OP_SET_INSET, OP_SET_KEY, OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE,
+    OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_FOCUSABLE, OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT,
+    OP_SET_GAP, OP_SET_INSET, OP_SET_KEY, OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE,
     OP_SET_MIN_SIZE, OP_SET_ON_CLICK, OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING,
     OP_SET_PADDING_SIDES, OP_SET_POSITION, OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW,
-    OP_SET_SIZE, OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE, OP_SET_WHITESPACE,
-    OP_TEXT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE,
-    POSITION_RELATIVE, TEXT_ALIGN_CENTER, TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY,
-    TEXT_ALIGN_LEFT, TEXT_ALIGN_RIGHT, WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP,
-    WHITESPACE_PRE, WHITESPACE_PRE_WRAP,
+    OP_SET_SIZE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP, OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR,
+    OP_SET_TEXT_SIZE, OP_SET_WHITESPACE, OP_TEXT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL,
+    OVERFLOW_VISIBLE, POSITION_ABSOLUTE, POSITION_RELATIVE, TEXT_ALIGN_CENTER,
+    TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY, TEXT_ALIGN_LEFT, TEXT_ALIGN_RIGHT,
+    WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP, WHITESPACE_PRE, WHITESPACE_PRE_WRAP,
 };
 
 // Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
@@ -252,6 +252,18 @@ enum UiNode {
         /// Font family name for descendant text.
         font_family: Option<String>,
         on_click: Option<i32>,
+        // --- Keyboard navigation / a11y (issue #52) ----------------------
+        /// Focusable flag (`OP_SET_FOCUSABLE`): nonzero makes the div a
+        /// focusable element (gpui `.focusable()`). Requires element identity,
+        /// which `render_node` synthesizes when no key/click id is present.
+        focusable: Option<bool>,
+        /// Tab order index (`OP_SET_TAB_INDEX`): sets gpui `.tab_index()`,
+        /// which also marks the element focusable and a tab stop.
+        tab_index: Option<isize>,
+        /// Tab stop flag (`OP_SET_TAB_STOP`): nonzero keeps the element
+        /// reachable via Tab, zero removes it from keyboard navigation while
+        /// leaving it in tab-index order (gpui `.tab_stop()`).
+        tab_stop: Option<bool>,
         /// Explicit stable identity, independent of click routing. When set,
         /// `render_node` uses it as the GPUI `ElementId`; duplicate keys within
         /// a committed tree are rejected at `commit_tree`.
@@ -352,6 +364,9 @@ fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
 //   OP_SET_TEXT_ALIGN u8 | id i32                           (TEXT_ALIGN_* ids)
 //   OP_SET_WHITESPACE u8 | id i32                           (WHITESPACE_* ids)
 //   OP_SET_FONT_FAMILY u8 | len u32 | utf8[len]             (font family name)
+//   OP_SET_FOCUSABLE  u8 | mode i32                         (0 = not focusable, nonzero = focusable)
+//   OP_SET_TAB_INDEX  u8 | index i32                        (tab order; also marks focusable + tab stop)
+//   OP_SET_TAB_STOP   u8 | mode i32                         (0 = skip in Tab nav, nonzero = tab stop)
 //   OP_ADD_CHILD      u8            (pops child, then parent; re-pushes parent)
 //   OP_SET_ROOT       u8            (pops the root)
 //
@@ -501,6 +516,9 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                         whitespace: None,
                         font_family: None,
                         on_click: None,
+                        focusable: None,
+                        tab_index: None,
+                        tab_stop: None,
                         key: None,
                         children: Vec::new(),
                     },
@@ -976,6 +994,43 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                     _ => unreachable!("with_top_div guarantees a div"),
                 })
             }
+            // --- Keyboard navigation / a11y (issue #52) -----------------
+            OP_SET_FOCUSABLE => {
+                let Some(mode) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { focusable, .. } => {
+                        *focusable = Some(mode != 0);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_TAB_INDEX => {
+                let Some(index) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { tab_index, .. } => {
+                        *tab_index = Some(index as isize);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
+            OP_SET_TAB_STOP => {
+                let Some(mode) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { tab_stop, .. } => {
+                        *tab_stop = Some(mode != 0);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
             OP_ADD_CHILD => {
                 let (Some(child), Some(parent)) = (stack.pop(), stack.pop()) else {
                     return GPUI_STATUS_INVALID_HANDLE;
@@ -1159,8 +1214,23 @@ impl Render for FfiView {
             .flex()
             .flex_col()
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _win, cx| {
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, win, cx| {
                 let view = this.view as i32;
+                // Keyboard navigation (issue #52): Tab moves focus to the next
+                // tab stop, Shift+Tab to the previous one. The framework owns
+                // this traversal, so Tab is consumed here and NOT forwarded to
+                // MoonBit as a named key; every other key falls through to the
+                // normal key/text dispatch below. `focus_next`/`focus_prev`
+                // walk the tab stops the focusable divs registered at paint
+                // time (see `render_node`); with no tab stops they are no-ops.
+                if ev.keystroke.key == "tab" {
+                    if ev.keystroke.modifiers.shift {
+                        win.focus_prev();
+                    } else {
+                        win.focus_next();
+                    }
+                    return;
+                }
                 let code = key_code(ev);
                 let mods = mods_bits(&ev.keystroke.modifiers);
                 if code != 0 {
@@ -1190,7 +1260,9 @@ impl Render for FfiView {
                 }
             }));
         if let Some(node) = &root {
-            if let Some(el) = render_node(node, cx, true, &self.scroll_handles, &Cell::new(0)) {
+            if let Some(el) =
+                render_node(node, cx, true, &self.scroll_handles, &Cell::new(0), &Cell::new(0))
+            {
                 d = d.child(el);
             }
         }
@@ -1387,13 +1459,17 @@ fn scroll_handle_for(
 /// look up or insert their handle here so scroll position survives the full
 /// tree rebuild that every state change triggers. `keyless_scroll_id` hands
 /// out per-render ids for scroll divs without an `OP_SET_KEY` (their handle is
-/// ephemeral and their position resets on each rebuild).
+/// ephemeral and their position resets on each rebuild). `keyless_focus_id`
+/// does the same for focusable divs that have neither a key nor a click id:
+/// the focus builders need element state, which needs an id, so one is
+/// synthesized per render (and the focus handle resets on each rebuild).
 fn render_node(
     node: &UiNode,
     cx: &mut Context<FfiView>,
     fill_available_space: bool,
     scroll_handles: &Rc<RefCell<HashMap<String, ScrollHandle>>>,
     keyless_scroll_id: &Cell<usize>,
+    keyless_focus_id: &Cell<usize>,
 ) -> Option<AnyElement> {
     match node {
         UiNode::Div {
@@ -1429,6 +1505,9 @@ fn render_node(
             whitespace,
             font_family,
             on_click,
+            focusable,
+            tab_index,
+            tab_stop,
             key,
             children,
         } => {
@@ -1437,7 +1516,14 @@ fn render_node(
             // aliasing borrow.
             let mut child_elements: Vec<AnyElement> = Vec::new();
             for child in children {
-                if let Some(el) = render_node(child, cx, false, scroll_handles, keyless_scroll_id) {
+                if let Some(el) = render_node(
+                    child,
+                    cx,
+                    false,
+                    scroll_handles,
+                    keyless_scroll_id,
+                    keyless_focus_id,
+                ) {
                     child_elements.push(el);
                 }
             }
@@ -1647,6 +1733,31 @@ fn render_node(
             // never collide here. A scroll div always gets an id (scroll
             // tracking requires element state): keyed ones use their key,
             // keyless scroll divs get an ephemeral per-render id.
+            //
+            // Keyboard navigation (issue #52): `.focusable()` / `.tab_index()` /
+            // `.tab_stop()` all live on `StatefulInteractiveElement`, so they
+            // need an element id. A focusable div without a key or click id
+            // synthesizes one below (the `keyless_focus_id` counter, mirroring
+            // the keyless-scroll scheme). `tab_index`/`tab_stop` imply
+            // focusability, so setting either also makes the div focusable.
+            let focus_nav = focusable.unwrap_or(false)
+                || tab_index.is_some()
+                || tab_stop.is_some();
+            // Apply the a11y focus builders to a stateful element. Order
+            // matters only in that `tab_index` sets `tab_stop = true`, so an
+            // explicit `tab_stop(false)` must come after to win.
+            let apply_focus = |mut el: Stateful<Div>| {
+                if focus_nav {
+                    el = el.focusable();
+                }
+                if let Some(idx) = tab_index {
+                    el = el.tab_index(*idx);
+                }
+                if let Some(stop) = tab_stop {
+                    el = el.tab_stop(*stop);
+                }
+                el
+            };
             match (key.as_deref(), *on_click) {
                 (Some(key), on_click) => {
                     let mut d = d.id(SharedString::from(format!("gpui_key:{key}")));
@@ -1658,6 +1769,7 @@ fn render_node(
                     if let Some(handle) = &scroll_handle {
                         d = d.track_scroll(handle);
                     }
+                    d = apply_focus(d);
                     if let Some(cid) = on_click {
                         d = d
                             .cursor_pointer()
@@ -1675,6 +1787,7 @@ fn render_node(
                     if let Some(handle) = &scroll_handle {
                         el = el.track_scroll(handle);
                     }
+                    el = apply_focus(el);
                     let el = el
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _ev: &ClickEvent, _win, cx| {
@@ -1685,8 +1798,8 @@ fn render_node(
                         .into_any_element();
                     Some(el)
                 }
-                (None, None) => match &scroll_handle {
-                    Some(handle) => {
+                (None, None) => match (&scroll_handle, focus_nav) {
+                    (Some(handle), _) => {
                         // Keyless scroll div: `track_scroll` needs element state,
                         // which needs an id, so synthesize one. The counter only
                         // disambiguates multiple keyless scroll divs within one
@@ -1695,13 +1808,22 @@ fn render_node(
                         // handle's offset comes from the handle, not element state).
                         let id = keyless_scroll_id.get();
                         keyless_scroll_id.set(id + 1);
-                        Some(
-                            d.id(("gpui_scroll", id))
-                                .track_scroll(handle)
-                                .into_any_element(),
-                        )
+                        let el = d.id(("gpui_scroll", id)).track_scroll(handle);
+                        Some(apply_focus(el).into_any_element())
                     }
-                    None => Some(d.into_any_element()),
+                    (None, true) => {
+                        // Focusable but neither keyed nor clickable: synthesize
+                        // an id so the focus builders (which require element
+                        // state) can attach. The counter disambiguates multiple
+                        // such divs within one render and resets each render, so
+                        // the focus handle is ephemeral across rebuilds — exactly
+                        // like a keyless scroll div. Give the div a key via
+                        // `set_key` for focus that survives rebuilds.
+                        let id = keyless_focus_id.get();
+                        keyless_focus_id.set(id + 1);
+                        Some(apply_focus(d.id(("gpui_focus", id))).into_any_element())
+                    }
+                    (None, false) => Some(d.into_any_element()),
                 },
             }
         }
@@ -2615,6 +2737,9 @@ mod tests {
             ("OP_SET_TEXT_ALIGN", OP_SET_TEXT_ALIGN),
             ("OP_SET_WHITESPACE", OP_SET_WHITESPACE),
             ("OP_SET_FONT_FAMILY", OP_SET_FONT_FAMILY),
+            ("OP_SET_FOCUSABLE", OP_SET_FOCUSABLE),
+            ("OP_SET_TAB_INDEX", OP_SET_TAB_INDEX),
+            ("OP_SET_TAB_STOP", OP_SET_TAB_STOP),
             ("TEXT_ALIGN_DEFAULT", TEXT_ALIGN_DEFAULT),
             ("TEXT_ALIGN_LEFT", TEXT_ALIGN_LEFT),
             ("TEXT_ALIGN_CENTER", TEXT_ALIGN_CENTER),
@@ -3274,6 +3399,103 @@ mod tests {
                 let mut b = Buf::new();
                 b.text("x", 0, 0, 0, 12.0);
                 apply(&mut b);
+                assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
+            }
+        });
+    }
+
+    // --- Keyboard navigation / a11y (issue #52) ---------------------------
+
+    #[::core::prelude::v1::test]
+    fn set_focusable_decodes_mode() {
+        with_test(|| {
+            // Nonzero → focusable; a later zero clears it back to not-focusable.
+            let mut b = Buf::new();
+            b.div()
+                .op(OP_SET_FOCUSABLE)
+                .i32(1)
+                .op(OP_SET_FOCUSABLE)
+                .i32(0)
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { focusable: Some(false), .. })
+                ));
+            });
+            let mut on = Buf::new();
+            on.div().op(OP_SET_FOCUSABLE).i32(1).set_root();
+            assert_eq!(on.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { focusable: Some(true), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_tab_index_decodes_value() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TAB_INDEX).i32(3).set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { tab_index: Some(3), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_tab_stop_decodes_mode() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_TAB_STOP).i32(0).set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { tab_stop: Some(false), .. })
+                ));
+            });
+            let mut on = Buf::new();
+            on.div().op(OP_SET_TAB_STOP).i32(1).set_root();
+            assert_eq!(on.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { tab_stop: Some(true), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn focus_setters_truncated_fail() {
+        with_test(|| {
+            // Each focus setter needs one i32 operand; end the buffer right
+            // after the opcode so the reader runs out of bytes.
+            for opcode in [OP_SET_FOCUSABLE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP] {
+                let mut b = Buf::new();
+                b.div().op(opcode);
+                assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+            }
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn focus_setters_on_text_top_fail() {
+        with_test(|| {
+            // The focus setters route through with_top_div like every other
+            // setter, so a text top must be rejected with WRONG_NODE_KIND.
+            for opcode in [OP_SET_FOCUSABLE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP] {
+                let mut b = Buf::new();
+                b.text("x", 0, 0, 0, 12.0).op(opcode).i32(1);
                 assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
             }
         });

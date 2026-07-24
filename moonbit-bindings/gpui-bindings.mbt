@@ -622,6 +622,52 @@ pub fn CommandBuffer::set_font_family(
   self.write_str(family)
 }
 
+// --- Keyboard navigation / a11y (issue #52) --------------------------------
+//
+// gpui 0.2.2 has no accessibility role/label/screen-reader API (the Element
+// trait is id/layout/paint only), but keyboard focus navigation is fully
+// public. These setters mark a div focusable and order it in the Tab cycle;
+// the Rust side drives Tab/Shift+Tab traversal via window.focus_next/prev.
+// See docs/a11y-ime.md for the full boundary.
+
+///|
+/// スタックトップの div をキーボードフォーカス可能にします。`focusable` が真（非 0）の
+/// とき、その div はフォーカスを受け取れる要素（gpui の `.focusable()`）になります。
+/// フォーカス可能な div は Tab / Shift+Tab のトラバース対象です。要素の識別子（id）が
+/// 必要なため、`set_key` や `set_on_click` で id を持たない div には Rust 側が毎レンダー
+/// 一時 id を合成します（再構築のたびにフォーカスハンドルがリセットされるため、再構築を
+/// またいでフォーカスを維持したい場合は `set_key` を付けてください）。
+pub fn CommandBuffer::set_focusable(
+  self : CommandBuffer,
+  focusable : Int,
+) -> Unit {
+  self.op(OP_SET_FOCUSABLE)
+  self.buf.write_int_le(focusable)
+}
+
+///|
+/// スタックトップの div の Tab 順序（tab index）を設定します。gpui の `.tab_index()` に
+/// 対応し、この呼び出しは要素をフォーカス可能かつ tab stop にもします。値の小さい順に
+/// Tab で巡ります。`set_tab_stop(0)` と組み合わせると、順序には残しつつ Tab 移動からは
+/// 外せます。
+pub fn CommandBuffer::set_tab_index(self : CommandBuffer, index : Int) -> Unit {
+  self.op(OP_SET_TAB_INDEX)
+  self.buf.write_int_le(index)
+}
+
+///|
+/// スタックトップの div が Tab キーで到達できる tab stop かどうかを設定します。gpui の
+/// `.tab_stop()` に対応します。`tab_stop` が 0 のとき、要素は tab index 順序には残るもの
+/// のキーボードナビゲーションではスキップされます（コンテナにフォーカスを与えつつ自身は
+/// Tab で辿らせない用途など）。`set_tab_index` と組み合わせて使います。
+pub fn CommandBuffer::set_tab_stop(
+  self : CommandBuffer,
+  tab_stop : Int,
+) -> Unit {
+  self.op(OP_SET_TAB_STOP)
+  self.buf.write_int_le(tab_stop)
+}
+
 ///|
 /// スタックトップのノード（子）をその 1 つ下のノード（親）に接続します。
 /// 親はスタックトップに残るため、続けて別の子を接続できます。
