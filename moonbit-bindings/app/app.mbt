@@ -88,7 +88,9 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
     // (atomic commit), so returning `changed` still lets GPUI re-render it.
     match build_tree(view) {
       Ok(_) => ()
-      Err(status) => println("app: build_tree failed with status \{status}")
+      Err(status) => println(
+        "app: build_tree failed: \{@username/gpui-bindings.classify_status(status).to_string()}",
+      )
     }
   }
   changed

@@ -13,6 +13,110 @@
 /// Rust 側の retained node tree のノードを指すハンドルです。現行の高水準 API はノードをスタックで暗黙に管理するため、この型を直接取り回す必要はありません。
 pub type NodeHandle = Int
 
+// --- Structured errors and diagnostics (issue #54, G20/G21) -----------------
+//
+// The Rust side answers across the C boundary with negative `GPUI_STATUS_*`
+// codes; `build_tree`/`run_window` surface them as `Err(Int)`. The helpers
+// below classify a raw code into a structured, printable `GpuiError` so app
+// authors never have to decode a bare negative integer.
+
+///|
+/// Rust 側が返す負の `GPUI_STATUS_*` コードに対応する構造化エラーです。生のコードは
+/// `classify_status` でこの型に変換でき、`message` / `to_string` で 1 行の診断メッセージを
+/// 得られます。既知の範囲外のコードは `Unknown(code)` になります。
+pub enum GpuiError {
+  InvalidHandle // GPUI_STATUS_INVALID_HANDLE (-1)
+  WrongNodeKind // GPUI_STATUS_WRONG_NODE_KIND (-2)
+  NodeAbsent // GPUI_STATUS_NODE_ABSENT (-3)
+  InternalPanic // GPUI_STATUS_INTERNAL_PANIC (-4)
+  BadBufferVersion // GPUI_STATUS_BAD_BUFFER_VERSION (-5)
+  TruncatedBuffer // GPUI_STATUS_TRUNCATED_BUFFER (-6)
+  UnknownOpcode // GPUI_STATUS_UNKNOWN_OPCODE (-7)
+  NoRoot // GPUI_STATUS_NO_ROOT (-8)
+  DuplicateKey // GPUI_STATUS_DUPLICATE_KEY (-9)
+  Unknown(Int) // any other code
+}
+
+///|
+/// Rust FFI が返した生の status コードを構造化された `GpuiError` に分類します。
+/// 既知の負コードはそれぞれの variant に対応し、それ以外（成功の `0` を含む）は
+/// `Unknown(code)` になります。
+pub fn classify_status(code : Int) -> GpuiError {
+  match code {
+    -1 => InvalidHandle
+    -2 => WrongNodeKind
+    -3 => NodeAbsent
+    -4 => InternalPanic
+    -5 => BadBufferVersion
+    -6 => TruncatedBuffer
+    -7 => UnknownOpcode
+    -8 => NoRoot
+    -9 => DuplicateKey
+    _ => Unknown(code)
+  }
+}
+
+///|
+/// 生の status コードに対する 1 行の人間が読める診断メッセージを返します
+/// （ログ・ツール間でポータブルな英語です）。
+pub fn status_message(code : Int) -> String {
+  match classify_status(code) {
+    InvalidHandle => "invalid handle: negative, out of range, or unallocated"
+    WrongNodeKind => "wrong node kind for the requested operation"
+    NodeAbsent => "node already moved into another node"
+    InternalPanic => "internal Rust panic caught at the FFI boundary"
+    BadBufferVersion => "command buffer magic or version mismatch"
+    TruncatedBuffer => "command buffer truncated or oversized"
+    UnknownOpcode => "command buffer names an unknown opcode"
+    NoRoot => "command buffer committed without OP_SET_ROOT"
+    DuplicateKey => "duplicate explicit key in the committed tree"
+    Unknown(c) => "unknown status code \{c}"
+  }
+}
+
+///|
+/// このエラーが分類された元の `GPUI_STATUS_*` コードを返します（未知のコードはそのまま保持されます）。
+pub fn GpuiError::code(self : GpuiError) -> Int {
+  match self {
+    InvalidHandle => -1
+    WrongNodeKind => -2
+    NodeAbsent => -3
+    InternalPanic => -4
+    BadBufferVersion => -5
+    TruncatedBuffer => -6
+    UnknownOpcode => -7
+    NoRoot => -8
+    DuplicateKey => -9
+    Unknown(c) => c
+  }
+}
+
+///|
+/// このエラーの 1 行の人間が読める診断メッセージを返します。
+pub fn GpuiError::message(self : GpuiError) -> String {
+  status_message(self.code())
+}
+
+///|
+/// `GpuiError(<code>): <message>` 形式の表示可能な表現を返します。`to_string` を定義することで
+/// `GpuiError` は文字列補間 `\{...}` でもそのまま使えます。
+pub fn GpuiError::to_string(self : GpuiError) -> String {
+  "GpuiError(\{self.code()}): \{self.message()}"
+}
+
+///|
+/// `r` が `Err(status)` のとき、文脈 `ctx` を前置した構造化診断メッセージで abort します。
+/// FFI 失敗から回復できない呼び出し点を簡潔にします。
+pub fn expect_ok(r : Result[Unit, Int], ctx : String) -> Unit {
+  match r {
+    Ok(_) => ()
+    Err(status) => {
+      let err = classify_status(status)
+      abort("\{ctx}: \{err.to_string()}")
+    }
+  }
+}
+
 ///|
 fn clamp_color_component(value : Int) -> Int {
   if value < 0 {
@@ -246,4 +350,35 @@ pub fn run_window(
   } else {
     Err(status)
   }
+}
+
+// --- Diagnostics (issue #54, G21) ------------------------------------------
+
+///|
+/// `view` にコミット済みのツリーから、全テキストノードの内容を DFS pre-order で
+/// 読み戻します（デバッグ用）。各ノードは `len u32 LE + utf8[len]` のレコードとして
+/// 連結され、その全体を UTF-8 デコードした文字列を返します。失敗時は負の
+/// `GPUI_STATUS_*` コードを `Err(status)` で返します。
+pub fn debug_dump_text(view : Int) -> Result[String, Int] {
+  // The dump is a sequence of `len u32 LE + utf8[len]` records; a committed
+  // tree is tiny, so a generous fixed capacity avoids a size-query round trip.
+  let cap = 65536
+  let buf = Bytes::make(cap, b'\x00')
+  let n = gpui_debug_dump_text_ffi(view, buf, cap)
+  if n < 0 {
+    Err(n)
+  } else {
+    Ok(@utf8.decode_lossy(buf[0:n]))
+  }
+}
+
+// --- Cross-boundary ABI probe (issue #54, G23) ------------------------------
+
+///|
+/// Rust 側の `gpui_abi_probe` を呼び、`v` をそのまま返させます。MoonBit の `Int` と
+/// Rust の `i32` が C 境界をまたいで同じ幅・符号で往復することを機械的に検証するための
+/// identity echo です。`cmd/roundtrip` が境界値（`i32::MAX` / `i32::MIN` / 0 / -1）を送り、
+/// ビルドのたびに不一致を検出します。
+pub fn abi_probe(v : Int) -> Int {
+  gpui_abi_probe_ffi(v)
 }

@@ -130,3 +130,65 @@ test "command buffer set_border wire format matches the Rust decoder layout" {
   assert_eq(b[15], b'\x1E')
   assert_eq(b.length(), 16)
 }
+
+// --- G23: MoonBit native Int is a 32-bit two's-complement machine word ------
+//
+// The whole Rust↔MoonBit bridge assumes `Int` == `i32` across the C boundary.
+// These assertions hold ONLY for a 32-bit wrapping Int: on a 64-bit Int,
+// `0x7FFFFFFF + 1` would stay positive (2147483648) and the test would fail.
+// The cross-boundary half of this check lives in cmd/roundtrip (gpui_abi_probe).
+
+///|
+test "Int wraps at the i32 boundary (32-bit machine word)" {
+  // 0x7FFFFFFF is i32::MAX; +1 must wrap to i32::MIN (negative).
+  assert_eq(0x7FFFFFFF + 1, -0x80000000)
+  assert_true(0x7FFFFFFF + 1 < 0)
+  // -0x80000000 is i32::MIN; -1 must wrap to i32::MAX (positive).
+  assert_eq(-0x80000000 - 1, 0x7FFFFFFF)
+  assert_true(-0x80000000 - 1 > 0)
+}
+
+// --- G20: structured error classification ----------------------------------
+
+///|
+test "classify_status maps every GPUI_STATUS_* code" {
+  assert_eq(classify_status(-1).code(), -1)
+  assert_eq(classify_status(-9).code(), -9)
+  match classify_status(-1) {
+    InvalidHandle => ()
+    _ => fail("expected InvalidHandle")
+  }
+  match classify_status(-9) {
+    DuplicateKey => ()
+    _ => fail("expected DuplicateKey")
+  }
+  // Unmapped codes (including success 0) fall through to Unknown, kept verbatim.
+  match classify_status(0) {
+    Unknown(0) => ()
+    _ => fail("expected Unknown(0)")
+  }
+  match classify_status(-99) {
+    Unknown(-99) => ()
+    _ => fail("expected Unknown(-99)")
+  }
+}
+
+///|
+test "status_message is a non-empty one-liner per code" {
+  let codes = [-1, -2, -3, -4, -5, -6, -7, -8, -9, 0, -99]
+  for c in codes {
+    let msg = status_message(c)
+    assert_true(msg.length() > 0)
+    // One line: no embedded newline.
+    assert_true(!msg.contains("\n"))
+  }
+}
+
+///|
+test "GpuiError to_string carries code and message" {
+  let err = classify_status(-8)
+  let s = err.to_string()
+  assert_true(s.contains("-8"))
+  assert_true(s.contains("GpuiError"))
+  assert_eq(err.message(), status_message(-8))
+}
