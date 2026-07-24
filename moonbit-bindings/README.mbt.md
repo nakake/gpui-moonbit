@@ -23,7 +23,7 @@ Rust/GPUI を MoonBit native から呼ぶための、ローカルかつ実験的
 - `gpui-bindings.mbt` は手編集する高水準 API です。`CommandBuffer`（`div()`、`text()`、style setter、`add_child()`、`set_root()`）と `build_tree(view, cb)`、`run_window(view, w, h)` を提供します。
 - `gpui-bindings-ffi.mbt` は `gpui-sys/include/gpui_sys.h` から `bindgen-moonbit` が生成する低水準 C FFI 宣言です。手編集しません。
 - `abi_constants.mbt` は `gpui-sys/abi.toml` から build driver が生成します。ABI 定数は `abi.toml` を変更します。
-- `app/app.mbt` は Counter の状態、イベント routing、tree 再構築を担います。Rust からの callback は固定の `app.dispatch(version, kind, data_a, data_b) -> Int`（バージョニング済みイベントエンベロープ）で、状態変更時に `1`、no-op 時に `0` を返します。tree 再構築と Rust の再描画通知は `1` の場合だけです。
+- `app/app.mbt` は Counter の状態、イベント routing、tree 再構築を担います。Rust からの callback は固定の `app.dispatch(version, kind, view, data_a, data_b) -> Int`（バージョニング済みイベントエンベロープ）で、状態変更時に `1`、no-op 時に `0` を返します。tree 再構築と Rust の再描画通知は `1` の場合だけです。
 
 `CommandBuffer::text(content, r, g, b, size)` は `@utf8.encode` で String を UTF-8 `Bytes` に変換します。低水準 FFI は `#borrow(ptr)` の `Bytes` と明示的な長さを Rust の `const uint8_t *ptr, int32_t len` に渡すため、NUL 終端は使いません。
 

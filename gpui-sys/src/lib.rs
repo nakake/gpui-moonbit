@@ -52,17 +52,19 @@ pub const GPUI_STATUS_DUPLICATE_KEY: i32 = -9;
 // (MoonBit-initiated) GPUI event loop — safe under MoonBit's reference-counted
 // runtime.
 //
-// Versioned event envelope (abi_version 3): the four i32 slots carry
-//   (abi_version, event_kind, data_a, data_b)
+// Versioned event envelope (abi_version 4): the five i32 slots carry
+//   (abi_version, event_kind, view, data_a, data_b)
 // Slot 0 is always ABI_VERSION so MoonBit can reject a stale Rust binary at
-// runtime. Slot 1 selects the event kind. Slots 2–3 are kind-dependent:
+// runtime. Slot 1 selects the event kind. Slot 2 is the view id (index into
+// VIEWS, from FfiView.view) and routes the rebuild target. Slots 3–4 are
+// kind-dependent:
 //   EVENT_CLICK: data_a = click_id, data_b = 0
 //   EVENT_KEY:   data_a = codepoint (single-char key), data_b = modifier bits
 //   EVENT_TEXT:  data_a = token (index into EVENT_QUEUE), data_b = byte length
 // For EVENT_TEXT the UTF-8 payload lives in a Rust-owned queue; MoonBit copies
 // it synchronously via `gpui_event_copy_text` before returning from dispatch.
 //
-// Generates: `unsafe extern "C" { #[link_name = "_M0FP…3app8dispatch"] fn mb_dispatch(version: i32, kind: i32, data_a: i32, data_b: i32) -> i32; }`
+// Generates: `unsafe extern "C" { #[link_name = "_M0FP…3app8dispatch"] fn mb_dispatch(version: i32, kind: i32, view: i32, data_a: i32, data_b: i32) -> i32; }`
 include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
 
 /// Rust-owned event payload queue. Text events store their UTF-8 bytes here;
@@ -691,16 +693,17 @@ impl Render for FfiView {
             .flex()
             .flex_col()
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_this, ev: &KeyDownEvent, _win, cx| {
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _win, cx| {
+                let view = this.view as i32;
                 let code = key_code(ev);
                 let mods = mods_bits(&ev.keystroke.modifiers);
                 if code != 0 {
                     let changed =
-                        unsafe { mb_dispatch(ABI_VERSION, EVENT_KEY, code, mods) };
+                        unsafe { mb_dispatch(ABI_VERSION, EVENT_KEY, view, code, mods) };
                     notify_if_changed(changed, || cx.notify());
                 } else if let Some(key_id) = named_key_id(&ev.keystroke.key) {
                     let changed =
-                        unsafe { mb_dispatch(ABI_VERSION, EVENT_NAMED_KEY, key_id, mods) };
+                        unsafe { mb_dispatch(ABI_VERSION, EVENT_NAMED_KEY, view, key_id, mods) };
                     notify_if_changed(changed, || cx.notify());
                 }
                 // Emit a text event for keys that produce typed characters
@@ -715,13 +718,13 @@ impl Render for FfiView {
                         (q.len() - 1) as i32
                     };
                     let changed = unsafe {
-                        mb_dispatch(ABI_VERSION, EVENT_TEXT, token, bytes.len() as i32)
+                        mb_dispatch(ABI_VERSION, EVENT_TEXT, view, token, bytes.len() as i32)
                     };
                     notify_if_changed(changed, || cx.notify());
                 }
             }));
         if let Some(node) = &root {
-            if let Some(el) = render_node(node, cx, true) {
+            if let Some(el) = render_node(node, cx, true, self.view) {
                 d = d.child(el);
             }
         }
@@ -798,6 +801,7 @@ fn render_node(
     node: &UiNode,
     cx: &mut Context<FfiView>,
     fill_available_space: bool,
+    view: usize,
 ) -> Option<AnyElement> {
     match node {
         UiNode::Div {
@@ -821,7 +825,7 @@ fn render_node(
             // aliasing borrow.
             let mut child_elements: Vec<AnyElement> = Vec::new();
             for child in children {
-                if let Some(el) = render_node(child, cx, false) {
+                if let Some(el) = render_node(child, cx, false, view) {
                     child_elements.push(el);
                 }
             }
@@ -875,11 +879,10 @@ fn render_node(
                     if let Some(cid) = on_click {
                         d = d
                             .cursor_pointer()
-                            .on_click(cx.listener(move |_this, _ev: &ClickEvent, _win, cx| {
-                                let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_CLICK, cid, 0) };
-                                if changed == 1 {
-                                    cx.notify();
-                                }
+                            .on_click(cx.listener(move |this, _ev: &ClickEvent, _win, cx| {
+                                let view = this.view as i32;
+                                let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_CLICK, view, cid, 0) };
+                                notify_if_changed(changed, || cx.notify());
                             }));
                     }
                     Some(d.into_any_element())
@@ -889,11 +892,10 @@ fn render_node(
                     let el = d
                         .id(("gpui_click", cid as usize))
                         .cursor_pointer()
-                        .on_click(cx.listener(move |_this, _ev: &ClickEvent, _win, cx| {
-                            let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_CLICK, cid, 0) };
-                            if changed == 1 {
-                                cx.notify();
-                            }
+                        .on_click(cx.listener(move |this, _ev: &ClickEvent, _win, cx| {
+                            let view = this.view as i32;
+                            let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_CLICK, view, cid, 0) };
+                            notify_if_changed(changed, || cx.notify());
                         }))
                         .into_any_element();
                     Some(el)

@@ -1,4 +1,4 @@
-abi_version = 3
+abi_version = 4
 
 [events]
 EVENT_CLICK = 1
@@ -49,5 +49,5 @@ BUFFER_VERSION = 1
 
 [callback]
 name = "dispatch"
-params = ["i32", "i32", "i32", "i32"]
+params = ["i32", "i32", "i32", "i32", "i32"]
 return = "i32"

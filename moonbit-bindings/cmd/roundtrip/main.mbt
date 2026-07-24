@@ -14,7 +14,7 @@ extern "C" fn gpui_debug_dump_text_ffi(view : Int, buf : Bytes, len : Int) -> In
 
 fn main {
   // Retain app.dispatch so the Rust staticlib's mb_dispatch reference resolves.
-  let _keep : (Int, Int, Int, Int) -> Int = @username/gpui-bindings/app.dispatch
+  let _keep : (Int, Int, Int, Int, Int) -> Int = @username/gpui-bindings/app.dispatch
   ignore(_keep)
 
   // Edge-case text: NUL byte, multibyte UTF-8 (hiragana), 4-byte emoji.
