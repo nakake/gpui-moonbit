@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>gpui-moonbit アーキテクチャ解説</title>
+<style>
+  :root{
+    --mb-bg:#f0fdfa;  --mb-bd:#14b8a6;  --mb-tx:#115e59;   /* MoonBit 層 */
+    --abi-bg:#fff7ed; --abi-bd:#f38020; --abi-tx:#7c2d12;  /* C ABI / ビルド駆動 */
+    --rs-bg:#faf5ff;  --rs-bd:#a855f7;  --rs-tx:#6b21a8;   /* Rust 層 */
+    --dt-bg:#eff6ff;  --dt-bd:#3b82f6;  --dt-tx:#1e3a8a;   /* データ・状態 */
+    --os-bg:#f1f5f9;  --os-bd:#94a3b8;  --os-tx:#334155;   /* OS / 外部 */
+    --us-bg:#1e293b;  --us-bd:#0f172a;  --us-tx:#f8fafc;   /* ユーザー */
+    --gn-bg:#f8fafc;  --gn-bd:#cbd5e1;  --gn-tx:#64748b;   /* 自動生成物（破線） */
+    --line:#64748b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#f8fafc;color:#0f172a;line-height:1.7;
+    font-family:"Hiragino Sans","Yu Gothic","Meiryo",system-ui,sans-serif}
+  header{padding:30px 28px 4px;max-width:1240px;margin:0 auto}
+  h1{margin:0;font-size:24px;letter-spacing:.01em}
+  h2{margin:44px 0 4px;font-size:19px;padding-bottom:7px;border-bottom:2px solid #e2e8f0}
+  h3{margin:26px 0 4px;font-size:15px;color:#334155}
+  .sub{margin:8px 0 0;color:#475569;font-size:13.5px}
+  main{max-width:1240px;margin:0 auto;padding:0 28px 60px}
+  p{margin:10px 0;font-size:14px;color:#1e293b}
+  ul{margin:10px 0;padding-left:22px;font-size:14px}
+  li{margin:5px 0}
+  code{font-family:ui-monospace,"SFMono-Regular",Consolas,monospace;font-size:12.5px;
+    background:#e8edf4;border-radius:4px;padding:1px 5px;color:#1e293b}
+  .note{background:#fff;border:1px solid #e2e8f0;border-left:4px solid var(--abi-bd);
+    border-radius:8px;padding:12px 16px;margin:16px 0;font-size:13.5px}
+  .note b{color:#7c2d12}
+
+  /* ---- 図 ---- */
+  .wrap{overflow-x:auto;padding:14px 0 4px}
+  .stage{position:relative;margin:0 auto}
+  .node{position:absolute;border:2px solid var(--os-bd);background:var(--os-bg);color:var(--os-tx);
+    border-radius:11px;padding:8px 12px;z-index:2;box-shadow:0 1px 3px rgba(15,23,42,.10);
+    display:flex;flex-direction:column;justify-content:center}
+  .node .t{font-weight:700;font-size:13.5px;line-height:1.3}
+  .node .d{font-size:11px;opacity:.92;margin-top:3px;line-height:1.35}
+  .mb{background:var(--mb-bg);border-color:var(--mb-bd);color:var(--mb-tx)}
+  .abi{background:var(--abi-bg);border-color:var(--abi-bd);color:var(--abi-tx)}
+  .rs{background:var(--rs-bg);border-color:var(--rs-bd);color:var(--rs-tx)}
+  .dt{background:var(--dt-bg);border-color:var(--dt-bd);color:var(--dt-tx)}
+  .os{background:var(--os-bg);border-color:var(--os-bd);color:var(--os-tx)}
+  .us{background:var(--us-bg);border-color:var(--us-bd);color:var(--us-tx)}
+  .gn{background:var(--gn-bg);border:2px dashed var(--gn-bd);color:var(--gn-tx)}
+  svg{position:absolute;inset:0;z-index:1;overflow:visible}
+  .lbl{font-size:11px;fill:#475569;font-weight:700;
+    paint-order:stroke;stroke:#f8fafc;stroke-width:4px;stroke-linejoin:round}
+
+  .legend{display:flex;flex-wrap:wrap;gap:15px;margin:8px 0 6px;font-size:12px;color:#334155}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:14px;height:14px;border-radius:4px;border:2px solid}
+
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px;background:#fff}
+  th,td{border:1px solid #e2e8f0;padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#f1f5f9;font-weight:700;color:#334155}
+  td code{background:#f1f5f9}
+  .cols{display:flex;flex-wrap:wrap;gap:18px}
+  .cols>div{flex:1 1 340px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:4px 18px 14px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>gpui-moonbit アーキテクチャ</h1>
+  <p class="sub">Zed の <b>GPUI</b>（Rust 製 GPU アクセラレーション UI）を、C ABI を介して <b>MoonBit</b> から駆動する実験的ブリッジ。<br>
+  MoonBit が <code>main</code> を所有し、Rust は実行ファイルにリンクされる静的ライブラリとして動く。</p>
+</header>
+
+<main>
+
+<h2>1. 全体像 — 何がどこにあるか</h2>
+<p>登場人物は 3 つだけ。<b>MoonBit 側</b>（UI の記述とアプリの状態）、<b>C ABI 境界</b>（両者の唯一の接点）、<b>Rust 側</b>（ツリーの保存・GPUI へのレンダリング・イベント配線）。
+関係は <b>双方向</b>で、行きは「コマンドバッファ 1 回の FFI 呼び出し」、帰りは「5 個の <code>i32</code> だけを運ぶコールバック」という非対称な形をしている。</p>
+
+<div class="cols">
+  <div>
+    <h3>MoonBit が持つもの</h3>
+    <ul>
+      <li><code>main</code> エントリポイント（<code>moon run</code> で起動）</li>
+      <li>Counter の状態とイベントの意味づけ（<code>app.mbt</code>）</li>
+      <li>UI ツリーの記述と <code>CommandBuffer</code> のエンコード</li>
+    </ul>
+  </div>
+  <div>
+    <h3>Rust が持つもの</h3>
+    <ul>
+      <li>コミット済みノードツリー <code>VIEWS</code>（唯一の真実）</li>
+      <li>GPUI 要素へのレンダリングとイベントリスナー</li>
+      <li>スクロール位置などメインスレッド専用の状態</li>
+    </ul>
+  </div>
+</div>
+
+<h2>2. ランタイム構成図</h2>
+<p>中央＝呼び出しの流れ（上から下）。右＝Rust 側が保持する状態。左＝入力イベントが MoonBit へ戻ってくるループ。</p>
+
+<div class="wrap">
+<div class="stage" style="width:1240px;height:790px">
+
+  <svg width="1240" height="790" viewBox="0 0 1240 790">
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+              orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <g fill="none" stroke="var(--line)" stroke-width="2">
+      <!-- 中央スパイン -->
+      <line x1="630" y1="88"  x2="630" y2="118" marker-end="url(#ah)"/>
+      <line x1="630" y1="190" x2="630" y2="223" marker-end="url(#ah)"/>
+      <line x1="630" y1="295" x2="630" y2="328" marker-end="url(#ah)"/>
+      <line x1="630" y1="388" x2="630" y2="421" marker-end="url(#ah)"/>
+      <line x1="630" y1="475" x2="630" y2="506" marker-end="url(#ah)"/>
+      <line x1="630" y1="586" x2="630" y2="616" marker-end="url(#ah)"/>
+      <line x1="630" y1="680" x2="630" y2="703" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+      <!-- 右: Rust 側の状態 -->
+      <line x1="802" y1="449" x2="878" y2="436" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <line x1="802" y1="547" x2="878" y2="547" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <line x1="802" y1="649" x2="878" y2="653" marker-end="url(#ah)"/>
+
+      <!-- 左: イベントループ -->
+      <line x1="358" y1="733" x2="458" y2="733" marker-end="url(#ah)"/>
+      <line x1="458" y1="649" x2="362" y2="599" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <line x1="210" y1="558" x2="210" y2="250" marker-end="url(#ah)"/>
+      <line x1="362" y1="209" x2="458" y2="157" marker-end="url(#ah)"/>
+
+      <text class="lbl" x="646" y="112" text-anchor="start">呼び出し</text>
+      <text class="lbl" x="646" y="216" text-anchor="start">build_tree / update_text</text>
+      <text class="lbl" x="646" y="322" text-anchor="start">コマンドバッファに encode</text>
+      <text class="lbl" x="646" y="500" text-anchor="start">FFI は 1 回だけ</text>
+      <text class="lbl" x="646" y="610" text-anchor="start">render_node → gpui 要素</text>
+      <text class="lbl" x="646" y="697" text-anchor="start">描画 / 入力</text>
+
+      <text class="lbl" x="840" y="428" text-anchor="middle">読み戻し</text>
+      <text class="lbl" x="840" y="539" text-anchor="middle">commit</text>
+      <text class="lbl" x="840" y="705" text-anchor="middle">scroll 位置</text>
+
+      <text class="lbl" x="408" y="726" text-anchor="middle">操作</text>
+      <text class="lbl" x="411" y="645" text-anchor="middle">イベント/notify</text>
+      <text class="lbl" x="222" y="400" text-anchor="start">5×i32 envelope</text>
+      <text class="lbl" x="410" y="176" text-anchor="middle">dispatch → 0 / 1</text>
+    </g>
+  </svg>
+
+  <!-- ===== 中央: 呼び出しの流れ ===== -->
+  <div class="node mb" style="left:460px;top:30px;width:340px;height:58px">
+    <div class="t">cmd/main/main.mbt</div><div class="d">MoonBit がプロセスの main を所有。dispatch を <code>_keep</code> で保持し DCE を防ぐ</div></div>
+
+  <div class="node mb" style="left:460px;top:120px;width:340px;height:70px">
+    <div class="t">app/app.mbt — Counter の状態とルーティング</div><div class="d">count / イベントの意味づけ / ツリー構築。変化したら 1、しなければ 0 を返す</div></div>
+
+  <div class="node mb" style="left:460px;top:225px;width:340px;height:70px">
+    <div class="t">gpui-bindings.mbt — 高レベル API</div><div class="d">CommandBuffer・Color・GpuiError / classify_status・UTF-8 エンコード</div></div>
+
+  <div class="node gn" style="left:460px;top:330px;width:340px;height:58px">
+    <div class="t">gpui-bindings-ffi.mbt（自動生成）</div><div class="d">C ヘッダから bindgen-moonbit が生成した低レベル import</div></div>
+
+  <div class="node abi" style="left:460px;top:423px;width:340px;height:52px">
+    <div class="t">C ABI 境界 — include/gpui_sys.h</div><div class="d">UI 構築の中核 export は <code>gpui_build_tree</code> と <code>gpui_run_window</code> の 2 つ</div></div>
+
+  <div class="node rs" style="left:460px;top:508px;width:340px;height:78px">
+    <div class="t">gpui-sys/src/lib.rs</div><div class="d">コマンドバッファの decode → ステージングツリー → 検証 → コミット。render とイベントリスナーの配線</div></div>
+
+  <div class="node rs" style="left:460px;top:618px;width:340px;height:62px">
+    <div class="t">GPUI 0.2.2（Zed）</div><div class="d">イベントループ。<code>run_window</code> がここでブロックする</div></div>
+
+  <div class="node os" style="left:460px;top:705px;width:340px;height:56px">
+    <div class="t">ウィンドウ（macOS / Linux / Windows）</div><div class="d">macOS はキーボード配送に <code>dist/Counter.app</code> が必要</div></div>
+
+  <!-- ===== 右: Rust 側の状態 ===== -->
+  <div class="node abi" style="left:880px;top:398px;width:320px;height:76px">
+    <div class="t">補助 C export</div><div class="d">debug_dump_text（往復テスト） / abi_probe（i32 境界検証） / event_copy_text</div></div>
+
+  <div class="node dt" style="left:880px;top:508px;width:320px;height:78px">
+    <div class="t">VIEWS: Mutex&lt;Vec&lt;Option&lt;UiNode&gt;&gt;&gt;</div><div class="d">view ごとのコミット済みツリー。<b>唯一の真実</b>。build_tree 失敗時は旧ツリーが無傷で残る</div></div>
+
+  <div class="node dt" style="left:880px;top:618px;width:320px;height:70px">
+    <div class="t">FfiView.scroll_handles</div><div class="d">Rc ベースで Send でないためツリー外・メインスレッド専用に保持。キー付き div のみ位置を維持</div></div>
+
+  <!-- ===== 左: イベントループ ===== -->
+  <div class="node mb" style="left:60px;top:170px;width:300px;height:78px">
+    <div class="t">mb_dispatch(...) → app.dispatch</div><div class="d">(ABI_VERSION, kind, view, data_a, data_b)。戻り値 1 のときだけ Rust が cx.notify()</div></div>
+
+  <div class="node rs" style="left:60px;top:558px;width:300px;height:78px">
+    <div class="t">GPUI リスナー</div><div class="d">on_click / on_key_down / text。Tab・Shift+Tab は外側コンテナが消費し MoonBit には届かない</div></div>
+
+  <div class="node us" style="left:60px;top:705px;width:300px;height:56px">
+    <div class="t">ユーザー</div><div class="d">クリック・キー入力・IME</div></div>
+
+</div>
+</div>
+
+<div class="legend">
+  <span><i class="sw" style="background:var(--mb-bg);border-color:var(--mb-bd)"></i>MoonBit 層</span>
+  <span><i class="sw" style="background:var(--abi-bg);border-color:var(--abi-bd)"></i>C ABI / ビルド駆動</span>
+  <span><i class="sw" style="background:var(--rs-bg);border-color:var(--rs-bd)"></i>Rust 層</span>
+  <span><i class="sw" style="background:var(--dt-bg);border-color:var(--dt-bd)"></i>データ / 状態</span>
+  <span><i class="sw" style="background:var(--os-bg);border-color:var(--os-bd)"></i>OS / 外部</span>
+  <span><i class="sw" style="background:var(--us-bg);border-color:var(--us-bd)"></i>ユーザー</span>
+  <span><i class="sw" style="background:var(--gn-bg);border-color:var(--gn-bd);border-style:dashed"></i>自動生成物（破線）</span>
+</div>
+
+<h2>3. 実行時モデル — retained + reactive</h2>
+<p>仮想 DOM の差分計算は<b>意図的に持たない</b>。MoonBit がツリー全体を記述して送り、Rust がそれを保存し、GPUI が描く。状態が変わったらもう一度送り直す、というシンプルな契約になっている。</p>
+
+<h3>1 回の更新で起きること</h3>
+<ul>
+  <li>MoonBit がイベントを受け取り、状態（<code>count</code>）を変更する</li>
+  <li>まず <b>その場更新</b>を試す — <code>update_text(view, COUNT_KEY, …)</code> でキー付き div の<b>最初のテキスト子</b>だけを書き換える</li>
+  <li>キーが見つからなければ（<code>KEY_NOT_FOUND</code>）<b>フルリビルド</b>にフォールバック — 新しいコマンドバッファでツリーをゼロから作り直して <code>build_tree</code></li>
+  <li>MoonBit が <code>1</code> を返す → Rust が <code>cx.notify()</code> → <code>FfiView::render</code> が再実行される</li>
+  <li>何も変化しないイベントは <code>0</code> を返し、再構築も再描画も起こらない</li>
+</ul>
+
+<h3>コマンドバッファはスタックマシン</h3>
+<p>プロパティごとに FFI を呼ぶのではなく、全ノードの記述を 1 本の length-delimited なオペコード列にまとめ、<b>FFI 呼び出し 1 回</b>で渡す。</p>
+<ul>
+  <li>ノード生成（<code>OP_DIV</code> / <code>OP_TEXT</code>）がハンドルを内部スタックに push する</li>
+  <li>セッター（<code>OP_SET_*</code>）はスタックトップに適用される</li>
+  <li><code>OP_ADD_CHILD</code> は child → parent の順に pop し、parent を push し直す</li>
+  <li><code>OP_SET_ROOT</code> がトップを pop してルートにする</li>
+</ul>
+<p>Rust 側はまず<b>ステージングツリー</b>を組み、ルートの存在とキーの重複を検証してから、成功したときだけ <code>VIEWS[view]</code> を差し替える。失敗すれば以前のツリーは無傷のまま。ヘッダは <code>"GPUI"</code> マジック + <code>BUFFER_VERSION</code> で始まる。</p>
+
+<div class="note">
+<b>オペコードの追加は後方互換。</b> 古い Rust バイナリは知らないオペコードを <code>UNKNOWN_OPCODE</code> で拒否するだけで、誤ってデコードすることはない。だから <code>BUFFER_VERSION</code> を上げるのは「既存オペコードの意味が変わったとき」だけでよい。
+</div>
+
+<h3>ノードの同一性 — 3 種類の ID</h3>
+<table>
+  <tr><th>条件</th><th>GPUI ElementId</th><th>再構築を跨いだ安定性</th></tr>
+  <tr><td>安定キーあり（<code>set_key</code>）</td><td><code>"gpui_key:{key}"</code></td><td><b>維持される</b>（推奨）</td></tr>
+  <tr><td>キーなし・クリック可能</td><td><code>("gpui_click", click_id)</code></td><td>click_id 次第</td></tr>
+  <tr><td>キーなし・スクロール / focusable</td><td>描画ごとの一時 id</td><td>リセットされる</td></tr>
+</table>
+<p><code>click_id</code> はアクションのルーティング専用でキーとは独立している（click_id の重複は許容、キーの重複は <code>build_tree</code> が拒否）。スクロール位置や安定したフォーカスが欲しいときは <code>set_key</code> を付ける、というのが実用上いちばん重要なルール。</p>
+
+<h2>4. FFI 契約 — 行きと帰りで形が違う</h2>
+
+<div class="cols">
+  <div>
+    <h3>行き: MoonBit → Rust（C ABI）</h3>
+    <table>
+      <tr><th>C シンボル</th><th>役割</th></tr>
+      <tr><td><code>gpui_build_tree</code></td><td>コマンドバッファ 1 回でツリーを構築・コミット</td></tr>
+      <tr><td><code>gpui_run_window</code></td><td>ウィンドウを開き GPUI ループでブロック</td></tr>
+      <tr><td><code>gpui_update_text</code></td><td>キー付き div のテキストをその場更新</td></tr>
+      <tr><td><code>gpui_event_copy_text</code></td><td>EVENT_TEXT のペイロードを同期コピー</td></tr>
+      <tr><td><code>gpui_debug_dump_text</code></td><td>ツリーのテキストを DFS で読み戻す</td></tr>
+      <tr><td><code>gpui_abi_probe</code></td><td>Int == i32 の境界往復検証</td></tr>
+    </table>
+  </div>
+  <div>
+    <h3>帰り: Rust → MoonBit（コールバック）</h3>
+    <p>コールバックは<b>たった 1 つ</b>。<code>app.dispatch(version, kind, view, data_a, data_b) -&gt; Int</code> を、Rust がマングル名経由で直接呼ぶ。</p>
+    <table>
+      <tr><th>slot</th><th>中身</th></tr>
+      <tr><td>0</td><td><code>ABI_VERSION</code>（= 4）。不一致なら MoonBit が Unknown を返して拒否</td></tr>
+      <tr><td>1</td><td>イベント種別 CLICK=1 / KEY=2 / TEXT=3 / NAMED_KEY=4</td></tr>
+      <tr><td>2</td><td>view id（VIEWS のインデックス）</td></tr>
+      <tr><td>3, 4</td><td>data_a / data_b（click_id, コードポイント, token, 修飾キー…）</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="note">
+<b>なぜ 5 個の <code>i32</code> だけなのか。</b> MoonBit native は<b>非アトミックな参照カウント</b>で動くランタイムなので、ヒープオブジェクトを境界を跨いで持ち回れない。64 ビットポインタも i32 スロットに収まらない。だからテキストのような可変長ペイロードは Rust 所有のキューに置き、<code>token</code> だけを渡して <code>gpui_event_copy_text</code> で<b>同期的にコピーさせる</b>方式になっている。
+</div>
+
+<h3>ステータスコード</h3>
+<table>
+  <tr><th>値</th><th>意味</th></tr>
+  <tr><td><code>0</code> OK</td><td>正常完了</td></tr>
+  <tr><td><code>-1</code> INVALID_HANDLE</td><td>ハンドル / スタックが不正</td></tr>
+  <tr><td><code>-2</code> WRONG_NODE_KIND</td><td>そのノード種別には適用できない操作</td></tr>
+  <tr><td><code>-3</code> NODE_ABSENT</td><td>既に別ノードへ move 済み</td></tr>
+  <tr><td><code>-4</code> INTERNAL_PANIC</td><td>Rust の panic を C 境界の手前で捕捉した</td></tr>
+  <tr><td><code>-5</code> BAD_BUFFER_VERSION</td><td>マジック / バージョン不一致</td></tr>
+  <tr><td><code>-6</code> TRUNCATED_BUFFER</td><td>フィールド途中で終了、ペイロードが過大 / 切り詰め</td></tr>
+  <tr><td><code>-7</code> UNKNOWN_OPCODE</td><td>このビルドが知らないオペコード</td></tr>
+  <tr><td><code>-8</code> NO_ROOT</td><td><code>OP_SET_ROOT</code> なしでバッファが終了</td></tr>
+  <tr><td><code>-9</code> DUPLICATE_KEY</td><td>ツリー内でキーが重複</td></tr>
+  <tr><td><code>-10</code> KEY_NOT_FOUND</td><td>update_text のキーが無い → フルリビルドへフォールバック</td></tr>
+</table>
+<p>MoonBit の高レベルラッパーは <code>Result[_, Int]</code> を返し、<code>classify_status</code> / <code>GpuiError</code> が生のコードを構造化エラーに分類する。</p>
+
+<h2>5. ビルド & コード生成パイプライン</h2>
+<p>このプロジェクトの肝は <code>abi.toml</code> が<b>単一の真実</b>である点。オペコード・イベント種別・enum id・<code>BUFFER_VERSION</code> はここから Rust と MoonBit の両方へ生成され、境界を跨いだ定数一致テスト（drift guard）がズレを実行前に検出する。</p>
+
+<div class="wrap">
+<div class="stage" style="width:1240px;height:700px">
+
+  <svg width="1240" height="700" viewBox="0 0 1240 700">
+    <defs>
+      <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+              orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <g fill="none" stroke="var(--line)" stroke-width="2">
+      <!-- abi.toml から三方向 -->
+      <line x1="630" y1="102" x2="630" y2="156" marker-end="url(#ah2)"/>
+      <line x1="463" y1="63"  x2="374" y2="186" marker-end="url(#ah2)"/>
+      <line x1="797" y1="63"  x2="886" y2="186" marker-end="url(#ah2)"/>
+
+      <!-- 中央スパイン -->
+      <line x1="630" y1="226" x2="630" y2="262" marker-end="url(#ah2)"/>
+      <line x1="630" y1="332" x2="630" y2="368" marker-end="url(#ah2)"/>
+      <line x1="630" y1="434" x2="630" y2="470" marker-end="url(#ah2)"/>
+      <line x1="630" y1="536" x2="630" y2="576" marker-end="url(#ah2)"/>
+
+      <!-- 左レーン -->
+      <line x1="215" y1="222" x2="215" y2="262" marker-end="url(#ah2)"/>
+      <line x1="215" y1="328" x2="215" y2="368" marker-end="url(#ah2)"/>
+      <line x1="374" y1="402" x2="461" y2="196" marker-end="url(#ah2)"/>
+
+      <!-- 右レーン -->
+      <line x1="1045" y1="222" x2="1045" y2="368" marker-end="url(#ah2)"/>
+      <line x1="799" y1="194" x2="886" y2="400" marker-end="url(#ah2)"/>
+      <polyline points="1045,442 1045,615 799,615" marker-end="url(#ah2)"/>
+
+      <!-- 最終リンク → テスト -->
+      <line x1="463" y1="615" x2="374" y2="615" marker-end="url(#ah2)"/>
+
+      <text class="lbl" x="644" y="134" text-anchor="start">定数を生成</text>
+      <text class="lbl" x="404" y="118" text-anchor="middle">build.sh の awk</text>
+      <text class="lbl" x="862" y="118" text-anchor="middle">build.rs</text>
+      <text class="lbl" x="644" y="248" text-anchor="start">cbindgen</text>
+      <text class="lbl" x="644" y="458" text-anchor="start">FFI import を生成</text>
+      <text class="lbl" x="232" y="352" text-anchor="start">nm でシンボル抽出</text>
+      <text class="lbl" x="392" y="352" text-anchor="end">#[link_name] 注入</text>
+      <text class="lbl" x="866" y="316" text-anchor="start">cargo build</text>
+      <text class="lbl" x="930" y="606" text-anchor="middle">静的リンク</text>
+      <text class="lbl" x="418" y="606" text-anchor="middle">検証</text>
+    </g>
+  </svg>
+
+  <div class="node abi" style="left:465px;top:26px;width:330px;height:76px">
+    <div class="t">gpui-sys/abi.toml</div><div class="d"><b>ABI の単一ソース</b>：opcode / EVENT_* / enum id / BUFFER_VERSION / コールバックポリシー</div></div>
+
+  <div class="node gn" style="left:60px;top:160px;width:310px;height:62px">
+    <div class="t">abi_constants.mbt（生成）</div><div class="d">MoonBit 側の定数</div></div>
+
+  <div class="node gn" style="left:890px;top:160px;width:310px;height:62px">
+    <div class="t">abi_constants.rs（生成）</div><div class="d">Rust 側の定数。drift guard が両者の一致を固定</div></div>
+
+  <div class="node abi" style="left:465px;top:160px;width:330px;height:66px">
+    <div class="t">gpui-sys/build.rs</div><div class="d">mb_symbol.txt を読んでコールバック extern を出力し、定数とヘッダを再生成</div></div>
+
+  <div class="node gn" style="left:465px;top:266px;width:330px;height:66px">
+    <div class="t">include/gpui_sys.h（生成）</div><div class="d">cbindgen が Rust の <code>extern "C"</code> から起こす C ヘッダ</div></div>
+
+  <div class="node rs" style="left:465px;top:372px;width:330px;height:62px">
+    <div class="t">bindgen-moonbit（Rust 製 CLI）</div><div class="d">C ヘッダをパースして MoonBit の import 宣言へ変換</div></div>
+
+  <div class="node gn" style="left:465px;top:474px;width:330px;height:62px">
+    <div class="t">gpui-bindings-ffi.mbt（生成）</div><div class="d">手編集禁止。追跡対象の生成ソース</div></div>
+
+  <div class="node mb" style="left:60px;top:266px;width:310px;height:62px">
+    <div class="t">moon build（コールド）</div><div class="d">まだ Rust ライブラリが無いのでリンクは失敗する想定</div></div>
+
+  <div class="node gn" style="left:60px;top:372px;width:310px;height:62px">
+    <div class="t">mb_symbol.txt（生成・非追跡）</div><div class="d">app.dispatch のマングル名をちょうど 1 つ抽出</div></div>
+
+  <div class="node rs" style="left:890px;top:372px;width:310px;height:70px">
+    <div class="t">cargo → libgpui_sys.a</div><div class="d">staticlib。未解決の <code>mb_dispatch</code> 参照を残したまま出力される</div></div>
+
+  <div class="node os" style="left:465px;top:580px;width:330px;height:70px">
+    <div class="t">最終リンク → 実行ファイル / dist/Counter.app</div><div class="d">MoonBit のリンク済み出力を消して再ビルドし、新しい .a に強制的に貼り直す</div></div>
+
+  <div class="node dt" style="left:60px;top:580px;width:310px;height:70px">
+    <div class="t">roundtrip ヘッドレステスト</div><div class="d">NUL・多バイト UTF-8・絵文字を送って読み戻し、バイト単位で比較</div></div>
+
+</div>
+</div>
+
+<div class="legend">
+  <span><i class="sw" style="background:var(--mb-bg);border-color:var(--mb-bd)"></i>MoonBit 層</span>
+  <span><i class="sw" style="background:var(--abi-bg);border-color:var(--abi-bd)"></i>C ABI / ビルド駆動</span>
+  <span><i class="sw" style="background:var(--rs-bg);border-color:var(--rs-bd)"></i>Rust 層</span>
+  <span><i class="sw" style="background:var(--dt-bg);border-color:var(--dt-bd)"></i>データ / 状態</span>
+  <span><i class="sw" style="background:var(--os-bg);border-color:var(--os-bd)"></i>成果物</span>
+  <span><i class="sw" style="background:var(--gn-bg);border-color:var(--gn-bd);border-style:dashed"></i>自動生成物（破線）</span>
+</div>
+
+<h3>なぜ素の <code>cargo build</code> / <code>moon build</code> ではダメなのか</h3>
+<ul>
+  <li>素の <code>cargo build</code> には、ローカル生成される <code>mb_symbol.txt</code> が無い（＝コールバックの extern を出せない）</li>
+  <li>素の <code>moon build</code> は、MoonBit が<b>外部静的アーカイブの変更を追跡しない</b>ため古い実行ファイルを残すことがある</li>
+  <li>だから必ずルートの <code>build.sh</code> / <code>build.ps1</code> を使う。ドライバは前提チェック → 生成 → ビルド → <b>リンケージ検証</b>（コールバック定義がちょうど 1 つ）→ 往復テスト、まで一気にやる</li>
+</ul>
+
+<div class="note">
+<b>bindgen は 1 つ前のヘッダを見る。</b> パイプライン上、bindgen-moonbit が走るのは cargo がヘッダを再生成する<b>前</b>。したがって Rust の C エクスポートを変えた直後は、ドライバをもう一度走らせて、再生成されたヘッダと追跡対象の <code>gpui-bindings-ffi.mbt</code> を同期させる必要がある。
+</div>
+
+<h2>6. MoonBit native ならではの制約</h2>
+<p>API が強制してくれないので、<b>呼ぶ側が守る</b>必要があるルール。ここを外すと静かに壊れる。</p>
+<ul>
+  <li><b>コールバックはメインスレッド限定。</b> ランタイムの参照カウントは非アトミック（<code>int32_t rc</code>）。別スレッドから <code>app.dispatch</code> を呼ぶとデータ競合になる</li>
+  <li><b>コールバックは素のトップレベル関数。</b> MoonBit のクロージャは「コードポインタ + 環境」の RC ヒープオブジェクトで、C の関数ポインタとしてエクスポートできない。だから「Rust からマングル名を直参照して呼ぶ」の一択</li>
+  <li><b>envelope はスカラのみ。</b> MoonBit のヒープオブジェクトを Rust 側に保持してはいけない（incref/decref を避けるため）</li>
+  <li><b>MoonBit <code>Int</code> == Rust <code>i32</code>。</b> 前提ではなく、<code>gpui_abi_probe</code> が毎ビルド <code>i32::MAX</code> / <code>i32::MIN</code> / 0 / -1 の往復で機械検証している</li>
+  <li><b>panic はプロセス abort。</b> MoonBit の例外は FFI 境界を越えられない。Rust 側は <code>catch_unwind</code> で捕捉して <code>INTERNAL_PANIC</code> を返し、境界の外へ漏らさない</li>
+</ul>
+
+<h2>7. 触るときの注意点</h2>
+<table>
+  <tr><th>やりたいこと</th><th>正しい入り口</th></tr>
+  <tr><td>ABI 定数を変える</td><td><code>gpui-sys/abi.toml</code> を編集する。生成物の <code>abi_constants.rs</code> / <code>.mbt</code> は直接触らない</td></tr>
+  <tr><td>C エクスポートを増やす</td><td><code>gpui-sys/src/lib.rs</code> → ドライバ再実行 → <code>gpui-bindings-ffi.mbt</code> の同期を確認</td></tr>
+  <tr><td>Rust だけ変更した</td><td>ルートドライバを使う（または <code>moon build</code> 前に MoonBit のリンク済み出力を明示的にクリーン）</td></tr>
+  <tr><td>再構築を跨いで状態を保ちたい</td><td>その div に <code>set_key</code> を付ける（スクロール位置・フォーカス・その場更新の全てがこれに依存）</td></tr>
+  <tr><td>キーボードを macOS で試す</td><td>素の Mach-O ではイベントが来ない。<code>dist/Counter.app</code> を実行する</td></tr>
+  <tr><td>WSLg で起動したい</td><td><code>env -u WAYLAND_DISPLAY</code> で明示的に X11 起動（Rust 側にも 1 度だけの再試行フォールバックあり）</td></tr>
+</table>
+
+<div class="note">
+<b>汎用の vdom diff は意図的に未実装。</b> <code>update_text</code> はキー付き div の<b>最初のテキスト子</b>だけを書き換える。テキスト子が無い・キーがテキストノードを指す・ツリー未コミットのいずれでも <code>KEY_NOT_FOUND</code> を返すので、呼び出し側は必ずフルリビルドへのフォールバックを用意すること。
+</div>
+
+</main>
+</body>
+</html>
