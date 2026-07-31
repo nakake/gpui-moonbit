@@ -297,11 +297,12 @@ struct ViewRegistry(HashMap<i32, WeakEntity<FfiView>>);
 impl Global for ViewRegistry {}
 
 /// Register an open view so the drain pump can notify it. Called on the main
-/// thread when the `FfiView` entity is created.
-fn register_view(cx: &mut App, view: i32, entity: &Entity<FfiView>) {
-    cx.default_global::<ViewRegistry>()
-        .0
-        .insert(view, entity.downgrade());
+/// thread when the `FfiView` entity is created. Takes a `WeakEntity` (not the
+/// `Entity`) because the only non-test-gated way to reach the window's root
+/// entity from a `WindowHandle` is `read`, which hands the entity to a closure
+/// and drops it on return — the caller downgrades inside that closure.
+fn register_view(cx: &mut App, view: i32, weak: WeakEntity<FfiView>) {
+    cx.default_global::<ViewRegistry>().0.insert(view, weak);
 }
 
 /// Notify the view that its committed tree changed (dispatch returned 1). A
@@ -1625,9 +1626,13 @@ fn run_window(view: usize, width: f32, height: f32) {
                 },
             )
             .unwrap();
-        // Route drain-pump notifications to this view (RFC 0002 §3.4).
-        let entity = window.root(cx).unwrap();
-        register_view(cx, view_id, &entity);
+        // Route drain-pump notifications to this view (RFC 0002 §3.4). The
+        // root entity is only reachable through `read_window` (the `root`
+        // accessor is test-support-gated), so downgrade inside the closure and
+        // register the weak handle.
+        if let Ok(weak) = cx.read_window(&window, |entity, _| entity.downgrade()) {
+            register_view(cx, view_id, weak);
+        }
         cx.activate(true);
     });
 }
