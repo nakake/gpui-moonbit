@@ -13,64 +13,17 @@
 ///|
 let on : Array[Bool] = [false]
 
-// Button click id (the single clickable div carries it; routed in `on_click`).
-
-///|
-const BTN_TOGGLE : Int = 1
-
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
 
 ///|
 const KEY_SPACE : Int = 32 // ' ' → toggle
 
-///|
-priv enum Event {
-  Click(Int) // click_id
-  Key(Int, Int) // codepoint, modifier bits
-  NamedKey(Int, Int) // named_key_id, modifier bits
-  Unknown
-}
+// Handler registry (RFC 0001 §3.2): the toggle button's closure is registered
+// once; the issued id is written by `set_on_click` and routed back through
+// `HandlerRegistry::dispatch`.
 
 ///|
-fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
-  // Runtime version handshake: reject a stale Rust binary.
-  if version != @nakake/gpui-bindings.ABI_VERSION {
-    return Unknown
-  }
-  if kind == @nakake/gpui-bindings.EVENT_CLICK {
-    Click(data_a)
-  } else if kind == @nakake/gpui-bindings.EVENT_KEY {
-    Key(data_a, data_b)
-  } else if kind == @nakake/gpui-bindings.EVENT_NAMED_KEY {
-    NamedKey(data_a, data_b)
-  } else {
-    Unknown
-  }
-}
-
-///|
-pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
-  let changed = apply_event(decode(version, kind, data_a, data_b))
-  if changed == 1 {
-    // Rebuild the tree. On failure the Rust side keeps the old committed tree
-    // (atomic commit), so returning `changed` still lets GPUI re-render it.
-    match build_tree(view) {
-      Ok(_) => ()
-      Err(status) => println("hello: build_tree failed with status \{status}")
-    }
-  }
-  changed
-}
-
-///|
-fn apply_event(event : Event) -> Int {
-  match event {
-    Click(click_id) => on_click(click_id)
-    Key(code, mods) => on_key(code, mods)
-    NamedKey(id, mods) => on_named_key(id, mods)
-    Unknown => 0
-  }
-}
+let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.HandlerRegistry::new()
 
 ///|
 fn toggle() -> Int {
@@ -79,13 +32,7 @@ fn toggle() -> Int {
 }
 
 ///|
-fn on_click(click_id : Int) -> Int {
-  if click_id == BTN_TOGGLE {
-    toggle()
-  } else {
-    0
-  }
-}
+let btn_toggle : Int = handlers.on_click(fn(_view) { ignore(toggle()) })
 
 ///|
 fn on_key(code : Int, _mods : Int) -> Int {
@@ -108,6 +55,35 @@ fn on_named_key(id : Int, _mods : Int) -> Int {
   } else {
     0
   }
+}
+
+// App-level handlers (key / named key reach the focused outer container, not a
+// node): registered once, fanned out by the registry.
+
+///|
+let _key_handler : Int = handlers.on_key(fn(code, mods) { ignore(on_key(code, mods)) })
+
+///|
+let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
+  ignore(on_named_key(id, mods))
+})
+
+///|
+pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
+  // Runtime version handshake: a stale Rust binary is rejected before any
+  // handler runs or the tree is touched.
+  if version != @nakake/gpui-bindings.ABI_VERSION {
+    return 0
+  }
+  handlers.dispatch(@nakake/gpui-bindings.decode_event(version, kind, data_a, data_b), view)
+  // Phase A (RFC 0001 §5): handlers mutate `on` without reporting whether
+  // anything changed, so every event rebuilds. Phase D replaces this gate with
+  // signal dirty tracking (§3.4).
+  match build_tree(view) {
+    Ok(_) => ()
+    Err(status) => println("hello: build_tree failed with status \{status}")
+  }
+  1
 }
 
 ///|
@@ -142,7 +118,7 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_rounded(10.0)
   cb.set_flex_col()
   cb.set_center()
-  cb.set_on_click(BTN_TOGGLE)
+  cb.set_on_click(btn_toggle)
   cb.text("Toggle", 255, 255, 255, 18.0)
   cb.add_child()
   cb.add_child() // attach the button to the root

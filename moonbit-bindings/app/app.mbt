@@ -1,46 +1,18 @@
 // Interactive app: state + logic, written in MoonBit.
 //
 // `dispatch` is the single event entry point that Rust (gpui-sys) calls via its
-// compiled symbol. The five i32 slots carry a versioned event envelope:
-//   (abi_version, event_kind, view, data_a, data_b)
-// Slot 0 is always ABI_VERSION so a stale Rust binary is rejected at runtime.
-// Slot 1 selects the event kind; slot 2 is the view id (routes the rebuild
-// target); slots 3–4 are kind-dependent:
-//   EVENT_CLICK: data_a = click_id, data_b = 0
-//   EVENT_KEY:   data_a = codepoint, data_b = modifier bits
-//   EVENT_TEXT:  data_a = token, data_b = byte length (copy via gpui_event_copy_text)
-//   EVENT_NAMED_KEY: data_a = named_key_id, data_b = modifier bits
+// compiled symbol. The five i32 slots carry a versioned event envelope
+// (docs/architecture.md §4b); decoding into a typed `Event` and dispatching to
+// typed handler closures live in the gpui-bindings library (RFC 0001 §3.2).
+// This file registers its handlers with a `HandlerRegistry` once at setup and
+// writes the issued ids into the tree via `set_on_click`.
 //
 // NOTE: changing `dispatch`'s signature does NOT change the mangled symbol name
 // (MoonBit mangling excludes types), so the Rust `extern` must be kept in sync —
 // it is generated from a template in `gpui-sys/build.rs`.
 
-// Direct FFI: declared here (not in the root package) so `moon test` on
-// gpui-bindings never compiles a reference to the Rust-only symbol.
-///|
-#borrow(buf)
-extern "C" fn gpui_event_copy_text_ffi(
-  token : Int,
-  buf : Bytes,
-  len : Int,
-) -> Int = "gpui_event_copy_text"
-
 ///|
 let count : Array[Int] = [0]
-
-// Button click ids (each clickable div carries one; routed in `on_click`).
-
-///|
-const BTN_DECREMENT : Int = 1
-
-///|
-const BTN_RESET : Int = 2
-
-///|
-const BTN_INCREMENT : Int = 3
-
-///|
-const BTN_INCREMENT_10 : Int = 4
 
 // Stable key for the count display card's text node. `update_text` addresses it
 // for the incremental in-place update (issue #10); the full `build_tree` path
@@ -49,97 +21,24 @@ const BTN_INCREMENT_10 : Int = 4
 ///|
 const COUNT_KEY : String = "count-label"
 
-///|
-priv enum Event {
-  Click(Int) // click_id
-  Key(Int, Int) // codepoint, modifier bits
-  Text(String) // typed text (UTF-8 decoded)
-  NamedKey(Int, Int) // named_key_id, modifier bits
-  Unknown
-}
+// Handler registry (RFC 0001 §3.2): closures are registered once at setup; the
+// issued ids are written by `set_on_click` and routed back through
+// `HandlerRegistry::dispatch`. No int constants, no int switch.
 
 ///|
-fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
-  // Runtime version handshake: reject a stale Rust binary.
-  if version != @nakake/gpui-bindings.ABI_VERSION {
-    return Unknown
-  }
-  if kind == @nakake/gpui-bindings.EVENT_CLICK {
-    Click(data_a)
-  } else if kind == @nakake/gpui-bindings.EVENT_KEY {
-    Key(data_a, data_b)
-  } else if kind == @nakake/gpui-bindings.EVENT_TEXT {
-    // data_a = token, data_b = byte length. Copy the UTF-8 payload from
-    // Rust's event queue synchronously before returning from dispatch.
-    let len = data_b
-    let buf = Bytes::make(len, b'\x00')
-    let copied = gpui_event_copy_text_ffi(data_a, buf, len)
-    if copied > 0 {
-      let text = @utf8.decode(buf[0:copied]) catch { _ => "" }
-      Text(text)
-    } else {
-      Unknown
-    }
-  } else if kind == @nakake/gpui-bindings.EVENT_NAMED_KEY {
-    NamedKey(data_a, data_b)
-  } else {
-    Unknown
-  }
-}
+let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.HandlerRegistry::new()
 
 ///|
-pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
-  let changed = apply_event(decode(version, kind, data_a, data_b))
-  if changed == 1 {
-    // Incremental path (issue #10): the only state is `count`, and the only
-    // visible change is the count label text. Update that one keyed text node
-    // in place instead of re-encoding and re-decoding the whole tree. On any
-    // failure (tree not yet committed, key missing) fall back to the full
-    // `build_tree`, which is always correct. Either way, returning `changed`
-    // (1) lets Rust call `cx.notify()` so GPUI re-renders the (now updated)
-    // committed tree.
-    match @nakake/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{count[0]}") {
-      Ok(_) => ()
-      Err(_) =>
-        match build_tree(view) {
-          Ok(_) => ()
-          Err(status) => println(
-            "app: build_tree failed: \{@nakake/gpui-bindings.classify_status(status).to_string()}",
-          )
-        }
-    }
-  }
-  changed
-}
+let btn_decrement : Int = handlers.on_click(fn(_view) { count[0] = count[0] - 1 })
 
 ///|
-fn apply_event(event : Event) -> Int {
-  match event {
-    Click(click_id) => on_click(click_id)
-    Key(code, mods) => on_key(code, mods)
-    Text(text) => on_text(text)
-    NamedKey(id, mods) => on_named_key(id, mods)
-    Unknown => 0
-  }
-}
+let btn_reset : Int = handlers.on_click(fn(_view) { ignore(reset_count()) })
 
 ///|
-fn on_click(click_id : Int) -> Int {
-  if click_id == BTN_DECREMENT {
-    count[0] = count[0] - 1
-    1
-  } else if click_id == BTN_RESET {
-    reset_count()
-  } else if click_id == BTN_INCREMENT {
-    count[0] = count[0] + 1
-    1
-  } else if click_id == BTN_INCREMENT_10 {
-    count[0] = count[0] + 10
-    1
-  } else {
-    0
-  }
-}
+let btn_increment : Int = handlers.on_click(fn(_view) { count[0] = count[0] + 1 })
+
+///|
+let btn_increment_10 : Int = handlers.on_click(fn(_view) { count[0] = count[0] + 10 })
 
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
 
@@ -222,6 +121,51 @@ fn on_text(text : String) -> Int {
   }
 }
 
+// App-level handlers (key / named key / text reach the focused outer
+// container, not a node): registered once, fanned out by the registry.
+
+///|
+let _key_handler : Int = handlers.on_key(fn(code, mods) { ignore(on_key(code, mods)) })
+
+///|
+let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
+  ignore(on_named_key(id, mods))
+})
+
+///|
+let _text_handler : Int = handlers.on_text(fn(text) { ignore(on_text(text)) })
+
+///|
+pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
+  // Runtime version handshake: a stale Rust binary is rejected before any
+  // handler runs or the tree is touched.
+  if version != @nakake/gpui-bindings.ABI_VERSION {
+    return 0
+  }
+  handlers.dispatch(@nakake/gpui-bindings.decode_event(version, kind, data_a, data_b), view)
+  // Phase A (RFC 0001 §5): handlers mutate `count` without reporting whether
+  // anything changed, so every event triggers the update path. Phase D
+  // replaces this gate with signal dirty tracking (§3.4), which restores
+  // "rebuild only on real change" declaratively.
+  // Incremental path (issue #10): the only state is `count`, and the only
+  // visible change is the count label text. Update that one keyed text node
+  // in place instead of re-encoding and re-decoding the whole tree. On any
+  // failure (tree not yet committed, key missing) fall back to the full
+  // `build_tree`, which is always correct. Either way, returning 1 lets Rust
+  // call `cx.notify()` so GPUI re-renders the (now updated) committed tree.
+  match @nakake/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{count[0]}") {
+    Ok(_) => ()
+    Err(_) =>
+      match build_tree(view) {
+        Ok(_) => ()
+        Err(status) => println(
+          "app: build_tree failed: \{@nakake/gpui-bindings.classify_status(status).to_string()}",
+        )
+      }
+  }
+  1
+}
+
 // Build one labelled, clickable button onto the command buffer. The button div
 // is pushed, configured, given a text label child, and left on the stack so the
 // caller can `add_child` it into its parent.
@@ -280,12 +224,12 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.add_child()
   cb.add_child() // attach the card to the root
 
-  // A row of buttons; each is a distinct click_id routed in on_click. The row
-  // sits inside a keyed horizontal-scroll container (G6): its retained
-  // ScrollHandle keeps the scroll position across the rebuild every click
-  // triggers. The 404px row (4×92 + 3×12 gap) overflows the 300px container, so
-  // the wheel scrolls it sideways (a vertical wheel maps to the x-axis when only
-  // x scrolls).
+  // A row of buttons; each carries a registry-issued handler id. The row sits
+  // inside a keyed horizontal-scroll container (G6): its retained ScrollHandle
+  // keeps the scroll position across the rebuild every click triggers. The
+  // 404px row (4×92 + 3×12 gap) overflows the 300px container, so the wheel
+  // scrolls it sideways (a vertical wheel maps to the x-axis when only x
+  // scrolls).
   cb.div() // scroll container
   cb.set_key("button-scroll")
   cb.set_size(300.0, 60.0)
@@ -297,13 +241,13 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_size(404.0, 56.0) // wider than the 300px container → horizontal overflow
   cb.set_flex_row()
   cb.set_gap(12.0)
-  make_button(cb, "btn-decrement", "-1", BTN_DECREMENT, 200, 80, 80)
+  make_button(cb, "btn-decrement", "-1", btn_decrement, 200, 80, 80)
   cb.add_child()
-  make_button(cb, "btn-reset", "Reset", BTN_RESET, 92, 98, 110)
+  make_button(cb, "btn-reset", "Reset", btn_reset, 92, 98, 110)
   cb.add_child()
-  make_button(cb, "btn-increment", "+1", BTN_INCREMENT, 70, 160, 95)
+  make_button(cb, "btn-increment", "+1", btn_increment, 70, 160, 95)
   cb.add_child()
-  make_button(cb, "btn-increment-10", "+10", BTN_INCREMENT_10, 70, 110, 230)
+  make_button(cb, "btn-increment-10", "+10", btn_increment_10, 70, 110, 230)
   cb.add_child()
   cb.add_child() // attach the row to the scroll container
   cb.add_child() // attach the scroll container to the root
