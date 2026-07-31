@@ -49,12 +49,14 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
     - Mach-O の先頭 `_`(ABI アンダースコア)込みで nm は `__M0FP…` と2本で表示。
   - 例: `username/gpui-bindings/spike` の `mb_ping` → `__M0FP38username15gpui_2dbindings5spike8mb__ping`
     - `3`(要素数) + `8username` + `15gpui_2dbindings` + `5spike` + `8mb__ping`(`mb_ping`→`mb__ping` で8字)。先頭の `38` は `3`+`8username`。
-  - 例: `username/gpui-bindings/app` の `dispatch` → `__M0FP38username15gpui_2dbindings3app8dispatch`
+    - 旧観測(リネーム前、2026-07-15)。spike パッケージは現存しないため再測定不可。マングル規則の説明として旧 `username` 名のまま残す。
+  - 例: `nakake/gpui-bindings/app` の `dispatch` → `_M0FP36nakake15gpui_2dbindings3app8dispatch`(ELF 実測。Mach-O なら先頭 `_` がもう1本付く)
+    - 旧観測(リネーム前、2026-07-15): `__M0FP38username15gpui_2dbindings3app8dispatch`。リネーム後は `36` = `3`+`6nakake`。観測日: 2026-08-01(`./build.sh` step 2 で再測定)
   - 観測日: 2026-07-15
 - **Rust から MoonBit 関数をマングル名で参照する**(Rust→MoonBit コールバックの実用手段):
   ```rust
   unsafe extern "C" {
-      #[link_name = "_M0FP38username15gpui_2dbindings3app8dispatch"] // ← 先頭 _ は1本
+      #[link_name = "_M0FP36nakake15gpui_2dbindings3app8dispatch"] // ← 先頭 _ は1本
       fn mb_dispatch(id: i32);
   }
   ```
@@ -125,7 +127,7 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
 
 ## 9. Linux(ELF / WSLg)対応での差分
 
-- **シンボル**: ELF には Mach-O の ABI アンダースコアが無い。nm 表示は `_M0FP…`(1本)で、`#[link_name]` にはそのまま書く(剥がさない)。マングル方式自体は macOS と完全同一(moon 0.1.20260713 で確認: `_M0FP38username15gpui_2dbindings3app8dispatch`)。
+- **シンボル**: ELF には Mach-O の ABI アンダースコアが無い。nm 表示は `_M0FP…`(1本)で、`#[link_name]` にはそのまま書く(剥がさない)。マングル方式自体は macOS と完全同一(リネーム後の再測定: `_M0FP36nakake15gpui_2dbindings3app8dispatch`、moon 0.1.20260721 / 2026-08-01。旧観測 2026-07-18 は `_M0FP38username15gpui_2dbindings3app8dispatch`)。
   - 観測日: 2026-07-18
 - **ビルドフロー差**: Linux の moon は `moonc link-core` が `cmd/main/main.c` を直接生成し、cc がコンパイル+リンクを1段で行う → **リンク失敗時に .o が残らない**(`__moonbit_link_core__/*.o` も無い)。build.sh のシンボル抽出は「.o の nm → 生成 main.c の grep」のフォールバック2段構え(2026-07-18 実装)。step 4 の強制再リンクは `main.exe` の削除だけで足りる。
   - 観測日: 2026-07-18

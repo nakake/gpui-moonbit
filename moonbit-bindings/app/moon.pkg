@@ -1,4 +1,4 @@
 import {
   "moonbitlang/core/encoding/utf8",
-  "username/gpui-bindings",
+  "nakake/gpui-bindings",
 }

@@ -1,6 +1,6 @@
 # gpui-bindings 消費者向けガイド
 
-Rust/GPUI を MoonBit native から C FFI 越しに呼び、ネイティブウィンドウを描画するための MoonBit モジュール（`username/gpui-bindings`）です。UI ツリー全体を 1 つの**コマンドバッファ**として記述し、`build_tree` 1 回の FFI 呼び出しで Rust 側にコミットします。クリック・キー・テキストイベントは Rust から MoonBit の固定 callback `app.dispatch` に戻ります。
+Rust/GPUI を MoonBit native から C FFI 越しに呼び、ネイティブウィンドウを描画するための MoonBit モジュール（`nakake/gpui-bindings`）です。UI ツリー全体を 1 つの**コマンドバッファ**として記述し、`build_tree` 1 回の FFI 呼び出しで Rust 側にコミットします。クリック・キー・テキストイベントは Rust から MoonBit の固定 callback `app.dispatch` に戻ります。
 
 このモジュールはローカル向けの実験的プロジェクトであり、安定した汎用 UI API ではありません。内部設計の詳細は [`docs/architecture.md`](../docs/architecture.md)（AI 向け内部文書）を参照してください。
 
@@ -67,7 +67,7 @@ MoonBit 側の型検査だけなら、このディレクトリで `moon check`�
 ```moonbit nocheck
 ///|
 pub fn build_tree(view : Int) -> Result[Unit, Int] {
-  let cb = @username/gpui-bindings.CommandBuffer::new()
+  let cb = @nakake/gpui-bindings.CommandBuffer::new()
   cb.div() // ルート
   cb.set_bg(28, 30, 38)
   cb.set_flex_col()
@@ -92,7 +92,7 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.add_child() // ボタンをルートに接続
 
   cb.set_root()
-  @username/gpui-bindings.build_tree(view, cb)
+  @nakake/gpui-bindings.build_tree(view, cb)
 }
 ```
 
@@ -101,7 +101,7 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
 ### 2. ウィンドウを開く
 
 ```moonbit nocheck
-match @username/gpui-bindings.run_window(0, 600.0, 500.0) {
+match @nakake/gpui-bindings.run_window(0, 600.0, 500.0) {
   Ok(_) => ()
   Err(status) => abort("run_window failed with status \{status}")
 }
@@ -144,7 +144,7 @@ MoonBit native の `Int` は 32-bit であり、この callback とコマンド�
 公開 API（`CommandBuffer` の各メソッド、`build_tree`、`run_window`、`NodeHandle`、および `abi_constants.mbt` の定数群）には MoonBit の doc comment `///|` が付いています。ソースと併せて参照してください。
 
 - 対象ファイル: [`gpui-bindings.mbt`](gpui-bindings.mbt)（高水準 API）、[`abi_constants.mbt`](abi_constants.mbt)（`gpui-sys/abi.toml` から生成される ABI 定数）
-- ドキュメント生成: MoonBit ツールチェーンの標準手段は `moon doc`（`moon doc --serve` でローカルサーバ起動）です。現行ツールチェーン（moon 0.1.20260721 時点）では、パッケージ単位の JSON（`_build/doc/username/gpui-bindings/package_data.json` 等、`///|` doc comment を含む）は生成されますが、最終的なドキュメントサイト組み立て段階で moondoc が `moon.mod.json` を要求して例外終了します（本モジュールは新形式の `moon.mod` を使用）。サイト生成は moondoc 側の対応待ちです。それまでは `///|` doc comment とソースが API リファレンスの正本です。
+- ドキュメント生成: MoonBit ツールチェーンの標準手段は `moon doc`（`moon doc --serve` でローカルサーバ起動）です。現行ツールチェーン（moon 0.1.20260721 時点）では、パッケージ単位の JSON（`_build/doc/nakake/gpui-bindings/package_data.json` 等、`///|` doc comment を含む）は生成されますが、最終的なドキュメントサイト組み立て段階で moondoc が `moon.mod.json` を要求して例外終了します（本モジュールは新形式の `moon.mod` を使用）。サイト生成は moondoc 側の対応待ちです。それまでは `///|` doc comment とソースが API リファレンスの正本です。
 
 ## 制約・注意
 

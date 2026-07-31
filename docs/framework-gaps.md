@@ -34,7 +34,7 @@
 
 **現状、これはライブラリではなく「ビルドスクリプト付きリポジトリ」である。** 第三者が依存関係として追加し、自分のアプリからビルドする手段がない。
 
-- **`G1` [完了 2026-07-25] モジュールマニフェスト整備。** `moonbit-bindings/moon.mod` の `description` / `repository` / `keywords` を埋め、`moon check` 通過を確認（#48）。
+- **`G1` [完了 2026-07-25] モジュールマニフェスト整備。** `moonbit-bindings/moon.mod` の `description` / `repository` / `keywords` を埋め、`moon check` 通過を確認（#48）。ただし `name` はプレースホルダ `username/gpui-bindings` のまま残っており、`repository`（`nakake/gpui-moonbit`）と名前空間が矛盾していた。#72（2026-08-01）で `name` を `nakake/gpui-bindings` にリネームし、import・コード例・ドキュメントの全 61 箇所を解消。マングル名も再測定済み（`_M0FP36nakake15gpui_2dbindings3app8dispatch`）。
 - **`G2` [保留] ビルドがリポジトリ固有のドライバに依存。** Rust staticlib のリンク・マングルシンボル抽出・`native-static-libs` 注入はすべて `build.sh`/`build.ps1` の仕業で、**パッケージ機構で表現されていない**。利用者は `gpui-sys` の Rust ビルド + シンボル抽出 + リンクフラグ生成を自前で再現する必要がある。保留理由: prebuild パイプラインの実装は別トラック（#48 の G2）で扱う。
 - **`G3` [検証済み 2026-07-24] MoonBit native のパッケージ機構で Rust staticlib 依存の配布は原理的に可能。** `cc-link-flags` は依存から伝播しない（[moon#1595](https://github.com/moonbitlang/moon/issues/1595)）。唯一の経路は実験的機能 `--moonbit-unstable-prebuild`（`moon.mod` に登録した JS/Python スクリプトが依存として消費された場合でも実行され、LinkConfig の `link_libs`/`link_search_paths` が dependents へ伝播する）。2 モジュール構成で実機検証済み（[スパイレポート](spikes/2026-07-24-packaging-feasibility.md)）。リスク: API が「extremely experimental」で変更の可能性。フォールバックとしてテンプレートリポジトリ方式（現状の `build.sh`）を併記する。
 - **`G4` [完了 2026-07-25] バージョニング方針の整備。** [`versioning.md`](versioning.md) で `ABI_VERSION`（現在 4）とモジュール/クレート semver（現在 0.1.0）の関係・バンプ規則・changelog 方針・リリースチェックリストを定義し、[`CHANGELOG.md`](../CHANGELOG.md) を導入（#48）。

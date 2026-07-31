@@ -61,14 +61,14 @@ priv enum Event {
 ///|
 fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
   // Runtime version handshake: reject a stale Rust binary.
-  if version != @username/gpui-bindings.ABI_VERSION {
+  if version != @nakake/gpui-bindings.ABI_VERSION {
     return Unknown
   }
-  if kind == @username/gpui-bindings.EVENT_CLICK {
+  if kind == @nakake/gpui-bindings.EVENT_CLICK {
     Click(data_a)
-  } else if kind == @username/gpui-bindings.EVENT_KEY {
+  } else if kind == @nakake/gpui-bindings.EVENT_KEY {
     Key(data_a, data_b)
-  } else if kind == @username/gpui-bindings.EVENT_TEXT {
+  } else if kind == @nakake/gpui-bindings.EVENT_TEXT {
     // data_a = token, data_b = byte length. Copy the UTF-8 payload from
     // Rust's event queue synchronously before returning from dispatch.
     let len = data_b
@@ -80,7 +80,7 @@ fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
     } else {
       Unknown
     }
-  } else if kind == @username/gpui-bindings.EVENT_NAMED_KEY {
+  } else if kind == @nakake/gpui-bindings.EVENT_NAMED_KEY {
     NamedKey(data_a, data_b)
   } else {
     Unknown
@@ -98,13 +98,13 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
     // `build_tree`, which is always correct. Either way, returning `changed`
     // (1) lets Rust call `cx.notify()` so GPUI re-renders the (now updated)
     // committed tree.
-    match @username/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{count[0]}") {
+    match @nakake/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{count[0]}") {
       Ok(_) => ()
       Err(_) =>
         match build_tree(view) {
           Ok(_) => ()
           Err(status) => println(
-            "app: build_tree failed: \{@username/gpui-bindings.classify_status(status).to_string()}",
+            "app: build_tree failed: \{@nakake/gpui-bindings.classify_status(status).to_string()}",
           )
         }
     }
@@ -182,13 +182,13 @@ fn on_key(code : Int, _mods : Int) -> Int {
 
 ///|
 fn on_named_key(id : Int, _mods : Int) -> Int {
-  if id == @username/gpui-bindings.KEY_ENTER || id == @username/gpui-bindings.KEY_UP {
+  if id == @nakake/gpui-bindings.KEY_ENTER || id == @nakake/gpui-bindings.KEY_UP {
     count[0] = count[0] + 1
     1
-  } else if id == @username/gpui-bindings.KEY_DOWN {
+  } else if id == @nakake/gpui-bindings.KEY_DOWN {
     count[0] = count[0] - 1
     1
-  } else if id == @username/gpui-bindings.KEY_ESCAPE {
+  } else if id == @nakake/gpui-bindings.KEY_ESCAPE {
     reset_count()
   } else {
     0
@@ -228,7 +228,7 @@ fn on_text(text : String) -> Int {
 
 ///|
 fn make_button(
-  cb : @username/gpui-bindings.CommandBuffer,
+  cb : @nakake/gpui-bindings.CommandBuffer,
   key : String,
   label : String,
   click_id : Int,
@@ -250,7 +250,7 @@ fn make_button(
 
 ///|
 pub fn build_tree(view : Int) -> Result[Unit, Int] {
-  let cb = @username/gpui-bindings.CommandBuffer::new()
+  let cb = @nakake/gpui-bindings.CommandBuffer::new()
   cb.div() // root
   cb.set_bg(28, 30, 38)
   cb.set_flex_col()
@@ -271,11 +271,11 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   // in-place update (issue #10) without a full rebuild.
   cb.div()
   cb.set_key(COUNT_KEY)
-  cb.set_bg_color(@username/gpui-bindings.Color::rgb(38, 42, 52))
+  cb.set_bg_color(@nakake/gpui-bindings.Color::rgb(38, 42, 52))
   cb.set_padding(16.0)
   cb.set_border(2.0, 120, 200, 255)
   cb.set_rounded(12.0)
-  cb.set_shadow(0, 4, 8, 0, @username/gpui-bindings.Color::rgba(0, 0, 0, 96))
+  cb.set_shadow(0, 4, 8, 0, @nakake/gpui-bindings.Color::rgba(0, 0, 0, 96))
   cb.text("Count: \{count[0]}", 120, 200, 255, 44.0)
   cb.add_child()
   cb.add_child() // attach the card to the root
@@ -290,8 +290,8 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_key("button-scroll")
   cb.set_size(300.0, 60.0)
   cb.set_overflow(
-    @username/gpui-bindings.OVERFLOW_SCROLL,
-    @username/gpui-bindings.OVERFLOW_VISIBLE,
+    @nakake/gpui-bindings.OVERFLOW_SCROLL,
+    @nakake/gpui-bindings.OVERFLOW_VISIBLE,
   )
   cb.div() // row
   cb.set_size(404.0, 56.0) // wider than the 300px container → horizontal overflow
@@ -312,5 +312,5 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.add_child()
 
   cb.set_root()
-  @username/gpui-bindings.build_tree(view, cb)
+  @nakake/gpui-bindings.build_tree(view, cb)
 }
