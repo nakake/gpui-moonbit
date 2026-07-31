@@ -109,7 +109,10 @@ include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
 /// Rust-owned event payload queue. Text events store their UTF-8 bytes here;
 /// the callback passes a token (index) and byte length so MoonBit can copy
 /// the payload via `gpui_event_copy_text`. Entries are valid only during the
-/// synchronous dispatch call — MoonBit must copy before returning.
+/// synchronous dispatch call — MoonBit must copy before returning, and every
+/// dispatch site clears the queue immediately after `mb_dispatch` returns
+/// (#70), so it holds at most one entry at a time and can never grow with the
+/// number of events delivered.
 static EVENT_QUEUE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 /// Copy the text payload for a pending EVENT_TEXT dispatch.
@@ -1343,6 +1346,10 @@ impl Render for FfiView {
                     let changed = unsafe {
                         mb_dispatch(ABI_VERSION, EVENT_TEXT, view, token, bytes.len() as i32)
                     };
+                    // #70: the payload is only valid during the synchronous
+                    // dispatch call; drop it on return so the queue cannot
+                    // accumulate one entry per keystroke.
+                    EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     notify_if_changed(changed, || cx.notify());
                 }
             }));
@@ -3779,6 +3786,89 @@ mod tests {
             );
             assert_eq!(status, GPUI_STATUS_KEY_NOT_FOUND);
         });
+    }
+
+    // --- EVENT_QUEUE / gpui_event_copy_text (issue #70) --------------------
+
+    /// Test helper: push a payload into `EVENT_QUEUE` and return its token,
+    /// mirroring the dispatch sites' push (the queue is cleared after every
+    /// dispatch, so a test may seed it directly).
+    fn push_event_payload(payload: &[u8]) -> i32 {
+        let mut q = EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        q.push(payload.to_vec());
+        (q.len() - 1) as i32
+    }
+
+    fn clear_event_queue() {
+        EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    #[::core::prelude::v1::test]
+    fn copy_text_copies_payload() {
+        let token = push_event_payload(b"hello");
+        let mut buf = [0u8; 8];
+        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(n, 5);
+        assert_eq!(&buf[..5], b"hello");
+        clear_event_queue();
+    }
+
+    #[::core::prelude::v1::test]
+    fn copy_text_truncates_to_buffer_len() {
+        let token = push_event_payload(b"hello world");
+        let mut buf = [0u8; 5];
+        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"hello");
+        clear_event_queue();
+    }
+
+    #[::core::prelude::v1::test]
+    fn copy_text_zero_len_writes_nothing() {
+        let token = push_event_payload(b"abc");
+        let mut buf = [0xAAu8; 4];
+        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), 0);
+        assert_eq!(n, 0);
+        assert_eq!(&buf, &[0xAA; 4]);
+        clear_event_queue();
+    }
+
+    #[::core::prelude::v1::test]
+    fn copy_text_rejects_invalid_arguments() {
+        let token = push_event_payload(b"abc");
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            gpui_event_copy_text(-1, buf.as_mut_ptr(), 4),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        assert_eq!(gpui_event_copy_text(token, std::ptr::null_mut(), 4), GPUI_STATUS_INVALID_HANDLE);
+        assert_eq!(
+            gpui_event_copy_text(token, buf.as_mut_ptr(), -1),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        // Token past the end of the queue.
+        assert_eq!(
+            gpui_event_copy_text(token + 1, buf.as_mut_ptr(), 4),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        clear_event_queue();
+    }
+
+    /// #70 regression: the payload must be valid only during the synchronous
+    /// dispatch. After the dispatch site clears the queue, the token no longer
+    /// resolves — and the queue holds no stale entries to leak.
+    #[::core::prelude::v1::test]
+    fn copy_text_token_invalid_after_clear() {
+        let token = push_event_payload(b"leak-me");
+        let mut buf = [0u8; 8];
+        assert_eq!(gpui_event_copy_text(token, buf.as_mut_ptr(), 8), 7);
+        // Dispatch sites clear immediately after mb_dispatch returns.
+        clear_event_queue();
+        assert_eq!(
+            gpui_event_copy_text(token, buf.as_mut_ptr(), 8),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        assert!(EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
     }
 }
 
