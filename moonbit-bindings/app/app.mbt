@@ -37,20 +37,22 @@ const COUNT_KEY : String = "count-label"
 let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.HandlerRegistry::new()
 
 ///|
-let btn_decrement : Int = handlers.on_click(fn(_view) {
+let btn_decrement : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
   store.set(count, store.get(count) - 1)
 })
 
 ///|
-let btn_reset : Int = handlers.on_click(fn(_view) { ignore(reset_count()) })
+let btn_reset : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
+  ignore(reset_count())
+})
 
 ///|
-let btn_increment : Int = handlers.on_click(fn(_view) {
+let btn_increment : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
   store.set(count, store.get(count) + 1)
 })
 
 ///|
-let btn_increment_10 : Int = handlers.on_click(fn(_view) {
+let btn_increment_10 : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
   store.set(count, store.get(count) + 10)
 })
 
@@ -149,6 +151,12 @@ let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
 ///|
 let _text_handler : Int = handlers.on_text(fn(text) { ignore(on_text(text)) })
 
+// Render context (RFC 0001 §3.1): components reach the store and handler
+// registry through it. `view` is fixed to slot 0 (the single window).
+
+///|
+let ctx : @nakake/gpui-bindings.RenderCtx = { view: 0, store, handlers }
+
 ///|
 pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
   // Runtime version handshake: a stale Rust binary is rejected before any
@@ -180,50 +188,24 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
   1
 }
 
-// Build one labelled, clickable button onto the command buffer. The button div
-// is pushed, configured, given a text label child, and left on the stack so the
-// caller can `add_child` it into its parent.
+// --- Components (RFC 0001 §3.1) ---------------------------------------------
+//
+// `build_tree` is a sequence of component calls; each component emits its
+// subtree onto the command buffer and leaves the subtree root on the stack so
+// the caller attaches it with `add_child`.
 
 ///|
-fn make_button(
-  cb : @nakake/gpui-bindings.CommandBuffer,
-  key : String,
-  label : String,
-  click_id : Int,
-  r : Int,
-  g : Int,
-  b : Int,
-) -> Unit {
-  cb.div()
-  cb.set_key(key)
-  cb.set_size(92.0, 56.0)
-  cb.set_bg(r, g, b)
-  cb.set_rounded(10.0)
-  cb.set_flex_col()
-  cb.set_center()
-  cb.set_on_click(click_id)
-  cb.text(label, 255, 255, 255, 18.0)
-  cb.add_child() // attach the label to the button; button stays on top
-}
-
-///|
-pub fn build_tree(view : Int) -> Result[Unit, Int] {
-  let cb = @nakake/gpui-bindings.CommandBuffer::new()
-  cb.div() // root
-  cb.set_bg(28, 30, 38)
-  cb.set_flex_col()
-  cb.set_center()
-  cb.set_gap(28.0)
-  cb.set_padding(32.0)
-
-  // Title: a wrapper div carries the bold weight (G8 typography), inherited by
-  // the text child.
+fn title(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
+  // A wrapper div carries the bold weight (G8 typography), inherited by the
+  // text child.
   cb.div()
   cb.set_font_weight(700)
   cb.text("Counter", 236, 239, 245, 30.0)
   cb.add_child()
-  cb.add_child() // attach the title wrapper to the root
+}
 
+///|
+fn counter_card(cb : @nakake/gpui-bindings.CommandBuffer, ctx : @nakake/gpui-bindings.RenderCtx) -> Unit {
   // Count display card: bordered, padded, rounded, with a soft shadow (G7/G9).
   // Keyed so `update_text` can address its text child for the incremental
   // in-place update (issue #10) without a full rebuild.
@@ -234,10 +216,12 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_border(2.0, 120, 200, 255)
   cb.set_rounded(12.0)
   cb.set_shadow(0, 4, 8, 0, @nakake/gpui-bindings.Color::rgba(0, 0, 0, 96))
-  cb.text("Count: \{store.get(count)}", 120, 200, 255, 44.0)
+  cb.text("Count: \{ctx.store.get(count)}", 120, 200, 255, 44.0)
   cb.add_child()
-  cb.add_child() // attach the card to the root
+}
 
+///|
+fn button_row(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
   // A row of buttons; each carries a registry-issued handler id. The row sits
   // inside a keyed horizontal-scroll container (G6): its retained ScrollHandle
   // keeps the scroll position across the rebuild every click triggers. The
@@ -255,18 +239,71 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_size(404.0, 56.0) // wider than the 300px container → horizontal overflow
   cb.set_flex_row()
   cb.set_gap(12.0)
-  make_button(cb, "btn-decrement", "-1", btn_decrement, 200, 80, 80)
+  @nakake/gpui-bindings.button(
+    cb,
+    {
+      key: "btn-decrement",
+      label: "-1",
+      color: @nakake/gpui-bindings.Color::rgb(200, 80, 80),
+      on_click: btn_decrement,
+    },
+  )
   cb.add_child()
-  make_button(cb, "btn-reset", "Reset", btn_reset, 92, 98, 110)
+  @nakake/gpui-bindings.button(
+    cb,
+    {
+      key: "btn-reset",
+      label: "Reset",
+      color: @nakake/gpui-bindings.Color::rgb(92, 98, 110),
+      on_click: btn_reset,
+    },
+  )
   cb.add_child()
-  make_button(cb, "btn-increment", "+1", btn_increment, 70, 160, 95)
+  @nakake/gpui-bindings.button(
+    cb,
+    {
+      key: "btn-increment",
+      label: "+1",
+      color: @nakake/gpui-bindings.Color::rgb(70, 160, 95),
+      on_click: btn_increment,
+    },
+  )
   cb.add_child()
-  make_button(cb, "btn-increment-10", "+10", btn_increment_10, 70, 110, 230)
+  @nakake/gpui-bindings.button(
+    cb,
+    {
+      key: "btn-increment-10",
+      label: "+10",
+      color: @nakake/gpui-bindings.Color::rgb(70, 110, 230),
+      on_click: btn_increment_10,
+    },
+  )
   cb.add_child()
   cb.add_child() // attach the row to the scroll container
-  cb.add_child() // attach the scroll container to the root
+}
 
+///|
+fn key_hints(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
   cb.text("keys:  k +1    j -1    r reset", 130, 135, 148, 14.0)
+}
+
+///|
+pub fn build_tree(view : Int) -> Result[Unit, Int] {
+  let cb = @nakake/gpui-bindings.CommandBuffer::new()
+  cb.div() // root
+  cb.set_bg(28, 30, 38)
+  cb.set_flex_col()
+  cb.set_center()
+  cb.set_gap(28.0)
+  cb.set_padding(32.0)
+
+  title(cb)
+  cb.add_child()
+  counter_card(cb, ctx)
+  cb.add_child()
+  button_row(cb)
+  cb.add_child()
+  key_hints(cb)
   cb.add_child()
 
   cb.set_root()

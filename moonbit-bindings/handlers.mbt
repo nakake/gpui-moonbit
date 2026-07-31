@@ -35,6 +35,20 @@ pub type NamedKeyHandler = (Int, Int) -> Unit
 pub type TextHandler = (String) -> Unit
 
 ///|
+/// クリックハンドラの型付き id です。中身は `HandlerRegistry` が発行する整数ですが、
+/// 型で区別することで生の `click_id`（envelope の `data_a`）や他の整数と混同する
+/// ことを防ぎます。`set_on_click` には `to_int()` で渡します。
+pub(all) struct HandlerId {
+  raw : Int
+}
+
+///|
+/// ハンドラ id を `set_on_click` に渡せる生の整数へ変換します。
+pub fn HandlerId::to_int(self : HandlerId) -> Int {
+  self.raw
+}
+
+///|
 /// 型付きイベントハンドラのレジストリです。クロージャを登録して整数 id を発行し、
 /// envelope の `(view, click_id)` / kind ペイロードを対応する型付きクロージャへ配送
 /// します。クリックは id ごとの単一配送、キー / 名前付きキー / テキストは登録順の
@@ -55,12 +69,12 @@ pub fn HandlerRegistry::new() -> HandlerRegistry {
 }
 
 ///|
-/// クリックハンドラを登録し、`set_on_click` に渡す id を発行します。
-pub fn HandlerRegistry::on_click(self : HandlerRegistry, h : ClickHandler) -> Int {
+/// クリックハンドラを登録し、`set_on_click` に渡す型付き id を発行します。
+pub fn HandlerRegistry::on_click(self : HandlerRegistry, h : ClickHandler) -> HandlerId {
   let id = self.next_id
   self.next_id = id + 1
   self.click[id] = h
-  id
+  { raw: id }
 }
 
 ///|

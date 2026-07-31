@@ -64,7 +64,7 @@ test "closures capture cells across registries" {
   let count : CellId[Int] = s.new_cell(0)
   let r = HandlerRegistry::new()
   let id = r.on_click(fn(_view) { s.set(count, s.get(count) + 1) })
-  r.dispatch(Click(id), 0)
-  r.dispatch(Click(id), 0)
+  r.dispatch(Click(id.to_int()), 0)
+  r.dispatch(Click(id.to_int()), 0)
   assert_eq(s.get(count), 2)
 }

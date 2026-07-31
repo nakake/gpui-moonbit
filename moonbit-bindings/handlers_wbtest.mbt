@@ -7,11 +7,11 @@ test "on_click issues distinct ids and dispatches to the registered handler" {
   let log : Array[Int] = []
   let a = r.on_click(fn(view) { log.push(100 + view) })
   let b = r.on_click(fn(view) { log.push(200 + view) })
-  if a == b {
+  if a.to_int() == b.to_int() {
     fail("ids must be distinct")
   }
-  r.dispatch(Click(a), 7)
-  r.dispatch(Click(b), 3)
+  r.dispatch(Click(a.to_int()), 7)
+  r.dispatch(Click(b.to_int()), 3)
   assert_eq(log, [107, 203])
 }
 
@@ -65,7 +65,7 @@ test "unknown events dispatch nothing" {
 ///|
 test "ids are shared across handler kinds" {
   let r = HandlerRegistry::new()
-  let a = r.on_click(fn(_) {})
+  let a = r.on_click(fn(_) {}).to_int()
   let b = r.on_key(fn(_, _) {})
   let c = r.on_named_key(fn(_, _) {})
   let d = r.on_text(fn(_) {})

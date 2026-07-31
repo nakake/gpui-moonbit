@@ -38,7 +38,9 @@ fn toggle() -> Int {
 }
 
 ///|
-let btn_toggle : Int = handlers.on_click(fn(_view) { ignore(toggle()) })
+let btn_toggle : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
+  ignore(toggle())
+})
 
 ///|
 fn on_key(code : Int, _mods : Int) -> Int {
@@ -74,6 +76,12 @@ let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
   ignore(on_named_key(id, mods))
 })
 
+// Render context (RFC 0001 §3.1): components reach the store and handler
+// registry through it. `view` is fixed to slot 0 (the single window).
+
+///|
+let ctx : @nakake/gpui-bindings.RenderCtx = { view: 0, store, handlers }
+
 ///|
 pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
   // Runtime version handshake: a stale Rust binary is rejected before any
@@ -92,6 +100,46 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
   1
 }
 
+// --- Components (RFC 0001 §3.1) ---------------------------------------------
+//
+// `build_tree` is a sequence of component calls; each component emits its
+// subtree onto the command buffer and leaves the subtree root on the stack so
+// the caller attaches it with `add_child`.
+
+///|
+fn status_card(cb : @nakake/gpui-bindings.CommandBuffer, ctx : @nakake/gpui-bindings.RenderCtx) -> Unit {
+  // Status card: keyed, bordered, padded, rounded.
+  cb.div()
+  cb.set_key("status-card")
+  cb.set_padding(16.0)
+  cb.set_border(2.0, 130, 220, 180)
+  cb.set_rounded(12.0)
+  let label = if ctx.store.get(on) { "Status: ON" } else { "Status: OFF" }
+  cb.text(label, 130, 220, 180, 40.0)
+  cb.add_child()
+}
+
+///|
+fn toggle_button(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
+  // Wider than the library `button` component's fixed 92px, so this example
+  // keeps a local component with its own size.
+  cb.div()
+  cb.set_key("btn-toggle")
+  cb.set_size(160.0, 56.0)
+  cb.set_bg(70, 110, 230)
+  cb.set_rounded(10.0)
+  cb.set_flex_col()
+  cb.set_center()
+  cb.set_on_click(btn_toggle.to_int())
+  cb.text("Toggle", 255, 255, 255, 18.0)
+  cb.add_child()
+}
+
+///|
+fn key_hints(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
+  cb.text("keys:  space toggle    esc off", 130, 135, 148, 14.0)
+}
+
 ///|
 pub fn build_tree(view : Int) -> Result[Unit, Int] {
   let cb = @nakake/gpui-bindings.CommandBuffer::new()
@@ -104,32 +152,11 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
 
   cb.text("Hello, GPUI + MoonBit", 236, 239, 245, 28.0)
   cb.add_child()
-
-  // Status card: keyed, bordered, padded, rounded.
-  cb.div()
-  cb.set_key("status-card")
-  cb.set_padding(16.0)
-  cb.set_border(2.0, 130, 220, 180)
-  cb.set_rounded(12.0)
-  let label = if store.get(on) { "Status: ON" } else { "Status: OFF" }
-  cb.text(label, 130, 220, 180, 40.0)
+  status_card(cb, ctx)
   cb.add_child()
-  cb.add_child() // attach the card to the root
-
-  // One toggle button.
-  cb.div()
-  cb.set_key("btn-toggle")
-  cb.set_size(160.0, 56.0)
-  cb.set_bg(70, 110, 230)
-  cb.set_rounded(10.0)
-  cb.set_flex_col()
-  cb.set_center()
-  cb.set_on_click(btn_toggle)
-  cb.text("Toggle", 255, 255, 255, 18.0)
+  toggle_button(cb)
   cb.add_child()
-  cb.add_child() // attach the button to the root
-
-  cb.text("keys:  space toggle    esc off", 130, 135, 148, 14.0)
+  key_hints(cb)
   cb.add_child()
 
   cb.set_root()

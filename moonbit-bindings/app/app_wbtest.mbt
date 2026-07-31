@@ -7,21 +7,21 @@
 ///|
 test "registered click handlers mutate count" {
   store.set(count, 0)
-  handlers.dispatch(Click(btn_decrement), 0)
+  handlers.dispatch(Click(btn_decrement.to_int()), 0)
   assert_eq(store.get(count), -1)
-  handlers.dispatch(Click(btn_increment), 0)
+  handlers.dispatch(Click(btn_increment.to_int()), 0)
   assert_eq(store.get(count), 0)
-  handlers.dispatch(Click(btn_increment_10), 0)
+  handlers.dispatch(Click(btn_increment_10.to_int()), 0)
   assert_eq(store.get(count), 10)
 }
 
 ///|
 test "reset handler zeroes count" {
   store.set(count, 5)
-  handlers.dispatch(Click(btn_reset), 0)
+  handlers.dispatch(Click(btn_reset.to_int()), 0)
   assert_eq(store.get(count), 0)
   // Idempotent: resetting an already-zero count stays zero.
-  handlers.dispatch(Click(btn_reset), 0)
+  handlers.dispatch(Click(btn_reset.to_int()), 0)
   assert_eq(store.get(count), 0)
 }
 
