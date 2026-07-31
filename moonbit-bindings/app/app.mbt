@@ -11,8 +11,16 @@
 // (MoonBit mangling excludes types), so the Rust `extern` must be kept in sync —
 // it is generated from a template in `gpui-sys/build.rs`.
 
+// State lives in a typed store cell (RFC 0001 §3.3), not a top-level mutable
+// array: `count` is a `CellId[Int]` and every read/write goes through the
+// store, so the value type is fixed by the id and the pattern scales to
+// multiple cells / components.
+
 ///|
-let count : Array[Int] = [0]
+let store : @nakake/gpui-bindings.Store = @nakake/gpui-bindings.Store::new()
+
+///|
+let count : @nakake/gpui-bindings.CellId[Int] = store.new_cell(0)
 
 // Stable key for the count display card's text node. `update_text` addresses it
 // for the incremental in-place update (issue #10); the full `build_tree` path
@@ -29,16 +37,22 @@ const COUNT_KEY : String = "count-label"
 let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.HandlerRegistry::new()
 
 ///|
-let btn_decrement : Int = handlers.on_click(fn(_view) { count[0] = count[0] - 1 })
+let btn_decrement : Int = handlers.on_click(fn(_view) {
+  store.set(count, store.get(count) - 1)
+})
 
 ///|
 let btn_reset : Int = handlers.on_click(fn(_view) { ignore(reset_count()) })
 
 ///|
-let btn_increment : Int = handlers.on_click(fn(_view) { count[0] = count[0] + 1 })
+let btn_increment : Int = handlers.on_click(fn(_view) {
+  store.set(count, store.get(count) + 1)
+})
 
 ///|
-let btn_increment_10 : Int = handlers.on_click(fn(_view) { count[0] = count[0] + 10 })
+let btn_increment_10 : Int = handlers.on_click(fn(_view) {
+  store.set(count, store.get(count) + 10)
+})
 
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
 
@@ -53,10 +67,10 @@ const KEY_R : Int = 114 // 'r' → reset
 
 ///|
 fn reset_count() -> Int {
-  if count[0] == 0 {
+  if store.get(count) == 0 {
     0
   } else {
-    count[0] = 0
+    store.set(count, 0)
     1
   }
 }
@@ -64,10 +78,10 @@ fn reset_count() -> Int {
 ///|
 fn on_key(code : Int, _mods : Int) -> Int {
   if code == KEY_K {
-    count[0] = count[0] + 1
+    store.set(count, store.get(count) + 1)
     1
   } else if code == KEY_J {
-    count[0] = count[0] - 1
+    store.set(count, store.get(count) - 1)
     1
   } else if code == KEY_R {
     reset_count()
@@ -82,10 +96,10 @@ fn on_key(code : Int, _mods : Int) -> Int {
 ///|
 fn on_named_key(id : Int, _mods : Int) -> Int {
   if id == @nakake/gpui-bindings.KEY_ENTER || id == @nakake/gpui-bindings.KEY_UP {
-    count[0] = count[0] + 1
+    store.set(count, store.get(count) + 1)
     1
   } else if id == @nakake/gpui-bindings.KEY_DOWN {
-    count[0] = count[0] - 1
+    store.set(count, store.get(count) - 1)
     1
   } else if id == @nakake/gpui-bindings.KEY_ESCAPE {
     reset_count()
@@ -113,8 +127,8 @@ fn on_text(text : String) -> Int {
       break
     }
   }
-  if all_digits && value != count[0] {
-    count[0] = value
+  if all_digits && value != store.get(count) {
+    store.set(count, value)
     1
   } else {
     0
@@ -153,7 +167,7 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
   // failure (tree not yet committed, key missing) fall back to the full
   // `build_tree`, which is always correct. Either way, returning 1 lets Rust
   // call `cx.notify()` so GPUI re-renders the (now updated) committed tree.
-  match @nakake/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{count[0]}") {
+  match @nakake/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{store.get(count)}") {
     Ok(_) => ()
     Err(_) =>
       match build_tree(view) {
@@ -220,7 +234,7 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_border(2.0, 120, 200, 255)
   cb.set_rounded(12.0)
   cb.set_shadow(0, 4, 8, 0, @nakake/gpui-bindings.Color::rgba(0, 0, 0, 96))
-  cb.text("Count: \{count[0]}", 120, 200, 255, 44.0)
+  cb.text("Count: \{store.get(count)}", 120, 200, 255, 44.0)
   cb.add_child()
   cb.add_child() // attach the card to the root
 

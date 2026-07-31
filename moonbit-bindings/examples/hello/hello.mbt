@@ -10,8 +10,14 @@
 // into build.sh (future work). `launch` below is the entry point such an
 // executable calls.
 
+// State lives in a typed store cell (RFC 0001 §3.3), not a top-level mutable
+// array.
+
 ///|
-let on : Array[Bool] = [false]
+let store : @nakake/gpui-bindings.Store = @nakake/gpui-bindings.Store::new()
+
+///|
+let on : @nakake/gpui-bindings.CellId[Bool] = store.new_cell(false)
 
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
 
@@ -27,7 +33,7 @@ let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.Han
 
 ///|
 fn toggle() -> Int {
-  on[0] = if on[0] { false } else { true }
+  store.set(on, !store.get(on))
   1
 }
 
@@ -46,8 +52,8 @@ fn on_key(code : Int, _mods : Int) -> Int {
 ///|
 fn on_named_key(id : Int, _mods : Int) -> Int {
   if id == @nakake/gpui-bindings.KEY_ESCAPE {
-    if on[0] {
-      on[0] = false
+    if store.get(on) {
+      store.set(on, false)
       1
     } else {
       0
@@ -105,7 +111,7 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_padding(16.0)
   cb.set_border(2.0, 130, 220, 180)
   cb.set_rounded(12.0)
-  let label = if on[0] { "Status: ON" } else { "Status: OFF" }
+  let label = if store.get(on) { "Status: ON" } else { "Status: OFF" }
   cb.text(label, 130, 220, 180, 40.0)
   cb.add_child()
   cb.add_child() // attach the card to the root
