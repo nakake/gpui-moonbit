@@ -14,6 +14,7 @@ MoonBit native から Rust/GPUI を C FFI 越しに呼ぶ、ローカル向け�
 │   ├── include/gpui_sys.h             # cbindgen による tracked な生成ヘッダー
 │   └── mb_symbol.txt                  # build driver がローカル生成（ignored）
 ├── bindgen-moonbit/                   # C ヘッダーから MoonBit FFI 宣言を生成
+├── gen-header/                        # cbindgen のみで C ヘッダーを再生成（bindgen 前に実行）
 ├── moonbit-bindings/                  # native 専用 MoonBit モジュール
 │   ├── gpui-bindings.mbt              # 手編集する高水準 API
 │   ├── gpui-bindings-ffi.mbt          # bindgen による tracked な生成 FFI
@@ -86,7 +87,7 @@ PowerShell を MSVC x64 環境で開く（または build driver に検出させ
 
 `build.sh` と `build.ps1` は OS ごとの link template を選んだうえで、次を実行します。
 
-1. `gpui-sys/abi.toml` から ABI 定数を、C ヘッダーから MoonBit FFI 宣言を生成する。
+1. `gpui-sys/abi.toml` から ABI 定数を生成し、`gen-header`（cbindgen のみ依存の小クレート、gpui はビルドしない）で C ヘッダーを再生成してから、そのヘッダーから MoonBit FFI 宣言を生成する。ヘッダーが bindgen より前に再生成されるため、新しい Rust の C export を追加してもビルドはデッドロックしない（issue #71）。
 2. `moon check` を必須ゲートとして実行し、MoonBit を一度 build する。この段階では callback/static library 未解決による想定内の cold-link failure だけを許容する。
 3. `app.dispatch` の実マングルシンボルを抽出し、生成 C がある環境では callback が `int32_t` を返し、4 個の `int32_t` 引数を取ることも検証する。
 4. `mb_symbol.txt` を読む `gpui-sys` を Rust で build し、Cargo の `native-static-libs` 出力から OS 固有 link flags を生成して MoonBit を強制再リンクする。

@@ -1,5 +1,5 @@
 # Build driver for GPUI + MoonBit on Windows. Mirrors build.sh:
-#   [0] regenerate ABI constants and C FFI bindings
+#   [0] regenerate the C header, ABI constants, and C FFI bindings
 #   [1a] moon check (fatal typecheck gate)
 #   [1b] MoonBit bootstrap build (native-link failure is expected before Cargo flags)
 #   [2] extract app.dispatch's mangled symbol from the generated main.c
@@ -81,7 +81,7 @@ function Write-MoonPkg([string]$template, [string]$destination, [string]$libs) {
   }
 }
 
-Write-Host '==> [0/5] Regenerate ABI constants and C FFI bindings'
+Write-Host '==> [0/5] Regenerate the C header, ABI constants, and C FFI bindings'
 $abiPath = Join-Path $GSys 'abi.toml'
 $abiLines = Get-Content $abiPath
 $generated = New-Object System.Collections.Generic.List[string]
@@ -114,6 +114,15 @@ cmd /c "moon fmt abi_constants.mbt 2>&1" | Out-Host
 $ec = $LASTEXITCODE
 Pop-Location
 if ($ec -ne 0) { throw 'moon fmt abi_constants.mbt failed' }
+# The header must reflect any new Rust C export BEFORE bindgen reads it:
+# bindgen's output gates `moon check`, which gates the `cargo build` that
+# would otherwise be the only thing regenerating the header (issue #71).
+# gen-header depends on cbindgen alone, so this is cheap (no gpui build).
+Push-Location (Join-Path $Root 'gen-header')
+cmd /c "cargo run -- `"$GSys`" `"$GSys\include\gpui_sys.h`" 2>&1" | Out-Host
+$ec = $LASTEXITCODE
+Pop-Location
+if ($ec -ne 0) { throw 'C header generation failed' }
 Push-Location (Join-Path $Root 'bindgen-moonbit')
 cmd /c "cargo run -- `"$GSys\include\gpui_sys.h`" `"$MB\gpui-bindings-ffi.mbt`" 2>&1" | Out-Host
 $ec = $LASTEXITCODE
@@ -130,7 +139,10 @@ Push-Location $MB
 cmd /c "moon check 2>&1" | Out-Host
 $ec = $LASTEXITCODE
 Pop-Location
-if ($ec -ne 0) { throw 'MoonBit compilation failed' }
+if ($ec -ne 0) {
+  Write-Host 'HINT: if you added a new Rust C export, the C header must be regenerated; run .\build.ps1 (it regenerates the header before bindgen).'
+  throw 'MoonBit compilation failed'
+}
 
 Write-Host '==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)'
 Write-MoonPkg (Join-Path $MB 'cmd\main\moon.pkg.windows') (Join-Path $MB 'cmd\main\moon.pkg') ''
