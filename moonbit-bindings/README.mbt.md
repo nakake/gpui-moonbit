@@ -183,15 +183,18 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
 ```
 
 - slot 0 `version`: 常に `ABI_VERSION`（現在は `4`）。不一致なら古い Rust バイナリなのでイベントを無視します
-- slot 1 `kind`: イベント種別（`EVENT_CLICK` = 1、`EVENT_KEY` = 2、`EVENT_TEXT` = 3、`EVENT_NAMED_KEY` = 4）
+- slot 1 `kind`: イベント種別（`EVENT_CLICK` = 1、`EVENT_KEY` = 2、`EVENT_TEXT` = 3、`EVENT_NAMED_KEY` = 4、`EVENT_ASYNC` = 5）
 - slot 2 `view`: 再構築対象の view id
 - slot 3–4 `data_a` / `data_b`: 種別依存
   - `EVENT_CLICK`: `data_a` = click_id、`data_b` = 0
   - `EVENT_KEY`: `data_a` = codepoint、`data_b` = modifier bits
   - `EVENT_TEXT`: `data_a` = token、`data_b` = byte 長（ペイロードは `gpui_event_copy_text` でコピー）
   - `EVENT_NAMED_KEY`: `data_a` = named_key id（`KEY_ENTER` / `KEY_ESCAPE` / `KEY_UP` …）、`data_b` = modifier bits
+  - `EVENT_ASYNC`: `data_a` = token、`data_b` = byte 長（ペイロードは `copy_async_payload` でコピー。RFC 0002 の非同期注入経路）
 
 `dispatch` は状態が変わった場合に `1`、変わらない場合に `0` を返します。`1` のときだけツリーを再構築し、Rust 側が再描画通知（`cx.notify()`）を行います。再構築に失敗しても Rust 側は旧ツリーを保持しているため、`changed` をそのまま返して構いません。
+
+`EVENT_ASYNC` は非同期イベント注入（RFC 0002）の配送種別です。外部 native コードが `gpui_post_event(view, ptr, len)`（ラッパー `post_event`）で任意スレッドからペイロードを push すると、メインスレッドが `EVENT_ASYNC` として `dispatch` に届けます。ペイロードは opaque bytes で、解釈（UTF-8 テキストか否か等）はハンドラ側の契約です。消費者例は `examples/stream` を参照してください。
 
 MoonBit native の `Int` は 32-bit であり、この callback とコマンドバッファの境界も **i32** です（`gpui_abi_probe` で機械検証済み）。値は i32 範囲で扱ってください。
 
