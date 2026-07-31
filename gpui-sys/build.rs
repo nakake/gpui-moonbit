@@ -105,7 +105,10 @@ fn main() {
                  GPUI_SYS_ALLOW_TEST_DISPATCH_STUB=1 explicitly when running gpui-sys tests"
             );
         }
-        "unsafe fn mb_dispatch(_version: i32, _kind: i32, _view: i32, _data_a: i32, _data_b: i32) -> i32 {\n    0\n}\n"
+        // Route through the test dispatch recorder (lib.rs) when one is
+        // installed, so the async-injection tests can observe dispatches and
+        // drive the `changed` return value; otherwise behave as a plain no-op.
+        "unsafe fn mb_dispatch(_version: i32, kind: i32, view: i32, data_a: i32, data_b: i32) -> i32 {\n    crate::dispatch_recorder::record(kind, view, data_a, data_b)\n}\n"
             .to_string()
     } else {
         let link_name = std::fs::read_to_string("mb_symbol.txt")

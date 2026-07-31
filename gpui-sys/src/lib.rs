@@ -150,27 +150,59 @@ struct InjectEntry {
 /// The process-wide injection queue plus its wake channel. `entries` is a
 /// single FIFO across all producers (Mutex acquisition order); `wake_tx`
 /// carries only `()` — the data lives in the queue, and the drain pump empties
-/// it on every wake, so coalesced wakes lose nothing. Initialized once, on
-/// the main thread, by `run_window` before the drain pump starts.
+/// it on every wake, so coalesced wakes lose nothing.
+///
+/// `wake_tx` is behind a `Mutex` because it is swapped each time a window
+/// starts: the receiver lives with that window's drain pump, so a sender left
+/// over from a closed window would wake nothing. A post that arrives before
+/// any window installs a disconnected sender (its receiver is dropped), so
+/// the send is a harmless no-op and the entry simply waits in the queue for
+/// the first window's startup drain.
 struct InjectQueue {
     entries: Mutex<VecDeque<InjectEntry>>,
-    wake_tx: UnboundedSender<()>,
+    wake_tx: Mutex<UnboundedSender<()>>,
 }
 
 static INJECT: OnceLock<InjectQueue> = OnceLock::new();
 
-/// Install the injection queue (idempotent: the first window wins) and hand
-/// the wake receiver to the caller, which spawns the drain pump with it.
-/// Returns `None` only if another window already owns the queue.
-fn install_inject_queue() -> Option<UnboundedReceiver<()>> {
+/// Serializes every test that touches the process-global injection queue
+/// (`INJECT`): the `gpui_post_event` unit tests (`mod tests`) and the
+/// headless drain-pump tests (`async_inject_tests`) post into and drain the
+/// same queue, so one shared lock keeps them from interleaving.
+#[cfg(test)]
+static INJECT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Ensure the injection queue exists and attach a fresh wake channel, handing
+/// the receiver to the caller (which spawns the drain pump with it). Called on
+/// the main thread at window startup; swapping the sender is what re-arms wake
+/// delivery for this window's pump.
+fn install_inject_queue() -> UnboundedReceiver<()> {
     let (wake_tx, wake_rx) = unbounded::<()>();
-    INJECT
-        .set(InjectQueue {
-            entries: Mutex::new(VecDeque::new()),
-            wake_tx,
-        })
-        .ok()?;
-    Some(wake_rx)
+    match INJECT.get() {
+        Some(queue) => {
+            *queue.wake_tx.lock().unwrap_or_else(|e| e.into_inner()) = wake_tx;
+        }
+        None => {
+            let _ = INJECT.set(InjectQueue {
+                entries: Mutex::new(VecDeque::new()),
+                wake_tx: Mutex::new(wake_tx),
+            });
+        }
+    }
+    wake_rx
+}
+
+/// Swap in a disconnected wake sender so the current drain pump's receiver
+/// yields `None` and it exits. Test-only: gives async-injection tests a clean
+/// teardown so a pump never survives into the next test (the injection queue
+/// and recorder are process globals).
+#[cfg(any(test, feature = "test-support"))]
+pub fn stop_drain_pump() {
+    if let Some(queue) = INJECT.get() {
+        let (wake_tx, wake_rx) = unbounded::<()>();
+        drop(wake_rx);
+        *queue.wake_tx.lock().unwrap_or_else(|e| e.into_inner()) = wake_tx;
+    }
 }
 
 /// Push an event from any thread into the injection queue (RFC 0002 §3.1).
@@ -214,14 +246,15 @@ pub extern "C" fn gpui_post_event(view: i32, ptr: *const u8, len: i32) -> i32 {
             unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
         };
         let queue = INJECT.get_or_init(|| {
-            // A post that arrives before any window: install a queue with a
-            // detached wake sender (nothing listens yet). The first
-            // `run_window` finds the queue already initialized and drains the
-            // backlog on its first pump wake.
-            let (wake_tx, _wake_rx) = unbounded::<()>();
+            // A post that arrives before any window: install the queue with a
+            // disconnected sender (its receiver is dropped immediately), so
+            // the wake below is a no-op and the entry waits for the first
+            // window's startup drain.
+            let (wake_tx, wake_rx) = unbounded::<()>();
+            drop(wake_rx);
             InjectQueue {
                 entries: Mutex::new(VecDeque::new()),
-                wake_tx,
+                wake_tx: Mutex::new(wake_tx),
             }
         });
         {
@@ -232,8 +265,12 @@ pub extern "C" fn gpui_post_event(view: i32, ptr: *const u8, len: i32) -> i32 {
             entries.push_back(InjectEntry { view, payload });
         }
         // Wake the drain pump. A closed channel (no window running) is fine:
-        // the entry stays queued for the next window's first drain.
-        let _ = queue.wake_tx.unbounded_send(());
+        // the entry stays queued for the next window's startup drain.
+        let _ = queue
+            .wake_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unbounded_send(());
         GPUI_STATUS_OK
     })
 }
@@ -247,6 +284,209 @@ fn pop_injected() -> Option<InjectEntry> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .pop_front()
+}
+
+/// Main-thread registry of open views, keyed by view id (RFC 0002 §3.4). The
+/// drain pump has no entity context of its own, so it routes `cx.notify()`
+/// through the `WeakEntity` registered here when the view opened. Main-thread
+/// only: `WeakEntity` is not `Send`, so this cannot live in a `Mutex`-guarded
+/// global (same reason as `ScrollHandle`; `architecture.md` §3).
+#[derive(Default)]
+struct ViewRegistry(HashMap<i32, WeakEntity<FfiView>>);
+
+impl Global for ViewRegistry {}
+
+/// Register an open view so the drain pump can notify it. Called on the main
+/// thread when the `FfiView` entity is created.
+fn register_view(cx: &mut App, view: i32, entity: &Entity<FfiView>) {
+    cx.default_global::<ViewRegistry>()
+        .0
+        .insert(view, entity.downgrade());
+}
+
+/// Notify the view that its committed tree changed (dispatch returned 1). A
+/// closed window (failed `upgrade`) is dropped silently: the dispatch already
+/// ran, and there is no UI left to refresh.
+fn notify_view(cx: &mut AsyncApp, view: i32) {
+    let _ = cx.update(|app| {
+        // Clone the weak handle out before borrowing `app` mutably for the
+        // update (the registry borrow and the entity update cannot overlap).
+        let weak = app.default_global::<ViewRegistry>().0.get(&view).cloned();
+        if let Some(weak) = weak {
+            let _ = weak.update(app, |_, cx| cx.notify());
+        }
+    });
+}
+
+/// Dispatch one injected entry as `EVENT_ASYNC` (RFC 0002 §3.4). The payload
+/// rides the existing `EVENT_QUEUE` token+copy mechanism — MoonBit copies it
+/// with `gpui_event_copy_text` during the synchronous dispatch — and the queue
+/// is cleared immediately after dispatch returns, the same #70 contract the
+/// `EVENT_TEXT` path follows. Returns the dispatch's `changed` flag.
+fn dispatch_injected(view: i32, payload: Vec<u8>) -> i32 {
+    let len = payload.len() as i32;
+    let token = {
+        let mut q = EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        q.push(payload);
+        (q.len() - 1) as i32
+    };
+    let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_ASYNC, view, token, len) };
+    EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    changed
+}
+
+/// Drain every queued injection entry, dispatching each as `EVENT_ASYNC` and
+/// notifying the view when the dispatch reports a change. Runs to completion
+/// on the main thread (called from the drain pump), so a wake that arrives
+/// mid-drain simply schedules another pass.
+///
+/// An entry addressed to a view with no committed tree is dropped here rather
+/// than dispatched (RFC 0002 §6-2): the producer cannot validate the view at
+/// post time without a TOCTOU race, so validation happens at drain, on the
+/// main thread, where `VIEWS` is cheap to read.
+fn drain_injected_events(cx: &mut AsyncApp) {
+    while let Some(entry) = pop_injected() {
+        let view_exists = VIEWS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(entry.view as usize)
+            .map_or(false, |slot| slot.is_some());
+        if !view_exists {
+            continue;
+        }
+        if dispatch_injected(entry.view, entry.payload) == 1 {
+            notify_view(cx, entry.view);
+        }
+    }
+}
+
+/// Spawn the foreground drain pump (RFC 0002 §3.3). It drains the queue once
+/// at startup (delivering any backlog posted before the window opened), then
+/// runs one full `drain_injected_events` per `()` on the wake channel; the
+/// pump exits when every wake sender is dropped (the window closed).
+/// `cx.spawn` schedules the future on the foreground executor, so the drain —
+/// and every `mb_dispatch` it makes — runs on the main thread.
+fn spawn_drain_pump(cx: &App, wake_rx: UnboundedReceiver<()>) {
+    cx.spawn(async move |mut cx: &mut AsyncApp| {
+        drain_injected_events(&mut cx);
+        let mut wake_rx = wake_rx;
+        while wake_rx.next().await.is_some() {
+            drain_injected_events(&mut cx);
+        }
+    })
+    .detach();
+}
+
+// --- Test-only dispatch recorder -------------------------------------------
+//
+// With the `test-dispatch-stub` feature, build.rs replaces `mb_dispatch` with
+// a stub that returns 0. The async-injection tests need to observe dispatches
+// (kind/view/payload) and drive the `changed` return value, so the stub
+// routes through this recorder when one is installed.
+#[cfg(feature = "test-dispatch-stub")]
+mod dispatch_recorder {
+    use std::sync::{Mutex, OnceLock};
+
+    /// One observed dispatch. `payload` is the `EVENT_QUEUE` entry at `token`
+    /// (copied synchronously, as a real MoonBit handler would).
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct RecordedDispatch {
+        pub kind: i32,
+        pub view: i32,
+        pub data_a: i32,
+        pub data_b: i32,
+        pub payload: Vec<u8>,
+    }
+
+    static RECORDER: OnceLock<Mutex<Recorder>> = OnceLock::new();
+
+    #[derive(Default)]
+    struct Recorder {
+        events: Vec<RecordedDispatch>,
+        changed: i32,
+    }
+
+    /// Install a fresh recorder and return a guard that removes it on drop.
+    #[cfg(test)]
+    pub fn install() -> RecorderGuard {
+        let recorder = RECORDER.get_or_init(|| Mutex::new(Recorder::default()));
+        *recorder.lock().unwrap_or_else(|e| e.into_inner()) = Recorder::default();
+        RecorderGuard
+    }
+
+    #[cfg(test)]
+    pub struct RecorderGuard;
+
+    #[cfg(test)]
+    impl Drop for RecorderGuard {
+        fn drop(&mut self) {
+            if let Some(recorder) = RECORDER.get() {
+                *recorder.lock().unwrap_or_else(|e| e.into_inner()) = Recorder::default();
+            }
+        }
+    }
+
+    /// Make subsequent dispatches return `changed` (1 → the pump notifies the
+    /// view; 0 → it does not).
+    #[cfg(test)]
+    pub fn set_changed(changed: i32) {
+        if let Some(recorder) = RECORDER.get() {
+            recorder.lock().unwrap_or_else(|e| e.into_inner()).changed = changed;
+        }
+    }
+
+    /// Snapshot of every dispatch observed since `install`.
+    #[cfg(test)]
+    pub fn take_events() -> Vec<RecordedDispatch> {
+        RECORDER
+            .get()
+            .map(|recorder| {
+                std::mem::take(&mut recorder.lock().unwrap_or_else(|e| e.into_inner()).events)
+            })
+            .unwrap_or_default()
+    }
+
+    /// Called by the generated `mb_dispatch` stub.
+    pub fn record(kind: i32, view: i32, data_a: i32, data_b: i32) -> i32 {
+        let Some(recorder) = RECORDER.get() else {
+            return 0;
+        };
+        let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
+        let payload = crate::EVENT_QUEUE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(data_a as usize)
+            .cloned()
+            .unwrap_or_default();
+        recorder.events.push(RecordedDispatch {
+            kind,
+            view,
+            data_a,
+            data_b,
+            payload,
+        });
+        recorder.changed
+    }
+}
+
+#[cfg(feature = "test-dispatch-stub")]
+pub use dispatch_recorder::RecordedDispatch;
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+pub use dispatch_recorder::RecorderGuard;
+
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+fn install_dispatch_recorder() -> dispatch_recorder::RecorderGuard {
+    dispatch_recorder::install()
+}
+
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+fn set_dispatch_changed(changed: i32) {
+    dispatch_recorder::set_changed(changed)
+}
+
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+fn take_recorded_dispatches() -> Vec<RecordedDispatch> {
+    dispatch_recorder::take_events()
 }
 
 /// Copy the text payload for a pending EVENT_TEXT dispatch.
@@ -1355,29 +1595,39 @@ pub extern "C" fn gpui_run_window(view: i32, width: f32, height: f32) -> i32 {
 
 fn run_window(view: usize, width: f32, height: f32) {
     Application::new().run(move |cx: &mut App| {
+        // Attach a fresh wake channel and start the drain pump before the
+        // window opens, so events posted from other threads — including any
+        // backlog queued before startup — are drained as soon as the loop
+        // runs (RFC 0002 §3.3).
+        spawn_drain_pump(cx, install_inject_queue());
+        let view_id = view as i32;
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                cx.new(|cx| {
-                    // Focus the view at construction (with `window` available), the
-                    // same way GPUI's own examples do — focusing during `render`
-                    // does not reliably make the element the OS first responder,
-                    // so key events never arrive.
-                    let focus = cx.focus_handle();
-                    window.focus(&focus);
-                    FfiView {
-                        focus,
-                        view,
-                        scroll_handles: Rc::new(RefCell::new(HashMap::new())),
-                    }
-                })
-            },
-        )
-        .unwrap();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| {
+                        // Focus the view at construction (with `window` available), the
+                        // same way GPUI's own examples do — focusing during `render`
+                        // does not reliably make the element the OS first responder,
+                        // so key events never arrive.
+                        let focus = cx.focus_handle();
+                        window.focus(&focus);
+                        FfiView {
+                            focus,
+                            view,
+                            scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+                        }
+                    })
+                },
+            )
+            .unwrap();
+        // Route drain-pump notifications to this view (RFC 0002 §3.4).
+        let entity = window.root(cx).unwrap();
+        register_view(cx, view_id, &entity);
         cx.activate(true);
     });
 }
@@ -1410,7 +1660,7 @@ fn run_window_with_fallback(view: usize, width: f32, height: f32) -> i32 {
     }
 }
 
-struct FfiView {
+pub struct FfiView {
     focus: FocusHandle,
     /// Index into `VIEWS` whose committed tree this view renders.
     view: usize,
@@ -2172,6 +2422,11 @@ impl IntoElement for TextGlyphInset {
 #[cfg(test)]
 mod headless_tests;
 
+/// RFC 0002 async injection tests: producer → post → drain pump → dispatch,
+/// observed through the `test-dispatch-stub` recorder (needs the feature).
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+mod async_inject_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2887,6 +3142,7 @@ mod tests {
             ("EVENT_KEY", EVENT_KEY),
             ("EVENT_TEXT", EVENT_TEXT),
             ("EVENT_NAMED_KEY", EVENT_NAMED_KEY),
+            ("EVENT_ASYNC", EVENT_ASYNC),
             ("MOD_CTRL", MOD_CTRL),
             ("MOD_ALT", MOD_ALT),
             ("MOD_SHIFT", MOD_SHIFT),
@@ -4007,10 +4263,9 @@ mod tests {
 
     // --- gpui_post_event / injection queue (RFC 0002) ----------------------
 
-    /// Serializes the injection-queue tests: `INJECT` is a process global that
-    /// persists across tests, so they must not run concurrently with each
-    /// other (or with the drain-pump tests below, which share it).
-    static INJECT_TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// Serializes the injection-queue tests against each other and against the
+    /// headless drain-pump tests (`async_inject_tests`): `INJECT` is a process
+    /// global, so both suites lock `crate::INJECT_TEST_LOCK`.
 
     fn with_inject_test(f: impl FnOnce()) {
         let _lock = INJECT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
