@@ -6,15 +6,12 @@
 ///|
 test "button emits a keyed clickable div with a label child" {
   let cb = CommandBuffer::new()
-  button(
-    cb,
-    {
-      key: "b1",
-      label: "OK",
-      color: Color::rgb(10, 20, 30),
-      on_click: { raw: 5 },
-    },
-  )
+  button(cb, {
+    key: "b1",
+    label: "OK",
+    color: Color::rgb(10, 20, 30),
+    on_click: { raw: 5 },
+  })
   let b = cb.to_bytes()
   let c = { b, pos: 8 } // skip the 8-byte header
   // outer clickable div
@@ -56,7 +53,7 @@ test "button emits a keyed clickable div with a label child" {
 test "button writes the handler id, not a raw constant" {
   // The id flows HandlerRegistry::on_click → ButtonProps.on_click → wire.
   let r = HandlerRegistry::new()
-  let id = r.on_click(fn(_) {})
+  let id = r.on_click(fn(_) {  })
   let cb = CommandBuffer::new()
   button(cb, { key: "k", label: "x", color: Color::black(), on_click: id })
   let b = cb.to_bytes()

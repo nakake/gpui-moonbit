@@ -32,7 +32,12 @@ pub(all) enum Event {
 /// `data_a` = token、`data_b` = バイト長で、Rust のイベントキューからペイロードを
 /// 同期的にコピーしてから UTF-8 デコードします（コピー失敗・不正 UTF-8 はそれぞれ
 /// `Unknown` / 空文字列になります）。
-pub fn decode_event(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
+pub fn decode_event(
+  version : Int,
+  kind : Int,
+  data_a : Int,
+  data_b : Int,
+) -> Event {
   // Runtime version handshake: reject a stale Rust binary.
   if version != ABI_VERSION {
     return Unknown

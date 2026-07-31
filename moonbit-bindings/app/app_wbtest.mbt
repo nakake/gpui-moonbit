@@ -82,3 +82,16 @@ test "text handler parses digit strings" {
   on_text("")
   assert_eq(count.get(store), 42)
 }
+
+///|
+test "text handler rejects digit runs that would overflow i32" {
+  count.set(store, 0)
+  // 0x7FFFFFFF = 2147483647 fits; one digit longer must be rejected (no wrap).
+  on_text("2147483647")
+  assert_eq(count.get(store), 2147483647)
+  count.set(store, 5)
+  on_text("2147483648") // i32::MAX + 1 → rejected, count unchanged
+  assert_eq(count.get(store), 5)
+  on_text("99999999999") // 11 digits → rejected
+  assert_eq(count.get(store), 5)
+}

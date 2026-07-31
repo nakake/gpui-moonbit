@@ -64,7 +64,9 @@ fn on_named_key(id : Int, _mods : Int) -> Unit {
 let _key_handler : Int = handlers.on_key(fn(code, mods) { on_key(code, mods) })
 
 ///|
-let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) { on_named_key(id, mods) })
+let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
+  on_named_key(id, mods)
+})
 
 // Render context (RFC 0001 §3.1): components reach the store and handler
 // registry through it. `view` is fixed to slot 0 (the single window).
@@ -73,7 +75,13 @@ let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) { on_named_key
 let ctx : @nakake/gpui-bindings.RenderCtx = { view: 0, store, handlers }
 
 ///|
-pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
+pub fn dispatch(
+  version : Int,
+  kind : Int,
+  view : Int,
+  data_a : Int,
+  data_b : Int,
+) -> Int {
   @nakake/gpui-bindings.framework_dispatch(
     ctx,
     version,
@@ -92,12 +100,15 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
 // the caller attaches it with `add_child`.
 
 ///|
-fn status_card(cb : @nakake/gpui-bindings.CommandBuffer, ctx : @nakake/gpui-bindings.RenderCtx) -> Unit {
+fn status_card(
+  cb : @nakake/gpui-bindings.CommandBuffer,
+  ctx : @nakake/gpui-bindings.RenderCtx,
+) -> Unit {
   // Status card: keyed, bordered, padded, rounded.
   cb.div()
   cb.set_key("status-card")
   cb.set_padding(16.0)
-  cb.set_border(2.0, 130, 220, 180)
+  cb.set_border_color(2.0, @nakake/gpui-bindings.Color::rgb(130, 220, 180))
   cb.set_rounded(12.0)
   let label = if on.get(ctx.store) { "Status: ON" } else { "Status: OFF" }
   cb.text(label, 130, 220, 180, 40.0)

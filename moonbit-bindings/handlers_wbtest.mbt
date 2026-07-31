@@ -65,9 +65,9 @@ test "unknown events dispatch nothing" {
 ///|
 test "ids are shared across handler kinds" {
   let r = HandlerRegistry::new()
-  let a = r.on_click(fn(_) {}).to_int()
-  let b = r.on_key(fn(_, _) {})
-  let c = r.on_named_key(fn(_, _) {})
-  let d = r.on_text(fn(_) {})
+  let a = r.on_click(fn(_) {  }).to_int()
+  let b = r.on_key(fn(_, _) {  })
+  let c = r.on_named_key(fn(_, _) {  })
+  let d = r.on_text(fn(_) {  })
   assert_eq([a, b, c, d], [1, 2, 3, 4])
 }

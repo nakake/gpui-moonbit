@@ -70,7 +70,10 @@ pub fn HandlerRegistry::new() -> HandlerRegistry {
 
 ///|
 /// クリックハンドラを登録し、`set_on_click` に渡す型付き id を発行します。
-pub fn HandlerRegistry::on_click(self : HandlerRegistry, h : ClickHandler) -> HandlerId {
+pub fn HandlerRegistry::on_click(
+  self : HandlerRegistry,
+  h : ClickHandler,
+) -> HandlerId {
   let id = self.next_id
   self.next_id = id + 1
   self.click[id] = h
@@ -88,7 +91,10 @@ pub fn HandlerRegistry::on_key(self : HandlerRegistry, h : KeyHandler) -> Int {
 
 ///|
 /// アプリ級の名前付きキーハンドラを登録し、id を発行します。
-pub fn HandlerRegistry::on_named_key(self : HandlerRegistry, h : NamedKeyHandler) -> Int {
+pub fn HandlerRegistry::on_named_key(
+  self : HandlerRegistry,
+  h : NamedKeyHandler,
+) -> Int {
   let id = self.next_id
   self.next_id = id + 1
   self.named_key.push((id, h))
@@ -107,7 +113,11 @@ pub fn HandlerRegistry::on_text(self : HandlerRegistry, h : TextHandler) -> Int 
 ///|
 /// デコード済みの `Event` を対応する型付きハンドラへ配送します。`dispatch` から
 /// 呼ばれます。未知のクリック id は no-op です（従来の `on_click` の else 分岐に相当）。
-pub fn HandlerRegistry::dispatch(self : HandlerRegistry, event : Event, view : Int) -> Unit {
+pub fn HandlerRegistry::dispatch(
+  self : HandlerRegistry,
+  event : Event,
+  view : Int,
+) -> Unit {
   match event {
     Click(click_id) =>
       match self.click.get(click_id) {

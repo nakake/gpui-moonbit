@@ -23,10 +23,26 @@
 - テスト基盤（#53）: gpui `test-support` によるヘッドレス layout golden テスト（G24）、in-crate シード PRNG ファジング + 任意の `fuzz/` scaffold（G25）、criterion ベンチ harness（G26）。
 - キーボードナビゲーション: `OP_SET_FOCUSABLE` / `OP_SET_TAB_INDEX` / `OP_SET_TAB_STOP`（35–37）と Tab / Shift+Tab トラバース。a11y / IME の境界を `docs/a11y-ime.md` に文書化（#52、G18 / G19）。
 - 計測で正当化したインクリメンタル更新: keyed in-place `gpui_update_text` FFI。24 行ツリーで full rebuild 比 約440x（11.4µs → 25.9ns）。汎用 vdom diff は意図的に未実装（#10）。
+- `set_border_color(width, color)`: 枠線を alpha 付き `Color` で設定する API。`set_border(width, r, g, b)` と wire format は同一（#81）。
+
+### Changed
+
+- `set_absolute(mode)` を `set_position(mode)` にリネーム。実態は position-mode setter（`POSITION_RELATIVE` / `POSITION_ABSOLUTE`）であり、「absolute にするだけ」の旧名は誤解を招いたため（#81）。
+- 色の API を `Color` 受けに寄せる方針を文書化。生 `r, g, b` トリプレット版（`set_bg` / `set_border` / `text`）は引き続き利用可能で、`Color` 版（`set_bg_color` / `set_border_color` / `set_text_color`）を推奨（#81）。
+- `on_text` の数値パースに i32 オーバーフローガードを追加。桁あふれする数字入力は wrap せず無視する（#81）。
+
+### Deprecated
+
+- `set_absolute(mode)`: `set_position(mode)` を使用のこと。`deprecated.mbt` に非推奨エイリアスとして残置（#81）。
+
+### Removed
+
+- 未使用の `NodeHandle` 型（宣言のみで使用箇所ゼロのデッドコード）を削除（#81）。
 
 ### Fixed
 
 - テキストの空白パディング workaround を撤廃し、paint-time ¼px オフセット（`TextGlyphInset`）に置換。コンテンツ汚染を解消（#16、G10）。
+- `on_text` が 10 桁以上の数字入力で i32 境界を wrap して負値になり得た問題を、オーバーフローガードで修正（#81）。
 
 ## [0.1.0] - 2026-07-24
 

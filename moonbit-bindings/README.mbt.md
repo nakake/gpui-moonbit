@@ -98,6 +98,8 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
 
 利用可能なコマンド: `div` / `text` / `set_size` / `set_bg` / `set_flex_row` / `set_flex_col` / `set_center` / `set_gap` / `set_rounded` / `set_on_click` / `set_key` / `set_padding` / `set_border` / `add_child` / `set_root`。色成分は 0–255 にクランプされます。テキストは内部で UTF-8 にエンコードされ、明示長で送られます（NUL 終端なし）。繰り返し現れる部分木は**コンポーネント**（`button(cb, props)` など、`components.mbt`）として切り出せます。コンポーネントは `CommandBuffer` に部分木を書き、ルートはスタックに残るので、呼び出し側が `add_child()` で接続します。
 
+**色の渡し方**: alpha 付きの `Color` を取る API（`set_bg_color` / `set_text_color` / `set_shadow` / `set_border_color`）を推奨します。生の `r, g, b` トリプレットを取る `set_bg` / `set_border` / `text` も引き続き利用可能で、wire format は同一です（issue #81 で整合化）。`Color` は `Color::rgb(r, g, b)` / `Color::rgba(r, g, b, a)` で作ります。
+
 ### 2. ウィンドウを開く
 
 ```moonbit nocheck
@@ -122,18 +124,40 @@ match @nakake/gpui-bindings.run_window(0, 600.0, 500.0) {
 アプリの骨格:
 
 ```moonbit nocheck
+///|
 let store = @nakake/gpui-bindings.Store::new()
+
+///|
 let count = store.signal(store.new_cell(0))
+
+///|
 let handlers = @nakake/gpui-bindings.HandlerRegistry::new()
+
+///|
 let btn_increment = handlers.on_click(fn(_view) {
   count.set(store, count.get(store) + 1)
 })
+
+///|
 let ctx : @nakake/gpui-bindings.RenderCtx = { view: 0, store, handlers }
 
-pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
-  @nakake/gpui-bindings.framework_dispatch(ctx, version, kind, view, data_a, data_b, fn(v) {
-    build_tree(v)
-  })
+///|
+pub fn dispatch(
+  version : Int,
+  kind : Int,
+  view : Int,
+  data_a : Int,
+  data_b : Int,
+) -> Int {
+  @nakake/gpui-bindings.framework_dispatch(
+    ctx,
+    version,
+    kind,
+    view,
+    data_a,
+    data_b,
+    fn(v) { build_tree(v) },
+  )
 }
 ```
 
@@ -171,7 +195,7 @@ MoonBit native の `Int` は 32-bit であり、この callback とコマンド�
 
 公開 API（`CommandBuffer` の各メソッド、`build_tree` / `run_window`、フレームワーク層の `Store` / `CellId` / `Signal` / `HandlerRegistry` / `HandlerId` / `RenderCtx` / `button` / `framework_dispatch`、`Event`、および `abi_constants.mbt` の定数群）には MoonBit の doc comment `///|` が付いています。ソースと併せて参照してください。
 
-- 対象ファイル: [`gpui-bindings.mbt`](gpui-bindings.mbt)（高水準 API）、[`components.mbt`](components.mbt) / [`store.mbt`](store.mbt) / [`signal.mbt`](signal.mbt) / [`event.mbt`](event.mbt) / [`handlers.mbt`](handlers.mbt) / [`framework.mbt`](framework.mbt)（フレームワーク層、RFC 0001）、[`abi_constants.mbt`](abi_constants.mbt)（`gpui-sys/abi.toml` から生成される ABI 定数）
+- 対象ファイル: [`gpui-bindings.mbt`](gpui-bindings.mbt)（高水準 API）、[`components.mbt`](components.mbt) / [`store.mbt`](store.mbt) / [`signal.mbt`](signal.mbt) / [`event.mbt`](event.mbt) / [`handlers.mbt`](handlers.mbt) / [`framework.mbt`](framework.mbt)（フレームワーク層、RFC 0001）、[`deprecated.mbt`](deprecated.mbt)（非推奨エイリアス）、[`abi_constants.mbt`](abi_constants.mbt)（`gpui-sys/abi.toml` から生成される ABI 定数）
 - ドキュメント生成: MoonBit ツールチェーンの標準手段は `moon doc`（`moon doc --serve` でローカルサーバ起動）です。現行ツールチェーン（moon 0.1.20260721 時点）では、パッケージ単位の JSON（`_build/doc/nakake/gpui-bindings/package_data.json` 等、`///|` doc comment を含む）は生成されますが、最終的なドキュメントサイト組み立て段階で moondoc が `moon.mod.json` を要求して例外終了します（本モジュールは新形式の `moon.mod` を使用）。サイト生成は moondoc 側の対応待ちです。それまでは `///|` doc comment とソースが API リファレンスの正本です。
 
 ## 制約・注意
@@ -184,6 +208,7 @@ MoonBit native の `Int` は 32-bit であり、この callback とコマンド�
 - 負の status code の意味（無効 handle、バッファの magic/バージョン不一致、未知 opcode、ルート未指定、キー重複など）は [`docs/architecture.md`](../docs/architecture.md) を参照してください。
 - **callback はメインスレッド限定・total 関数**です。ランタイムは非アトミック参照カウントのため、`dispatch` はメインスレッドからのみ呼べます。MoonBit の panic は FFI 境界を越えられず process abort になるため、callback は例外を投げない全関数に保ってください。詳細は [`docs/architecture.md`](../docs/architecture.md) §11「MoonBit native 実行時制約」を参照。
 - **エラーは構造化できます**。`build_tree` / `run_window` の `Err(status)` は、`classify_status(status)` で `GpuiError` に変換でき、`status_message(status)` / `GpuiError::to_string` で 1 行の診断メッセージを得られます。回復できない失敗には `expect_ok(result, ctx)` が構造化メッセージ付きで abort します。
+- **非推奨 API**。`set_absolute(mode)` は `set_position(mode)` に改名しました（実態は position-mode setter のため、issue #81）。旧名は [`deprecated.mbt`](deprecated.mbt) に非推奨エイリアスとして残っており、引き続き動作します。
 
 ## ライセンス
 

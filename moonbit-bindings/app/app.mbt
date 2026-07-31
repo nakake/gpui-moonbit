@@ -39,7 +39,9 @@ const COUNT_KEY : String = "count-label"
 let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.HandlerRegistry::new()
 
 ///|
-let btn_decrement : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
+let btn_decrement : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
+  _view,
+) {
   count.set(store, count.get(store) - 1)
 })
 
@@ -49,12 +51,16 @@ let btn_reset : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
 })
 
 ///|
-let btn_increment : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
+let btn_increment : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
+  _view,
+) {
   count.set(store, count.get(store) + 1)
 })
 
 ///|
-let btn_increment_10 : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
+let btn_increment_10 : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
+  _view,
+) {
   count.set(store, count.get(store) + 10)
 })
 
@@ -96,6 +102,9 @@ fn on_named_key(id : Int, _mods : Int) -> Unit {
 
 // Text events carry typed characters (including IME-composed text). The demo
 // treats a pure-digit string as "set count to N"; anything else is ignored.
+// The parsed value is bounded by i32::MAX so a long digit run cannot wrap the
+// 32-bit boundary silently (issue #81): once the next digit would overflow,
+// the whole input is rejected rather than wrapping to a negative value.
 
 ///|
 fn on_text(text : String) -> Unit {
@@ -107,7 +116,14 @@ fn on_text(text : String) -> Unit {
   let mut all_digits = true
   for c in text {
     if c >= '0' && c <= '9' {
-      value = value * 10 + (c.to_int() - '0'.to_int())
+      let digit = c.to_int() - '0'.to_int()
+      // Overflow guard: reject the input if the next digit would exceed
+      // i32::MAX (0x7FFFFFFF), instead of letting `value * 10 + digit` wrap.
+      if value > (0x7FFFFFFF - digit) / 10 {
+        all_digits = false
+        break
+      }
+      value = value * 10 + digit
     } else {
       all_digits = false
       break
@@ -125,7 +141,9 @@ fn on_text(text : String) -> Unit {
 let _key_handler : Int = handlers.on_key(fn(code, mods) { on_key(code, mods) })
 
 ///|
-let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) { on_named_key(id, mods) })
+let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
+  on_named_key(id, mods)
+})
 
 ///|
 let _text_handler : Int = handlers.on_text(fn(text) { on_text(text) })
@@ -137,7 +155,13 @@ let _text_handler : Int = handlers.on_text(fn(text) { on_text(text) })
 let ctx : @nakake/gpui-bindings.RenderCtx = { view: 0, store, handlers }
 
 ///|
-pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
+pub fn dispatch(
+  version : Int,
+  kind : Int,
+  view : Int,
+  data_a : Int,
+  data_b : Int,
+) -> Int {
   @nakake/gpui-bindings.framework_dispatch(
     ctx,
     version,
@@ -158,7 +182,12 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
 
 ///|
 fn update_count_view(view : Int) -> Result[Unit, Int] {
-  match @nakake/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{count.get(store)}") {
+  match
+    @nakake/gpui-bindings.update_text(
+      view,
+      COUNT_KEY,
+      "Count: \{count.get(store)}",
+    ) {
     Ok(_) => Ok(())
     Err(_) => build_tree(view)
   }
@@ -181,7 +210,10 @@ fn title(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
 }
 
 ///|
-fn counter_card(cb : @nakake/gpui-bindings.CommandBuffer, ctx : @nakake/gpui-bindings.RenderCtx) -> Unit {
+fn counter_card(
+  cb : @nakake/gpui-bindings.CommandBuffer,
+  ctx : @nakake/gpui-bindings.RenderCtx,
+) -> Unit {
   // Count display card: bordered, padded, rounded, with a soft shadow (G7/G9).
   // Keyed so `update_text` can address its text child for the incremental
   // in-place update (issue #10) without a full rebuild.
@@ -189,7 +221,7 @@ fn counter_card(cb : @nakake/gpui-bindings.CommandBuffer, ctx : @nakake/gpui-bin
   cb.set_key(COUNT_KEY)
   cb.set_bg_color(@nakake/gpui-bindings.Color::rgb(38, 42, 52))
   cb.set_padding(16.0)
-  cb.set_border(2.0, 120, 200, 255)
+  cb.set_border_color(2.0, @nakake/gpui-bindings.Color::rgb(120, 200, 255))
   cb.set_rounded(12.0)
   cb.set_shadow(0, 4, 8, 0, @nakake/gpui-bindings.Color::rgba(0, 0, 0, 96))
   cb.text("Count: \{count.get(ctx.store)}", 120, 200, 255, 44.0)
@@ -215,45 +247,33 @@ fn button_row(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
   cb.set_size(404.0, 56.0) // wider than the 300px container → horizontal overflow
   cb.set_flex_row()
   cb.set_gap(12.0)
-  @nakake/gpui-bindings.button(
-    cb,
-    {
-      key: "btn-decrement",
-      label: "-1",
-      color: @nakake/gpui-bindings.Color::rgb(200, 80, 80),
-      on_click: btn_decrement,
-    },
-  )
+  @nakake/gpui-bindings.button(cb, {
+    key: "btn-decrement",
+    label: "-1",
+    color: @nakake/gpui-bindings.Color::rgb(200, 80, 80),
+    on_click: btn_decrement,
+  })
   cb.add_child()
-  @nakake/gpui-bindings.button(
-    cb,
-    {
-      key: "btn-reset",
-      label: "Reset",
-      color: @nakake/gpui-bindings.Color::rgb(92, 98, 110),
-      on_click: btn_reset,
-    },
-  )
+  @nakake/gpui-bindings.button(cb, {
+    key: "btn-reset",
+    label: "Reset",
+    color: @nakake/gpui-bindings.Color::rgb(92, 98, 110),
+    on_click: btn_reset,
+  })
   cb.add_child()
-  @nakake/gpui-bindings.button(
-    cb,
-    {
-      key: "btn-increment",
-      label: "+1",
-      color: @nakake/gpui-bindings.Color::rgb(70, 160, 95),
-      on_click: btn_increment,
-    },
-  )
+  @nakake/gpui-bindings.button(cb, {
+    key: "btn-increment",
+    label: "+1",
+    color: @nakake/gpui-bindings.Color::rgb(70, 160, 95),
+    on_click: btn_increment,
+  })
   cb.add_child()
-  @nakake/gpui-bindings.button(
-    cb,
-    {
-      key: "btn-increment-10",
-      label: "+10",
-      color: @nakake/gpui-bindings.Color::rgb(70, 110, 230),
-      on_click: btn_increment_10,
-    },
-  )
+  @nakake/gpui-bindings.button(cb, {
+    key: "btn-increment-10",
+    label: "+10",
+    color: @nakake/gpui-bindings.Color::rgb(70, 110, 230),
+    on_click: btn_increment_10,
+  })
   cb.add_child()
   cb.add_child() // attach the row to the scroll container
 }

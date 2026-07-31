@@ -64,26 +64,38 @@ pub fn Store::new() -> Store {
 /// できます。
 pub trait KeyedCell {
   /// この値型のキー付きセルプールを store から取得します。
-  keyed_pool(Store) -> Map[String, Ref[Self]]
+  fn keyed_pool(Store) -> Map[String, Ref[Self]]
 }
 
 ///|
-pub impl KeyedCell for Int with fn keyed_pool(store : Store) -> Map[String, Ref[Int]] {
+pub impl KeyedCell for Int with fn keyed_pool(store : Store) -> Map[
+  String,
+  Ref[Int],
+] {
   store.int_cells
 }
 
 ///|
-pub impl KeyedCell for Bool with fn keyed_pool(store : Store) -> Map[String, Ref[Bool]] {
+pub impl KeyedCell for Bool with fn keyed_pool(store : Store) -> Map[
+  String,
+  Ref[Bool],
+] {
   store.bool_cells
 }
 
 ///|
-pub impl KeyedCell for String with fn keyed_pool(store : Store) -> Map[String, Ref[String]] {
+pub impl KeyedCell for String with fn keyed_pool(store : Store) -> Map[
+  String,
+  Ref[String],
+] {
   store.string_cells
 }
 
 ///|
-pub impl KeyedCell for Float with fn keyed_pool(store : Store) -> Map[String, Ref[Float]] {
+pub impl KeyedCell for Float with fn keyed_pool(store : Store) -> Map[
+  String,
+  Ref[Float],
+] {
   store.float_cells
 }
 
@@ -92,10 +104,7 @@ pub impl KeyedCell for Float with fn keyed_pool(store : Store) -> Map[String, Re
 pub fn[T] Store::new_cell(self : Store, init : T) -> CellId[T] {
   ignore(self)
   let box : Ref[T] = { val: init }
-  {
-    get: fn() { box.val },
-    set: fn(v) { box.val = v },
-  }
+  { get: fn() { box.val }, set: fn(v) { box.val = v } }
 }
 
 ///|
@@ -131,20 +140,18 @@ pub fn Store::has_dirty(self : Store) -> Bool {
 /// キーでスコープしたセルを得ます（コンポーネントのローカル状態用、RFC 0001 §3.1）。
 /// 初回呼び出しで `init` をもって確保し、以降の同じキーの呼び出しは同じセルを返します
 /// （`init` は無視されます）。値型 `T` は `KeyedCell` を実装している必要があります。
-pub fn[T : KeyedCell] Store::cell_for_key(self : Store, key : String, init : T) -> CellId[T] {
+pub fn[T : KeyedCell] Store::cell_for_key(
+  self : Store,
+  key : String,
+  init : T,
+) -> CellId[T] {
   let pool = KeyedCell::keyed_pool(self)
   match pool.get(key) {
-    Some(box) => {
-      get: fn() { box.val },
-      set: fn(v) { box.val = v },
-    }
+    Some(box) => { get: fn() { box.val }, set: fn(v) { box.val = v } }
     None => {
       let box : Ref[T] = { val: init }
       pool[key] = box
-      {
-        get: fn() { box.val },
-        set: fn(v) { box.val = v },
-      }
+      { get: fn() { box.val }, set: fn(v) { box.val = v } }
     }
   }
 }
