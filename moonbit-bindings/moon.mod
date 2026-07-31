@@ -13,3 +13,10 @@ license = "Apache-2.0"
 keywords = ["gpui", "moonbit", "gui", "native", "ui"]
 
 preferred_target = "native"
+
+// Prebuild script (issue #93, G2): builds the Rust staticlib and propagates
+// link flags to dependents. Runs on `moon build` / `moon test` and when this
+// module is consumed as a path/git dependency. See build.py for details.
+// WARNING: --moonbit-unstable-prebuild is extremely experimental; the API may
+// change at any time. Only use with trusted dependencies.
+options("--moonbit-unstable-prebuild": "build.py")
