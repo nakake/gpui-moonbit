@@ -453,12 +453,19 @@ mod dispatch_recorder {
             return 0;
         };
         let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-        let payload = crate::EVENT_QUEUE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(data_a as usize)
-            .cloned()
-            .unwrap_or_default();
+        // Only EVENT_TEXT / EVENT_ASYNC carry a payload in EVENT_QUEUE (data_a
+        // is the token); for click/key events data_a is a click_id/codepoint, so
+        // indexing the queue with it would capture an unrelated entry.
+        let payload = if kind == crate::EVENT_TEXT || kind == crate::EVENT_ASYNC {
+            crate::EVENT_QUEUE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(data_a as usize)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         recorder.events.push(RecordedDispatch {
             kind,
             view,
