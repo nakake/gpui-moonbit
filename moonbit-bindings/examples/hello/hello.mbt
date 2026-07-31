@@ -3,6 +3,10 @@
 // A static title, a status card that toggles ON/OFF, and one button.
 // Events: button click toggles; the space bar toggles; Escape resets to OFF.
 //
+// The event loop is the library's `framework_dispatch` (RFC 0001 §3.4):
+// handlers `set` the `on` signal and never report "changed"; the framework
+// rebuilds only when state actually moved.
+//
 // This package is a library (like `app/`): `moon check` / `moon build` compile
 // it, but producing an executable needs the Rust staticlib link that the root
 // build driver prepares for `cmd/main` only. Making it a standalone executable
@@ -10,14 +14,17 @@
 // into build.sh (future work). `launch` below is the entry point such an
 // executable calls.
 
-// State lives in a typed store cell (RFC 0001 §3.3), not a top-level mutable
-// array.
+// State lives in a typed store cell (RFC 0001 §3.3); handlers mutate it
+// through the `on` signal (RFC 0001 §3.4).
 
 ///|
 let store : @nakake/gpui-bindings.Store = @nakake/gpui-bindings.Store::new()
 
 ///|
-let on : @nakake/gpui-bindings.CellId[Bool] = store.new_cell(false)
+let on_cell : @nakake/gpui-bindings.CellId[Bool] = store.new_cell(false)
+
+///|
+let on : @nakake/gpui-bindings.Signal[Bool] = store.signal(on_cell)
 
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
 
@@ -32,36 +39,21 @@ const KEY_SPACE : Int = 32 // ' ' → toggle
 let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.HandlerRegistry::new()
 
 ///|
-fn toggle() -> Int {
-  store.set(on, !store.get(on))
-  1
-}
-
-///|
 let btn_toggle : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
-  ignore(toggle())
+  on.set(store, !on.get(store))
 })
 
 ///|
-fn on_key(code : Int, _mods : Int) -> Int {
+fn on_key(code : Int, _mods : Int) -> Unit {
   if code == KEY_SPACE {
-    toggle()
-  } else {
-    0
+    on.set(store, !on.get(store))
   }
 }
 
 ///|
-fn on_named_key(id : Int, _mods : Int) -> Int {
+fn on_named_key(id : Int, _mods : Int) -> Unit {
   if id == @nakake/gpui-bindings.KEY_ESCAPE {
-    if store.get(on) {
-      store.set(on, false)
-      1
-    } else {
-      0
-    }
-  } else {
-    0
+    on.set(store, false)
   }
 }
 
@@ -69,12 +61,10 @@ fn on_named_key(id : Int, _mods : Int) -> Int {
 // node): registered once, fanned out by the registry.
 
 ///|
-let _key_handler : Int = handlers.on_key(fn(code, mods) { ignore(on_key(code, mods)) })
+let _key_handler : Int = handlers.on_key(fn(code, mods) { on_key(code, mods) })
 
 ///|
-let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
-  ignore(on_named_key(id, mods))
-})
+let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) { on_named_key(id, mods) })
 
 // Render context (RFC 0001 §3.1): components reach the store and handler
 // registry through it. `view` is fixed to slot 0 (the single window).
@@ -84,20 +74,15 @@ let ctx : @nakake/gpui-bindings.RenderCtx = { view: 0, store, handlers }
 
 ///|
 pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
-  // Runtime version handshake: a stale Rust binary is rejected before any
-  // handler runs or the tree is touched.
-  if version != @nakake/gpui-bindings.ABI_VERSION {
-    return 0
-  }
-  handlers.dispatch(@nakake/gpui-bindings.decode_event(version, kind, data_a, data_b), view)
-  // Phase A (RFC 0001 §5): handlers mutate `on` without reporting whether
-  // anything changed, so every event rebuilds. Phase D replaces this gate with
-  // signal dirty tracking (§3.4).
-  match build_tree(view) {
-    Ok(_) => ()
-    Err(status) => println("hello: build_tree failed with status \{status}")
-  }
-  1
+  @nakake/gpui-bindings.framework_dispatch(
+    ctx,
+    version,
+    kind,
+    view,
+    data_a,
+    data_b,
+    fn(v) { build_tree(v) },
+  )
 }
 
 // --- Components (RFC 0001 §3.1) ---------------------------------------------
@@ -114,7 +99,7 @@ fn status_card(cb : @nakake/gpui-bindings.CommandBuffer, ctx : @nakake/gpui-bind
   cb.set_padding(16.0)
   cb.set_border(2.0, 130, 220, 180)
   cb.set_rounded(12.0)
-  let label = if ctx.store.get(on) { "Status: ON" } else { "Status: OFF" }
+  let label = if on.get(ctx.store) { "Status: ON" } else { "Status: OFF" }
   cb.text(label, 130, 220, 180, 40.0)
   cb.add_child()
 }

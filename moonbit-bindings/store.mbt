@@ -40,12 +40,21 @@ pub(all) struct Store {
   bool_cells : Map[String, Ref[Bool]]
   string_cells : Map[String, Ref[String]]
   float_cells : Map[String, Ref[Float]]
+  /// dispatch 内で `set` が 1 度でも起きたことを示すフラグ（RFC 0001 §3.4 の
+  /// dirty 判定。`begin_dirty_tracking` でクリアし、`has_dirty` で読みます）。
+  mut dirty : Bool
 }
 
 ///|
 /// 空の store を作成します。
 pub fn Store::new() -> Store {
-  { int_cells: Map([]), bool_cells: Map([]), string_cells: Map([]), float_cells: Map([]) }
+  {
+    int_cells: Map([]),
+    bool_cells: Map([]),
+    string_cells: Map([]),
+    float_cells: Map([]),
+    dirty: false,
+  }
 }
 
 ///|
@@ -97,11 +106,25 @@ pub fn[T] Store::get(self : Store, cell : CellId[T]) -> T {
 }
 
 ///|
-/// セルの値を書き換えます。Phase D 以降、この経路は store の dirty 追跡を起動し、
-/// signal の自動再構築（RFC 0001 §3.4）に接続されます。
+/// セルの値を書き換えます。store の dirty フラグを立て、signal の自動再構築
+/// （RFC 0001 §3.4）に接続します。
 pub fn[T] Store::set(self : Store, cell : CellId[T], value : T) -> Unit {
-  ignore(self)
+  self.dirty = true
   (cell.set)(value)
+}
+
+///|
+/// dirty 追跡を開始します（dispatch の先頭で呼び、この dispatch 内の `set` だけを
+/// 集めます。RFC 0001 §3.4）。
+pub fn Store::begin_dirty_tracking(self : Store) -> Unit {
+  self.dirty = false
+}
+
+///|
+/// 追跡開始以降に `set` が 1 度でも起きたかを返します（dispatch 末尾で一度だけ判定
+/// し、1 回の再構築にバッチします。RFC 0001 §3.4）。
+pub fn Store::has_dirty(self : Store) -> Bool {
+  self.dirty
 }
 
 ///|
@@ -125,3 +148,7 @@ pub fn[T : KeyedCell] Store::cell_for_key(self : Store, key : String, init : T) 
     }
   }
 }
+
+///|
+/// `Signal[T]` を通じた `set` も同じ dirty 追跡に載るよう、signal 経由の書き込みは
+/// 必ず `Store::set` を経ます（`signal.mbt` 参照）。

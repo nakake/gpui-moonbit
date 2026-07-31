@@ -8,6 +8,12 @@
 
 ### Added
 
+- コンポーネントモデルと状態管理の実装（#86、RFC 0001 Phase A–D、G11–G14）:
+  - **Phase A** — 型付きイベントとハンドラレジストリ: `event.mbt`（`Event` enum / `decode_event`）と `handlers.mbt`（`HandlerRegistry`、`on_click` / `on_key` / `on_named_key` / `on_text`、fan-out 配送）。`BTN_*` int 定数と int switch を撤廃。
+  - **Phase B** — 型付き状態ストア: `store.mbt`（`Store` / `CellId[T]`、`cell_for_key`）。`Array[Int]` / `Array[Bool]` のグローバル可変配列を置換。RFC の `Any + downcast` 案はこのツールチェーンに `Any` が無いため不採用で、`CellId[T]` が型付き get/set クロージャを保持する設計を採用（RFC §6）。
+  - **Phase C** — 再利用可能コンポーネント: `components.mbt`（`RenderCtx` / `button`）、`HandlerId` newtype。`build_tree` をコンポーネント呼び出しの列に再構成。
+  - **Phase D** — signal とフレームワーク dispatch: `signal.mbt`（`Signal[T]`）と `framework.mbt`（`framework_dispatch`）。ハンドラは signal の `set` のみを行い、フレームワークが store の dirty 追跡で再構築をスケジュール。`changed` 戻り値の報告を撤廃。dispatch の変化/不変化ゲートはリンク済み往復テスト（`cmd/roundtrip`）で検証。
+
 - イベントの view 単位ルーティング: dispatch を 5 スロット envelope `app.dispatch(version, kind, view, data_a, data_b)` に拡張し、`ABI_VERSION` を 4 に bump（#49、24c3809）。
 - `moonbit-bindings/moon.mod` のメタデータ整備（`description` / `repository` / `keywords`）と、バージョニング方針文書 `docs/versioning.md`（#48、G1 / G4）。
 - コンポーネントモデルと状態管理の設計 RFC `docs/rfc/0001-component-model.md`（#50、G11–G14）。
