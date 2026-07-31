@@ -24,6 +24,11 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 gpui = "0.2"
+# Wake channel for the async event injection queue (RFC 0002): the drain pump
+# awaits `wake_rx` on the foreground executor and any producer thread sends
+# `()` through `wake_tx`. gpui depends on the same crate; the direct
+# dependency pins the channel types in our public-adjacent FFI path.
+futures = "0.3"
 
 [build-dependencies]
 cbindgen = "0.28"

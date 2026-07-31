@@ -67,6 +67,50 @@
 #define gpui_GPUI_STATUS_KEY_NOT_FOUND -10
 
 /**
+ * The async injection queue is full (back-pressure): the producer should
+ * retry later, coalesce, or drop — the library never blocks, discards, or
+ * merges on its own (RFC 0002 §3.2).
+ */
+#define gpui_GPUI_STATUS_QUEUE_FULL -11
+
+/**
+ * The async injection payload exceeds the per-entry size limit.
+ */
+#define gpui_GPUI_STATUS_PAYLOAD_TOO_LARGE -12
+
+/**
+ * Maximum number of queued injection entries (RFC 0002 §6-1). A full queue
+ * fails `gpui_post_event` with `GPUI_STATUS_QUEUE_FULL` instead of blocking.
+ */
+#define gpui_INJECT_QUEUE_MAX_ENTRIES 1024
+
+/**
+ * Maximum payload size of a single injection entry, in bytes (RFC 0002
+ * §6-1). Larger payloads fail with `GPUI_STATUS_PAYLOAD_TOO_LARGE`.
+ */
+#define gpui_INJECT_PAYLOAD_MAX_BYTES (1024 * 1024)
+
+/**
+ * Push an event from any thread into the injection queue (RFC 0002 §3.1).
+ * Non-blocking: the payload is copied under the queue lock and the call
+ * returns immediately. The payload is opaque bytes — the library never
+ * interprets it; framing is a contract between the producer and the MoonBit
+ * `Event::Async` handler.
+ *
+ * `view` is the destination view id (index into `VIEWS`); a negative value
+ * fails up front, an unknown one is dropped at drain time. `ptr` is borrowed
+ * only for the duration of the call and copied internally (same contract as
+ * every other FFI here). `len` may be 0: an entry can carry "something
+ * happened" with no payload.
+ *
+ * Returns `GPUI_STATUS_OK`, `GPUI_STATUS_INVALID_HANDLE` (negative view, or
+ * a null pointer with a nonzero length), `GPUI_STATUS_PAYLOAD_TOO_LARGE`, or
+ * `GPUI_STATUS_QUEUE_FULL`. Posts made before any window starts are queued
+ * and delivered by the first drain after startup.
+ */
+int32_t gpui_post_event(int32_t view, const uint8_t *ptr, int32_t len);
+
+/**
  * Copy the text payload for a pending EVENT_TEXT dispatch.
  *
  * `token` is the index passed in `data_a`; `buf` must point to at least `len`

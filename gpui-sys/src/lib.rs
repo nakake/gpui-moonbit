@@ -1,10 +1,12 @@
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::stream::StreamExt;
 use gpui::*;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// Headless layout harness (G24): decode a command buffer through the real
 /// decoder, render it in a gpui `TestAppContext` window (no GPU, no display),
@@ -19,21 +21,22 @@ use abi_constants::{
     ABI_VERSION, ALIGN_CENTER, ALIGN_DEFAULT, ALIGN_END, ALIGN_START, ALIGN_STRETCH,
     BUFFER_VERSION, CURSOR_ARROW, CURSOR_COL_RESIZE, CURSOR_CROSSHAIR, CURSOR_EW_RESIZE,
     CURSOR_GRAB, CURSOR_GRABBING, CURSOR_NONE, CURSOR_NOT_ALLOWED, CURSOR_NS_RESIZE,
-    CURSOR_POINTER, CURSOR_ROW_RESIZE, CURSOR_TEXT, EVENT_CLICK, EVENT_KEY, EVENT_NAMED_KEY,
-    EVENT_TEXT, JUSTIFY_CENTER, JUSTIFY_DEFAULT, JUSTIFY_END, JUSTIFY_SPACE_AROUND,
-    JUSTIFY_SPACE_BETWEEN, JUSTIFY_START, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
-    KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN, KEY_RIGHT, KEY_TAB,
-    KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV,
-    OP_SET_ALIGN, OP_SET_BG, OP_SET_BG_COLOR, OP_SET_BORDER, OP_SET_CENTER, OP_SET_CURSOR,
-    OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_FOCUSABLE, OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT,
-    OP_SET_GAP, OP_SET_INSET, OP_SET_KEY, OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE,
-    OP_SET_MIN_SIZE, OP_SET_ON_CLICK, OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING,
-    OP_SET_PADDING_SIDES, OP_SET_POSITION, OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW,
-    OP_SET_SIZE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP, OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR,
-    OP_SET_TEXT_SIZE, OP_SET_WHITESPACE, OP_TEXT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL,
-    OVERFLOW_VISIBLE, POSITION_ABSOLUTE, POSITION_RELATIVE, TEXT_ALIGN_CENTER,
-    TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY, TEXT_ALIGN_LEFT, TEXT_ALIGN_RIGHT,
-    WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP, WHITESPACE_PRE, WHITESPACE_PRE_WRAP,
+    CURSOR_POINTER, CURSOR_ROW_RESIZE, CURSOR_TEXT, EVENT_ASYNC, EVENT_CLICK, EVENT_KEY,
+    EVENT_NAMED_KEY, EVENT_TEXT, JUSTIFY_CENTER, JUSTIFY_DEFAULT, JUSTIFY_END,
+    JUSTIFY_SPACE_AROUND, JUSTIFY_SPACE_BETWEEN, JUSTIFY_START, KEY_BACKSPACE, KEY_DELETE,
+    KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN,
+    KEY_RIGHT, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT,
+    OP_ADD_CHILD, OP_DIV, OP_SET_ALIGN, OP_SET_BG, OP_SET_BG_COLOR, OP_SET_BORDER,
+    OP_SET_CENTER, OP_SET_CURSOR, OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_FOCUSABLE,
+    OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT, OP_SET_GAP, OP_SET_INSET, OP_SET_KEY,
+    OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE, OP_SET_MIN_SIZE, OP_SET_ON_CLICK,
+    OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING, OP_SET_PADDING_SIDES, OP_SET_POSITION,
+    OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW, OP_SET_SIZE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP,
+    OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE, OP_SET_WHITESPACE, OP_TEXT,
+    OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE, POSITION_RELATIVE,
+    TEXT_ALIGN_CENTER, TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY, TEXT_ALIGN_LEFT,
+    TEXT_ALIGN_RIGHT, WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP, WHITESPACE_PRE,
+    WHITESPACE_PRE_WRAP,
 };
 
 // Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
@@ -79,6 +82,12 @@ pub const GPUI_STATUS_DUPLICATE_KEY: i32 = -9;
 /// / belongs to a text node). Callers treat this as "fall back to a full
 /// `gpui_build_tree` rebuild".
 pub const GPUI_STATUS_KEY_NOT_FOUND: i32 = -10;
+/// The async injection queue is full (back-pressure): the producer should
+/// retry later, coalesce, or drop — the library never blocks, discards, or
+/// merges on its own (RFC 0002 §3.2).
+pub const GPUI_STATUS_QUEUE_FULL: i32 = -11;
+/// The async injection payload exceeds the per-entry size limit.
+pub const GPUI_STATUS_PAYLOAD_TOO_LARGE: i32 = -12;
 
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
@@ -114,6 +123,131 @@ include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
 /// (#70), so it holds at most one entry at a time and can never grow with the
 /// number of events delivered.
 static EVENT_QUEUE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+// --- Async event injection (RFC 0002) --------------------------------------
+//
+// External native code pushes opaque payloads from any thread via
+// `gpui_post_event`; a foreground drain pump (installed by `run_window`)
+// moves them onto the main thread as `EVENT_ASYNC` dispatches. The queue is
+// bounded on both axes (entry count and per-entry size) and the drain pops
+// ownership, so unbounded growth is structurally impossible — the lesson of
+// #70 ("a queue with no release contract always leaks").
+
+/// Maximum number of queued injection entries (RFC 0002 §6-1). A full queue
+/// fails `gpui_post_event` with `GPUI_STATUS_QUEUE_FULL` instead of blocking.
+pub const INJECT_QUEUE_MAX_ENTRIES: usize = 1024;
+
+/// Maximum payload size of a single injection entry, in bytes (RFC 0002
+/// §6-1). Larger payloads fail with `GPUI_STATUS_PAYLOAD_TOO_LARGE`.
+pub const INJECT_PAYLOAD_MAX_BYTES: usize = 1024 * 1024;
+
+/// One queued injection: the destination view id and the copied payload.
+struct InjectEntry {
+    view: i32,
+    payload: Vec<u8>,
+}
+
+/// The process-wide injection queue plus its wake channel. `entries` is a
+/// single FIFO across all producers (Mutex acquisition order); `wake_tx`
+/// carries only `()` — the data lives in the queue, and the drain pump empties
+/// it on every wake, so coalesced wakes lose nothing. Initialized once, on
+/// the main thread, by `run_window` before the drain pump starts.
+struct InjectQueue {
+    entries: Mutex<VecDeque<InjectEntry>>,
+    wake_tx: UnboundedSender<()>,
+}
+
+static INJECT: OnceLock<InjectQueue> = OnceLock::new();
+
+/// Install the injection queue (idempotent: the first window wins) and hand
+/// the wake receiver to the caller, which spawns the drain pump with it.
+/// Returns `None` only if another window already owns the queue.
+fn install_inject_queue() -> Option<UnboundedReceiver<()>> {
+    let (wake_tx, wake_rx) = unbounded::<()>();
+    INJECT
+        .set(InjectQueue {
+            entries: Mutex::new(VecDeque::new()),
+            wake_tx,
+        })
+        .ok()?;
+    Some(wake_rx)
+}
+
+/// Push an event from any thread into the injection queue (RFC 0002 §3.1).
+/// Non-blocking: the payload is copied under the queue lock and the call
+/// returns immediately. The payload is opaque bytes — the library never
+/// interprets it; framing is a contract between the producer and the MoonBit
+/// `Event::Async` handler.
+///
+/// `view` is the destination view id (index into `VIEWS`); a negative value
+/// fails up front, an unknown one is dropped at drain time. `ptr` is borrowed
+/// only for the duration of the call and copied internally (same contract as
+/// every other FFI here). `len` may be 0: an entry can carry "something
+/// happened" with no payload.
+///
+/// Returns `GPUI_STATUS_OK`, `GPUI_STATUS_INVALID_HANDLE` (negative view, or
+/// a null pointer with a nonzero length), `GPUI_STATUS_PAYLOAD_TOO_LARGE`, or
+/// `GPUI_STATUS_QUEUE_FULL`. Posts made before any window starts are queued
+/// and delivered by the first drain after startup.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_post_event(view: i32, ptr: *const u8, len: i32) -> i32 {
+    ffi_export("gpui_post_event", || {
+        if view < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        if len < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        let len = len as usize;
+        if len > INJECT_PAYLOAD_MAX_BYTES {
+            return GPUI_STATUS_PAYLOAD_TOO_LARGE;
+        }
+        if ptr.is_null() && len != 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        // SAFETY: `ptr` points to at least `len` readable bytes for the
+        // duration of this call (the standard FFI borrow contract); `len` is
+        // validated above. A null pointer is only reachable here with len 0.
+        let payload = if len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+        };
+        let queue = INJECT.get_or_init(|| {
+            // A post that arrives before any window: install a queue with a
+            // detached wake sender (nothing listens yet). The first
+            // `run_window` finds the queue already initialized and drains the
+            // backlog on its first pump wake.
+            let (wake_tx, _wake_rx) = unbounded::<()>();
+            InjectQueue {
+                entries: Mutex::new(VecDeque::new()),
+                wake_tx,
+            }
+        });
+        {
+            let mut entries = queue.entries.lock().unwrap_or_else(|e| e.into_inner());
+            if entries.len() >= INJECT_QUEUE_MAX_ENTRIES {
+                return GPUI_STATUS_QUEUE_FULL;
+            }
+            entries.push_back(InjectEntry { view, payload });
+        }
+        // Wake the drain pump. A closed channel (no window running) is fine:
+        // the entry stays queued for the next window's first drain.
+        let _ = queue.wake_tx.unbounded_send(());
+        GPUI_STATUS_OK
+    })
+}
+
+/// Pop the oldest queued injection entry, if any. The queue lock is held only
+/// for the pop; the caller owns the payload afterwards.
+fn pop_injected() -> Option<InjectEntry> {
+    INJECT
+        .get()?
+        .entries
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop_front()
+}
 
 /// Copy the text payload for a pending EVENT_TEXT dispatch.
 ///
@@ -3869,6 +4003,117 @@ mod tests {
             GPUI_STATUS_INVALID_HANDLE
         );
         assert!(EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+    }
+
+    // --- gpui_post_event / injection queue (RFC 0002) ----------------------
+
+    /// Serializes the injection-queue tests: `INJECT` is a process global that
+    /// persists across tests, so they must not run concurrently with each
+    /// other (or with the drain-pump tests below, which share it).
+    static INJECT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_inject_test(f: impl FnOnce()) {
+        let _lock = INJECT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(q) = INJECT.get() {
+            q.entries.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+        f();
+        if let Some(q) = INJECT.get() {
+            q.entries.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_queues_payload_for_drain() {
+        with_inject_test(|| {
+            let payload = b"hello";
+            assert_eq!(gpui_post_event(3, payload.as_ptr(), payload.len() as i32), GPUI_STATUS_OK);
+            let entry = pop_injected().expect("queued entry");
+            assert_eq!(entry.view, 3);
+            assert_eq!(entry.payload, payload);
+            assert!(pop_injected().is_none());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_zero_len_carries_no_payload() {
+        with_inject_test(|| {
+            assert_eq!(gpui_post_event(0, std::ptr::null(), 0), GPUI_STATUS_OK);
+            let entry = pop_injected().expect("queued entry");
+            assert_eq!(entry.view, 0);
+            assert!(entry.payload.is_empty());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_rejects_invalid_arguments() {
+        with_inject_test(|| {
+            let payload = b"x";
+            assert_eq!(
+                gpui_post_event(-1, payload.as_ptr(), 1),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(
+                gpui_post_event(0, payload.as_ptr(), -1),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(gpui_post_event(0, std::ptr::null(), 1), GPUI_STATUS_INVALID_HANDLE);
+            assert!(pop_injected().is_none());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_enforces_payload_limit() {
+        with_inject_test(|| {
+            // Exactly at the limit: accepted.
+            let max_payload = vec![0xABu8; INJECT_PAYLOAD_MAX_BYTES];
+            assert_eq!(
+                gpui_post_event(0, max_payload.as_ptr(), INJECT_PAYLOAD_MAX_BYTES as i32),
+                GPUI_STATUS_OK
+            );
+            assert_eq!(
+                pop_injected().expect("queued entry").payload.len(),
+                INJECT_PAYLOAD_MAX_BYTES
+            );
+            // One byte over: rejected before any copy.
+            assert_eq!(
+                gpui_post_event(0, max_payload.as_ptr(), INJECT_PAYLOAD_MAX_BYTES as i32 + 1),
+                GPUI_STATUS_PAYLOAD_TOO_LARGE
+            );
+            assert!(pop_injected().is_none());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_back_pressures_when_full() {
+        with_inject_test(|| {
+            let payload = b"x";
+            for _ in 0..INJECT_QUEUE_MAX_ENTRIES {
+                assert_eq!(gpui_post_event(0, payload.as_ptr(), 1), GPUI_STATUS_OK);
+            }
+            // The 1025th entry is rejected, not dropped-silently or blocked on.
+            assert_eq!(
+                gpui_post_event(0, payload.as_ptr(), 1),
+                GPUI_STATUS_QUEUE_FULL
+            );
+            // Draining one entry frees one slot.
+            assert!(pop_injected().is_some());
+            assert_eq!(gpui_post_event(0, payload.as_ptr(), 1), GPUI_STATUS_OK);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_preserves_fifo_order() {
+        with_inject_test(|| {
+            for i in 0..8u8 {
+                assert_eq!(gpui_post_event(i as i32, &i, 1), GPUI_STATUS_OK);
+            }
+            for i in 0..8u8 {
+                let entry = pop_injected().expect("queued entry");
+                assert_eq!(entry.view, i as i32);
+                assert_eq!(entry.payload, [i]);
+            }
+        });
     }
 }
 
