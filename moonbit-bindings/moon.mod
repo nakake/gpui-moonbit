@@ -1,4 +1,4 @@
-name = "username/gpui-bindings"
+name = "nakake/gpui-bindings"
 
 version = "0.1.0"
 

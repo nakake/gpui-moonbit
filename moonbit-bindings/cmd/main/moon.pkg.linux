@@ -1,6 +1,6 @@
 import {
-  "username/gpui-bindings",
-  "username/gpui-bindings/app",
+  "nakake/gpui-bindings",
+  "nakake/gpui-bindings/app",
 }
 
 options(

@@ -20,14 +20,14 @@ extern "C" fn gpui_abi_probe_ffi(value : Int) -> Int = "gpui_abi_probe"
 
 fn main {
   // Retain app.dispatch so the Rust staticlib's mb_dispatch reference resolves.
-  let _keep : (Int, Int, Int, Int, Int) -> Int = @username/gpui-bindings/app.dispatch
+  let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
   ignore(_keep)
 
   // Edge-case text: NUL byte, multibyte UTF-8 (hiragana), 4-byte emoji.
   let texts = ["A\u{0}あ", "🎉"]
 
   // Build tree: div { text(t0), text(t1) }
-  let cb = @username/gpui-bindings.CommandBuffer::new()
+  let cb = @nakake/gpui-bindings.CommandBuffer::new()
   cb.div()
   for t in texts {
     cb.text(t, 255, 255, 255, 16.0)

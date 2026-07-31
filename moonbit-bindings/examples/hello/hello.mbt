@@ -34,14 +34,14 @@ priv enum Event {
 ///|
 fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
   // Runtime version handshake: reject a stale Rust binary.
-  if version != @username/gpui-bindings.ABI_VERSION {
+  if version != @nakake/gpui-bindings.ABI_VERSION {
     return Unknown
   }
-  if kind == @username/gpui-bindings.EVENT_CLICK {
+  if kind == @nakake/gpui-bindings.EVENT_CLICK {
     Click(data_a)
-  } else if kind == @username/gpui-bindings.EVENT_KEY {
+  } else if kind == @nakake/gpui-bindings.EVENT_KEY {
     Key(data_a, data_b)
-  } else if kind == @username/gpui-bindings.EVENT_NAMED_KEY {
+  } else if kind == @nakake/gpui-bindings.EVENT_NAMED_KEY {
     NamedKey(data_a, data_b)
   } else {
     Unknown
@@ -98,7 +98,7 @@ fn on_key(code : Int, _mods : Int) -> Int {
 
 ///|
 fn on_named_key(id : Int, _mods : Int) -> Int {
-  if id == @username/gpui-bindings.KEY_ESCAPE {
+  if id == @nakake/gpui-bindings.KEY_ESCAPE {
     if on[0] {
       on[0] = false
       1
@@ -112,7 +112,7 @@ fn on_named_key(id : Int, _mods : Int) -> Int {
 
 ///|
 pub fn build_tree(view : Int) -> Result[Unit, Int] {
-  let cb = @username/gpui-bindings.CommandBuffer::new()
+  let cb = @nakake/gpui-bindings.CommandBuffer::new()
   cb.div() // root
   cb.set_bg(24, 26, 32)
   cb.set_flex_col()
@@ -151,7 +151,7 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.add_child()
 
   cb.set_root()
-  @username/gpui-bindings.build_tree(view, cb)
+  @nakake/gpui-bindings.build_tree(view, cb)
 }
 
 // Entry point for a future `cmd/hello` executable: retain `dispatch`, commit
@@ -169,7 +169,7 @@ pub fn launch() -> Unit {
     Ok(_) => ()
     Err(status) => abort("initial build_tree failed with status \{status}")
   }
-  match @username/gpui-bindings.run_window(0, 480.0, 420.0) {
+  match @nakake/gpui-bindings.run_window(0, 480.0, 420.0) {
     Ok(_) => ()
     Err(status) => abort("run_window failed with status \{status}")
   }
