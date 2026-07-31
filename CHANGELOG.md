@@ -17,6 +17,7 @@
 - テスト基盤（#53）: gpui `test-support` によるヘッドレス layout golden テスト（G24）、in-crate シード PRNG ファジング + 任意の `fuzz/` scaffold（G25）、criterion ベンチ harness（G26）。
 - キーボードナビゲーション: `OP_SET_FOCUSABLE` / `OP_SET_TAB_INDEX` / `OP_SET_TAB_STOP`（35–37）と Tab / Shift+Tab トラバース。a11y / IME の境界を `docs/a11y-ime.md` に文書化（#52、G18 / G19）。
 - 計測で正当化したインクリメンタル更新: keyed in-place `gpui_update_text` FFI。24 行ツリーで full rebuild 比 約440x（11.4µs → 25.9ns）。汎用 vdom diff は意図的に未実装（#10）。
+- prebuild パイプライン（#93、G2）: `moonbit-bindings/build.py` を `--moonbit-unstable-prebuild` で登録。path/git 依存で本モジュールを消費したコンシューマの `moon build` 時に Rust staticlib をビルドし、LinkConfig でリンクフラグを伝播する。`link/` パッケージを新設し、コンシューマ exe が import することで伝播を受ける設計（テスト exe への意図しない伝播を回避）。Linux x86_64 で検証済み。macOS/Windows は未検証。
 
 ### Fixed
 

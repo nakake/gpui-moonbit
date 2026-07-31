@@ -66,4 +66,4 @@
 3. **ABI 整合性**: ABI 変更がある場合、`abi.toml` の `ABI_VERSION` が bump 済みであること、build driver（`build.sh` / `build.ps1`）で定数を再生成済みであること、`architecture.md` の envelope 記述が一致していることを確認する。
 4. **Changelog 確定**: `CHANGELOG.md` の `Unreleased` を `[X.Y.Z] - YYYY-MM-DD` に書き換え、エントリがコミットと突き合わせ可能であることを確認する。
 5. **タグ**: `vX.Y.Z` を打って push する。
-6. **配布**（将来）: mooncakes 公開は `G2`（prebuild パイプライン、[`framework-gaps.md`](framework-gaps.md) §1）完了後、macOS 配布署名は `G5` 完了後。それまではテンプレートリポジトリ方式（`build.sh` / `build.ps1` を含むリポジトリの fork/clone）で配布する（[`spikes/2026-07-24-packaging-feasibility.md`](spikes/2026-07-24-packaging-feasibility.md) の方式 B）。
+6. **配布**（将来）: mooncakes 公開は `--moonbit-unstable-prebuild` の API 安定性を見極めてから判断する（#93 で prebuild パイプラインは実装済みだが、実験的機能への依存を公開パッケージに固定するのは時期尚早と判断）。macOS 配布署名は `G5` 完了後。それまでは path/git 依存（prebuild 方式、[`spikes/2026-07-24-packaging-feasibility.md`](spikes/2026-07-24-packaging-feasibility.md) の方式 A）またはテンプレートリポジトリ方式（`build.sh` / `build.ps1` を含むリポジトリの fork/clone、方式 B）で配布する。

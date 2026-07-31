@@ -182,6 +182,54 @@ bindgen ステップは、同じドライバ実行内で直前に `gen-header` �
 
 `gpui-sys` は `staticlib` である。その未解決の `mb_dispatch` 参照は、最終的な MoonBit 実行ファイルのリンク時にのみ解決される。プラットフォームのテンプレートには、検出された Rust ライブラリディレクトリと Cargo 由来のネイティブリンクフラグ用のプレースホルダが含まれる。Linux は上述の SONAME 互換正規化を適用する。macOS ではドライバが最後に `bundle.sh` を呼び出して `dist/Counter.app` を作成する（デフォルト。`--no-bundle` で省略）。キーボードの配送にはこのバンドルが必要である。Linux では実行ファイルを直接使う。`.linux-libs` は、利用できないシステムの XCB/XKB ランタイムライブラリ用の、無視されるローカルフォールバックである。WSLg では `env -u WAYLAND_DISPLAY` が確実な明示的 X11 起動方法である。Rust は Wayland 起動時の panic を捕捉し、その変数を除去して 1 度だけ再試行する。Windows は `build.ps1` が用意する MSVC x64 セットアップを使う。
 
+### 6.1 prebuild パイプライン（依存として消費、#93 / G2）
+
+`moonbit-bindings/build.py` が `moon.mod` の `options("--moonbit-unstable-prebuild": "build.py")` で登録されている。このスクリプトは、本モジュールが path/git 依存として消費された場合、またはモジュール自身で `moon build` / `moon test` を実行した場合に、moon から起動される（`moon check` では起動されない）。起動プロトコルは moon 0.1.20260721 時点で次の通り:
+
+- **起動**: `python -- build.py`（cwd = モジュールルート）。`python` が無ければ `python3` にフォールバックする。
+- **stdin**: `{"env": {...}, "paths": {"module_root": "...", "out_dir": "TODO"}}` の JSON。`out_dir` は未実装（"TODO" リテラル）のため使えない。
+- **stdout**: `BuildScriptOutput` JSON **1 個のみ**。全バイトが `serde_json::from_slice` でパースされるため、ログや進捗出力を混ぜるとビルドが失敗する。診断はすべて stderr へ。
+- **stderr**: moon の stderr にそのまま継承される。
+
+スクリプトの処理:
+
+1. マングル規則（`docs/moonbit-native-notes.md` §3）から `app.dispatch` のシンボル `_M0FP36nakake15gpui_2dbindings3app8dispatch` を**決定的に計算**する。chicken/egg（Rust が MoonBit のマングルシンボルをコンパイル時に必要とする）を、ブートストラップビルドなしに解決する。
+2. `gpui-sys/mb_symbol.txt` が無ければ書き込む（`build.sh` 非経由の単独ビルド用）。既存値が計算値と異なれば警告する。
+3. `cargo build --target <host>` で `libgpui_sys.a` をビルドする。
+4. `cargo rustc -- --print native-static-libs` でリンクフラグを捕捉し、`build.sh` と同一の OS 別正規化（`-lc` 除去、Linux の XCB/XKB SONAME 化、macOS の `-lm` 除去 + IOSurface 追加、システムライブラリ検索パス注入）を適用する。
+5. `link_configs` を stdout に出力する。`package` には `nakake/gpui-bindings/link` を指定し、正規化済みフラグを `link_flags`（空白区切り文字列、shlex 分割）に載せる。
+
+**`link/` パッケージの設計意図**: LinkConfig をルートパッケージに付けると、`moon test` のテスト実行ファイルにもリンクフラグが伝播し、テストが使う tcc リンカが `-lstdc++` 等を解決できず失敗する。リンクフラグ専用の `link/` パッケージ（コードはマーカー定数のみ）を新設し、LinkConfig の対象をそこに限定した。コンシューマの実行ファイルが `moon.pkg` で `nakake/gpui-bindings/link` を import することで初めて伝播を受ける。ライブラリ自身のテスト実行ファイルは `link` を import しないため影響を受けない。
+
+**コンシューマの消費方法**（Linux x86_64 で検証済み）:
+
+```jsonc
+// moon.mod.json （DSL の moon.mod は registry 依存しか書けないため JSON 形式を使う）
+{
+  "name": "your/app",
+  "deps": { "nakake/gpui-bindings": { "path": "/path/to/moonbit-bindings" } }
+}
+```
+
+```moonbit
+// exe の moon.pkg
+import {
+  "nakake/gpui-bindings",       // 高水準 API
+  "nakake/gpui-bindings/app",   // app.dispatch を保持（callback リンク解決に必須）
+  "nakake/gpui-bindings/link",  // Rust staticlib のリンクフラグ伝播を受ける
+}
+```
+
+exe の `main` では `app.dispatch` を `let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch` で明示保持する（dead-code elimination 対策。Rust staticlib の `mb_dispatch` 未解決参照を最終リンクで解決するために必須）。
+
+**制約・未検証事項**:
+
+- `--moonbit-unstable-prebuild` は「extremely experimental, API may change at any time」。LinkConfig にはソースに "merely a POC" の注記がある。
+- `rerun_if` は現状無効（"DOES NOT WORK NOW"）で、prebuild は `moon build` ごとに無条件再実行される。cargo はインクリメンタルのため warm ビルドは高速。
+- Linux x86_64 のみ検証済み。macOS arm64/x86_64・Windows MSVC x64 は未検証（リンクフラグ構文・シェル実行の差異）。
+- mooncakes 公開は意図的に見送った。実験的機能への依存を公開パッケージに固定するのは時期尚早と判断（`docs/versioning.md` §リリースチェックリスト参照）。
+- フォールバック: prebuild の API が壊れた場合は、テンプレートリポジトリ方式（`build.sh` / `build.ps1` を含むリポジトリの fork/clone）に退避できる。`build.sh` は本機構と干渉せず併存する（回帰検証済み）。
+
 ## 7. 不変条件と落とし穴
 
 - **テキスト:** 借用した UTF-8 の `Bytes` と長さを渡す。MoonBit の `String` を C ポインタとして渡したり、NUL 終端の C 文字列契約を用いたりしてはならない。
