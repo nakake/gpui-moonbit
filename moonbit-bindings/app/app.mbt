@@ -36,7 +36,22 @@ const COUNT_KEY : String = "count-label"
 // `HandlerRegistry::dispatch`. No int constants, no int switch.
 
 ///|
-let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.HandlerRegistry::new()
+let handlers : @nakake/gpui-bindings.HandlerRegistry = {
+  // App-level handlers (key / named key / text reach the focused outer
+  // container, not a node) are registered here, in `handlers`' own
+  // initializer. They must NOT live in unreferenced top-level `let`s: MoonBit
+  // only evaluates a top-level binding when something references it, so a
+  // `_`-prefixed registration would be silently dropped and the handler never
+  // fire. `handlers` is referenced by the click-handler lets, `ctx`, and the
+  // tests, so building it always wires these registrations. Click handlers
+  // stay as separate top-level `let`s because `button_row` references them by
+  // name to write their ids into the wire stream.
+  let r = @nakake/gpui-bindings.HandlerRegistry::new()
+  let _ = r.on_key(fn(code, mods) { on_key(code, mods) })
+  let _ = r.on_named_key(fn(id, mods) { on_named_key(id, mods) })
+  let _ = r.on_text(fn(text) { on_text(text) })
+  r
+}
 
 ///|
 let btn_decrement : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
@@ -133,20 +148,6 @@ fn on_text(text : String) -> Unit {
     count.set(store, value)
   }
 }
-
-// App-level handlers (key / named key / text reach the focused outer
-// container, not a node): registered once, fanned out by the registry.
-
-///|
-let _key_handler : Int = handlers.on_key(fn(code, mods) { on_key(code, mods) })
-
-///|
-let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
-  on_named_key(id, mods)
-})
-
-///|
-let _text_handler : Int = handlers.on_text(fn(text) { on_text(text) })
 
 // Render context (RFC 0001 §3.1): components reach the store and handler
 // registry through it. `view` is fixed to slot 0 (the single window).

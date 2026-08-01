@@ -36,7 +36,16 @@ const KEY_SPACE : Int = 32 // ' ' → toggle
 // `HandlerRegistry::dispatch`.
 
 ///|
-let handlers : @nakake/gpui-bindings.HandlerRegistry = @nakake/gpui-bindings.HandlerRegistry::new()
+let handlers : @nakake/gpui-bindings.HandlerRegistry = {
+  // App-level handlers (key / named key reach the focused outer container, not
+  // a node) are registered here, in `handlers`' own initializer, so building
+  // `handlers` (referenced by `btn_toggle`, `ctx`, and the tests) always wires
+  // them. A `_`-prefixed top-level registration would be silently dropped.
+  let r = @nakake/gpui-bindings.HandlerRegistry::new()
+  let _ = r.on_key(fn(code, mods) { on_key(code, mods) })
+  let _ = r.on_named_key(fn(id, mods) { on_named_key(id, mods) })
+  r
+}
 
 ///|
 let btn_toggle : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
@@ -56,17 +65,6 @@ fn on_named_key(id : Int, _mods : Int) -> Unit {
     on.set(store, false)
   }
 }
-
-// App-level handlers (key / named key reach the focused outer container, not a
-// node): registered once, fanned out by the registry.
-
-///|
-let _key_handler : Int = handlers.on_key(fn(code, mods) { on_key(code, mods) })
-
-///|
-let _named_key_handler : Int = handlers.on_named_key(fn(id, mods) {
-  on_named_key(id, mods)
-})
 
 // Render context (RFC 0001 §3.1): components reach the store and handler
 // registry through it. `view` is fixed to slot 0 (the single window).

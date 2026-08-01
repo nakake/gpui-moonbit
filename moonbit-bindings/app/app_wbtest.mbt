@@ -5,6 +5,16 @@
 // `signal_wbtest.mbt`, and the full envelope → rebuild path by the build
 // driver's linked round-trip.
 
+
+///|
+test "app-level key handlers are registered in the registry" {
+  // Regression guard (issue #86): the key/named-key/text handlers must survive
+  // dead-code elimination. If their registration is dropped, dispatching a Key
+  // event through the registry leaves `count` untouched.
+  count.set(store, 100)
+  handlers.dispatch(Key(KEY_K, 0), 0)
+  assert_eq(count.get(store), 101)
+}
 ///|
 test "registered click handlers mutate count" {
   count.set(store, 0)
