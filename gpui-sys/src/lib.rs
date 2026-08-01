@@ -5252,6 +5252,20 @@ mod tests {
 
     // --- EVENT_QUEUE / gpui_event_copy_text (issue #70) --------------------
 
+    /// Serializes every test that touches the process-global `EVENT_QUEUE`
+    /// against the other suites that clear it (the drain-pump tests in
+    /// `async_inject_tests` and the injection tests below all dispatch, and
+    /// every dispatch clears the queue). Without this, a parallel test's
+    /// clear between a push and its copy makes the token dangle — the
+    /// nondeterministic CI failure first seen on the post-#102 main run. The closure also starts
+    /// from an empty queue so tokens are deterministic.
+    fn with_event_queue_test(f: impl FnOnce()) {
+        let _lock = INJECT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_event_queue();
+        f();
+        clear_event_queue();
+    }
+
     /// Test helper: push a payload into `EVENT_QUEUE` and return its token,
     /// mirroring the dispatch sites' push (the queue is cleared after every
     /// dispatch, so a test may seed it directly).
@@ -5267,53 +5281,57 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn copy_text_copies_payload() {
-        let token = push_event_payload(b"hello");
-        let mut buf = [0u8; 8];
-        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), buf.len() as i32);
-        assert_eq!(n, 5);
-        assert_eq!(&buf[..5], b"hello");
-        clear_event_queue();
+        with_event_queue_test(|| {
+            let token = push_event_payload(b"hello");
+            let mut buf = [0u8; 8];
+            let n = gpui_event_copy_text(token, buf.as_mut_ptr(), buf.len() as i32);
+            assert_eq!(n, 5);
+            assert_eq!(&buf[..5], b"hello");
+        });
     }
 
     #[::core::prelude::v1::test]
     fn copy_text_truncates_to_buffer_len() {
-        let token = push_event_payload(b"hello world");
-        let mut buf = [0u8; 5];
-        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), buf.len() as i32);
-        assert_eq!(n, 5);
-        assert_eq!(&buf, b"hello");
-        clear_event_queue();
+        with_event_queue_test(|| {
+            let token = push_event_payload(b"hello world");
+            let mut buf = [0u8; 5];
+            let n = gpui_event_copy_text(token, buf.as_mut_ptr(), buf.len() as i32);
+            assert_eq!(n, 5);
+            assert_eq!(&buf, b"hello");
+        });
     }
 
     #[::core::prelude::v1::test]
     fn copy_text_zero_len_writes_nothing() {
-        let token = push_event_payload(b"abc");
-        let mut buf = [0xAAu8; 4];
-        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), 0);
-        assert_eq!(n, 0);
-        assert_eq!(&buf, &[0xAA; 4]);
-        clear_event_queue();
+        with_event_queue_test(|| {
+            let token = push_event_payload(b"abc");
+            let mut buf = [0xAAu8; 4];
+            let n = gpui_event_copy_text(token, buf.as_mut_ptr(), 0);
+            assert_eq!(n, 0);
+            assert_eq!(&buf, &[0xAA; 4]);
+        });
     }
 
     #[::core::prelude::v1::test]
     fn copy_text_rejects_invalid_arguments() {
-        let token = push_event_payload(b"abc");
-        let mut buf = [0u8; 4];
-        assert_eq!(
-            gpui_event_copy_text(-1, buf.as_mut_ptr(), 4),
-            GPUI_STATUS_INVALID_HANDLE
-        );
-        assert_eq!(gpui_event_copy_text(token, std::ptr::null_mut(), 4), GPUI_STATUS_INVALID_HANDLE);
-        assert_eq!(
-            gpui_event_copy_text(token, buf.as_mut_ptr(), -1),
-            GPUI_STATUS_INVALID_HANDLE
-        );
-        // Token past the end of the queue.
-        assert_eq!(
-            gpui_event_copy_text(token + 1, buf.as_mut_ptr(), 4),
-            GPUI_STATUS_INVALID_HANDLE
-        );
-        clear_event_queue();
+        with_event_queue_test(|| {
+            let token = push_event_payload(b"abc");
+            let mut buf = [0u8; 4];
+            assert_eq!(
+                gpui_event_copy_text(-1, buf.as_mut_ptr(), 4),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(gpui_event_copy_text(token, std::ptr::null_mut(), 4), GPUI_STATUS_INVALID_HANDLE);
+            assert_eq!(
+                gpui_event_copy_text(token, buf.as_mut_ptr(), -1),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            // Token past the end of the queue.
+            assert_eq!(
+                gpui_event_copy_text(token + 1, buf.as_mut_ptr(), 4),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+        });
     }
 
     /// #70 regression: the payload must be valid only during the synchronous
@@ -5321,16 +5339,18 @@ mod tests {
     /// resolves — and the queue holds no stale entries to leak.
     #[::core::prelude::v1::test]
     fn copy_text_token_invalid_after_clear() {
-        let token = push_event_payload(b"leak-me");
-        let mut buf = [0u8; 8];
-        assert_eq!(gpui_event_copy_text(token, buf.as_mut_ptr(), 8), 7);
-        // Dispatch sites clear immediately after mb_dispatch returns.
-        clear_event_queue();
-        assert_eq!(
-            gpui_event_copy_text(token, buf.as_mut_ptr(), 8),
-            GPUI_STATUS_INVALID_HANDLE
-        );
-        assert!(EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        with_event_queue_test(|| {
+            let token = push_event_payload(b"leak-me");
+            let mut buf = [0u8; 8];
+            assert_eq!(gpui_event_copy_text(token, buf.as_mut_ptr(), 8), 7);
+            // Dispatch sites clear immediately after mb_dispatch returns.
+            clear_event_queue();
+            assert_eq!(
+                gpui_event_copy_text(token, buf.as_mut_ptr(), 8),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert!(EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        });
     }
 
     // --- gpui_post_event / injection queue (RFC 0002) ----------------------
