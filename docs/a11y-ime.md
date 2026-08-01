@@ -66,17 +66,17 @@ IME で確定（コミット）されたテキストは既存の経路で動作�
 
 - ルート要素の `on_key_down` ハンドラが `ev.keystroke.key_char` を読み、`typed_text()`（`gpui-sys/src/lib.rs`）が確定文字列（IME 合成結果・マルチ文字キーを含む）を抽出して `EVENT_TEXT` として配送する。MoonBit 側は `gpui_event_copy_text` でペイロードを同期的にコピーする（`moonbit-bindings/app/app.mbt` の `decode` / `on_text`）。
 
-### 2.2 preedit（合成中）/ 候補ウィンドウ — テキスト入力 widget へ繰延（#51c）
+### 2.2 preedit（合成中）/ 候補ウィンドウ — 実装済み（#88、RFC 0003）
 
-合成中のテキスト（preedit / marked text）や候補ウィンドウの制御は、gpui のテキスト入力機構そのものであり、以下が必要になる:
+合成中のテキスト（preedit / marked text）と候補ウィンドウの制御は、テキスト入力 widget（`OP_TEXT_INPUT`、RFC 0003）として実装済みである。gpui のテキスト入力機構を次のように配線した:
 
-- `EntityInputHandler` trait の実装（`gpui-0.2.2/src/input.rs:10`）— `text_for_range` / `selected_text_range` / `marked_text_range` / `unmark_text` / `replace_text_in_range` 等、編集可能なテキストモデルを gpui とプラットフォーム IME の間に提供する。
-- `Window::handle_input(focus_handle, input_handler, cx)`（`gpui-0.2.2/src/window.rs:3400`）— paint 段階で入力ハンドラを登録する。フォーカスされた要素に対してのみ有効。
-- **ステートフルな Rust 側のテキストモデル** — 選択範囲・marked range・テキスト内容を保持し、再構築をまたいで生存する状態。
+- `EntityInputHandler` trait の実装（`gpui-0.2.2/src/input.rs:10`）— Rust 側の `TextInputModel`（確定済み全文・選択範囲・marked range を UTF-16 オフセットで保持）が 8 メソッドに答える。
+- `Window::handle_input(focus_handle, input_handler, cx)`（`gpui-0.2.2/src/window.rs:3400`）— `render_node` が paint 段階で登録する。
+- **ステートフルな Rust 側のテキストモデル** — `FfiView.inputs`（view ごとの `Rc<RefCell<HashMap<i32, Entity<TextInputModel>>>>`）に `input_id` 単位で保持され、再構築を跨いで生存する（`ScrollHandle` と同じ保持パターン、`architecture.md` §3）。
 
-これはすなわち「編集可能なテキスト入力 widget」の実装そのものであり、`framework-gaps.md` の `G6`（widget 種の不足）で **#51c へ繰延済み**の項目である。本 issue（#52、a11y/IME の境界整理）の射程外であり、ここでは実装しない。
+preedit は下線付きで描画され、`bounds_for_range` が `x_for_index` で候補ウィンドウのアンカー矩形を返す。合成の更新（`replace_and_mark_text_in_range`）は Rust 内で完結して再描画のみ起こし、MoonBit には届かない。確定（`replace_text_in_range`）で `EVENT_INPUT_CHANGED` が発火し、MoonBit は `input_text` で確定テキストを pull する（RFC 0003 §3.4–3.5）。IME 合成中の `gpui_input_set_text` は `GPUI_STATUS_BUSY_COMPOSING`（`-13`）で拒否され、合成を壊さない。
 
-確定テキスト（2.1）は widget なしでも配送できているため、IME の「確定結果を受け取る」用途は現状で満たせる。「合成中の表示・候補選択」が必要な本格的なテキスト入力は、#51c のテキスト入力 widget として実装する。
+設計の詳細（Rust を正とする uncontrolled model の決定理由・二重配送の抑止・pull ABI）は [`docs/rfc/0003-text-input-ime.md`](rfc/0003-text-input-ime.md) と [`docs/architecture.md`](architecture.md) §3/§4/§5 に記録されている。
 
 ---
 
@@ -89,4 +89,4 @@ IME で確定（コミット）されたテキストは既存の経路で動作�
 | a11y: フォーカス可視化 | ⏳ 対応可・未配線 | `.focus`/`.in_focus`（`div.rs:1020/1030`）、`G7` の style 拡張で対応 |
 | a11y: フォーカスイベント | ⏭ 見送り | `on_focus_in/out`（`window.rs:3481/3501`）は FocusHandle 購読、安定 id とライフサイクル設計が必要。#51c で再検討 |
 | IME: 確定テキスト | ✅ 動作済み | `key_char` → `EVENT_TEXT`（既存経路） |
-| IME: preedit / 候補ウィンドウ | ⏭ #51c へ繰延 | `EntityInputHandler`（`input.rs:10`）+ `Window::handle_input`（`window.rs:3400`）+ ステートフルなテキストモデル = テキスト入力 widget（`G6`） |
+| IME: preedit / 候補ウィンドウ | ✅ 実装済み（#88、RFC 0003） | テキスト入力 widget（`OP_TEXT_INPUT`）+ `EntityInputHandler`（`input.rs:10`）+ `Window::handle_input`（`window.rs:3400`）+ Rust 側テキストモデル（`FfiView.inputs`）。preedit 下線描画・候補ウィンドウ位置・`EVENT_INPUT_*` + pull ABI |
