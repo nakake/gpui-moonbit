@@ -25,6 +25,66 @@ test "unknown click id is a no-op" {
 }
 
 ///|
+test "new_input_id issues distinct ids sharing the handler counter" {
+  let r = HandlerRegistry::new()
+  let click = r.on_click(fn(_) {  }).to_int()
+  let a = r.new_input_id().to_int()
+  let b = r.new_input_id().to_int()
+  // Ids come off one shared counter: click took 1, the inputs take 2 and 3.
+  assert_eq([click, a, b], [1, 2, 3])
+  if a == b {
+    fail("input ids must be distinct")
+  }
+}
+
+///|
+test "input changed handlers dispatch by input_id only" {
+  let r = HandlerRegistry::new()
+  let log : Array[Int] = []
+  let a = r.new_input_id()
+  let b = r.new_input_id()
+  r.on_input_changed(a, fn(view) { log.push(100 + view) })
+  r.on_input_changed(b, fn(view) { log.push(200 + view) })
+  r.dispatch(InputChanged(a.to_int()), 7)
+  r.dispatch(InputChanged(b.to_int()), 3)
+  assert_eq(log, [107, 203])
+}
+
+///|
+test "input submit handlers dispatch by input_id only" {
+  let r = HandlerRegistry::new()
+  let log : Array[Int] = []
+  let a = r.new_input_id()
+  r.on_submit(a, fn(view) { log.push(view) })
+  r.dispatch(InputSubmit(a.to_int()), 4)
+  assert_eq(log, [4])
+}
+
+///|
+test "unknown input id is a no-op for both input kinds" {
+  let r = HandlerRegistry::new()
+  let log : Array[Int] = []
+  let a = r.new_input_id()
+  r.on_input_changed(a, fn(_) { log.push(1) })
+  r.on_submit(a, fn(_) { log.push(2) })
+  r.dispatch(InputChanged(999), 0)
+  r.dispatch(InputSubmit(999), 0)
+  assert_eq(log, [])
+}
+
+///|
+test "re-registering an input id replaces the handler" {
+  // Single-dispatch per id, like click: a second registration wins.
+  let r = HandlerRegistry::new()
+  let log : Array[Int] = []
+  let a = r.new_input_id()
+  r.on_submit(a, fn(_) { log.push(1) })
+  r.on_submit(a, fn(_) { log.push(2) })
+  r.dispatch(InputSubmit(a.to_int()), 0)
+  assert_eq(log, [2])
+}
+
+///|
 test "key handlers fan out in registration order" {
   let r = HandlerRegistry::new()
   let log : Array[Int] = []
@@ -69,5 +129,6 @@ test "ids are shared across handler kinds" {
   let b = r.on_key(fn(_, _) {  })
   let c = r.on_named_key(fn(_, _) {  })
   let d = r.on_text(fn(_) {  })
-  assert_eq([a, b, c, d], [1, 2, 3, 4])
+  let e = r.new_input_id().to_int()
+  assert_eq([a, b, c, d, e], [1, 2, 3, 4, 5])
 }

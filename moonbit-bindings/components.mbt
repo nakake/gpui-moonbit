@@ -60,3 +60,34 @@ pub fn button(cb : CommandBuffer, props : ButtonProps) -> Unit {
   cb.text(props.label, 255, 255, 255, 18.0)
   cb.add_child() // attach the label to the button; button stays on top
 }
+
+///|
+/// `text_input` コンポーネントの props です（RFC 0003 §3.6）。`key` は再構築を跨ぐ安定
+/// 識別子（`set_key` に渡す）、`input_id` は `HandlerRegistry::new_input_id` の発行値、
+/// `placeholder` は空欄時の薄表示です。イベントハンドラ（`EVENT_INPUT_CHANGED` /
+/// `EVENT_INPUT_SUBMIT`）は props に持たず、アプリ側で `on_input_changed` / `on_submit`
+/// を登録します（RFC 0003 §3.4: 通知は input_id だけ、値は pull）。
+pub(all) struct TextInputProps {
+  /// 安定識別子（`set_key` に渡す。再構築を跨ぐ同一性）。
+  key : String
+  /// テキスト入力 widget の id（`HandlerRegistry::new_input_id` の発行値）。
+  input_id : InputId
+  /// 空欄時の薄表示テキスト。
+  placeholder : String
+}
+
+///|
+/// 編集可能な 1 行テキスト入力をコマンドバッファに出力する再利用コンポーネントです
+/// （RFC 0003、issue #88）。枠・角丸・padding を付けた div の中に `OP_TEXT_INPUT` の
+/// leaf ノードを接続します。編集バッファ・選択範囲・IME preedit は Rust 側のテキスト
+/// モデルが保持し、再構築を跨いで生存します。出力後、外枠 div はスタックトップに残る
+/// ため、呼び出し元は `add_child` で親に接続できます。
+pub fn text_input(cb : CommandBuffer, props : TextInputProps) -> Unit {
+  cb.div()
+  cb.set_key(props.key)
+  cb.set_border(1.0, 120, 120, 140)
+  cb.set_rounded(6.0)
+  cb.set_padding(8.0)
+  cb.text_input(props.input_id.to_int(), props.placeholder)
+  cb.add_child() // attach the input leaf to the frame; frame stays on top
+}

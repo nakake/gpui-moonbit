@@ -4,8 +4,8 @@
 // data_a, data_b)` callback; the five i32 slots carry a versioned envelope
 // (architecture.md §4b):
 //   slot 0 = ABI_VERSION (a stale Rust binary is rejected at runtime)
-//   slot 1 = event kind (EVENT_CLICK / EVENT_KEY / EVENT_TEXT / EVENT_NAMED_KEY)
-//   slot 2 = view id (routes the rebuild target)
+//   slot 1 = event kind (EVENT_CLICK / EVENT_KEY / EVENT_TEXT / EVENT_NAMED_KEY
+//            / EVENT_ASYNC / EVENT_INPUT_CHANGED / EVENT_INPUT_SUBMIT)
 //   slot 3–4 = kind-dependent payload
 // `decode_event` turns the raw slots into a typed `Event` that the handler
 // registry dispatches. `EVENT_TEXT` carries a token + byte length; the UTF-8
@@ -24,6 +24,8 @@ pub(all) enum Event {
   Text(String) // 入力テキスト（UTF-8 デコード済み）
   NamedKey(Int, Int) // named_key_id, modifier bits
   Async(Bytes) // 注入イベント（RFC 0002）。ペイロードは opaque bytes で解釈は消費側の契約
+  InputChanged(Int) // テキスト入力の変化通知（RFC 0003）。input_id を運ぶ。ペイロードなし（pull 型）
+  InputSubmit(Int) // テキスト入力の確定（RFC 0003、フォーカス中の Enter）。input_id を運ぶ
   Unknown
 }
 
@@ -66,6 +68,12 @@ pub fn decode_event(
     // rides the same token+copy mechanism as EVENT_TEXT and must be copied
     // synchronously before dispatch returns.
     Async(copy_async_payload(data_a, data_b))
+  } else if kind == EVENT_INPUT_CHANGED {
+    // RFC 0003 §3.4: data_a = input_id, data_b = 0. No payload rides the
+    // envelope; the current text is pulled with `input_text(view, input_id)`.
+    InputChanged(data_a)
+  } else if kind == EVENT_INPUT_SUBMIT {
+    InputSubmit(data_a)
   } else {
     Unknown
   }

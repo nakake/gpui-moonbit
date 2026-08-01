@@ -33,6 +33,7 @@ pub enum GpuiError {
   KeyNotFound // GPUI_STATUS_KEY_NOT_FOUND (-10)
   QueueFull // GPUI_STATUS_QUEUE_FULL (-11)
   PayloadTooLarge // GPUI_STATUS_PAYLOAD_TOO_LARGE (-12)
+  BusyComposing // GPUI_STATUS_BUSY_COMPOSING (-13)
   Unknown(Int) // any other code
 }
 
@@ -54,6 +55,7 @@ pub fn classify_status(code : Int) -> GpuiError {
     -10 => KeyNotFound
     -11 => QueueFull
     -12 => PayloadTooLarge
+    -13 => BusyComposing
     _ => Unknown(code)
   }
 }
@@ -76,6 +78,8 @@ pub fn status_message(code : Int) -> String {
     QueueFull => "async injection queue is full: retry later, coalesce, or drop"
     PayloadTooLarge =>
       "async injection payload exceeds the per-entry size limit"
+    BusyComposing =>
+      "text input is composing (IME preedit active): set_text refused"
     Unknown(c) => "unknown status code \{c}"
   }
 }
@@ -96,6 +100,7 @@ pub fn GpuiError::code(self : GpuiError) -> Int {
     KeyNotFound => -10
     QueueFull => -11
     PayloadTooLarge => -12
+    BusyComposing => -13
     Unknown(c) => c
   }
 }
@@ -242,6 +247,25 @@ pub fn CommandBuffer::text(
   self.buf.write_byte(clamp_color_component(g).to_byte())
   self.buf.write_byte(clamp_color_component(b).to_byte())
   self.buf.write_float_le(size)
+}
+
+///|
+/// 新しいテキスト入力 widget をプッシュします（RFC 0003、issue #88）。`OP_TEXT` と同じく
+/// leaf ノードで、`add_child` で親 div に接続します。`input_id` は `HandlerRegistry::
+/// new_input_id` で発行した型付き id の raw 値で、envelope（`EVENT_INPUT_CHANGED` /
+/// `EVENT_INPUT_SUBMIT`）と読み書き ABI（`input_text` / `input_set_text`）で widget を
+/// 指します。`placeholder` は空欄時の薄表示であり、初期値・現在値ではありません
+/// （値の設定は `input_set_text`）。編集バッファ・選択範囲・IME preedit は Rust 側の
+/// テキストモデルが保持し、再構築を跨いで生存します。スタイル（枠・padding 等）は
+/// 親 div のスタイル opcode で指定してください。
+pub fn CommandBuffer::text_input(
+  self : CommandBuffer,
+  input_id : Int,
+  placeholder : String,
+) -> Unit {
+  self.op(OP_TEXT_INPUT)
+  self.buf.write_int_le(input_id)
+  self.write_str(placeholder)
 }
 
 ///|
@@ -825,6 +849,57 @@ pub fn copy_async_payload(token : Int, len : Int) -> Bytes {
     buf[0:copied].to_owned()
   } else {
     b""
+  }
+}
+
+// --- Text input pull API (RFC 0003, issue #88) ------------------------------
+//
+// The editable text model lives Rust-side (RFC 0003 §2): MoonBit never mirrors
+// the buffer and pulls the current content explicitly when it needs it —
+// typically inside an EVENT_INPUT_SUBMIT handler. `EVENT_INPUT_*` envelopes
+// carry only the input_id (no payload), so change notifications stay light
+// even for long buffers. All three calls share the main-thread-only contract
+// of the dispatch callback.
+
+///|
+/// `view` にコミット済みのツリーで、`input_id` のテキスト入力の現在内容を UTF-8
+/// デコード済みの文字列として読み戻します（RFC 0003 §3.5）。len 取得 → バッファ確保
+/// → コピーの 2 段 FFI 呼び出しを隠蔽します。失敗時は負の `GPUI_STATUS_*` コードを
+/// `Err(status)` で返します（未知の input_id は `INVALID_HANDLE`）。
+pub fn input_text(view : Int, input_id : Int) -> Result[String, Int] {
+  let len = gpui_input_text_len_ffi(view, input_id)
+  if len < 0 {
+    return Err(len)
+  }
+  if len == 0 {
+    return Ok("")
+  }
+  let buf = Bytes::make(len, b'\x00')
+  let copied = gpui_input_copy_text_ffi(view, input_id, buf, len)
+  if copied < 0 {
+    Err(copied)
+  } else {
+    Ok(@utf8.decode(buf[0:copied]) catch { _ => "" })
+  }
+}
+
+///|
+/// `view` にコミット済みのツリーで、`input_id` のテキスト入力の現在内容を `text` に
+/// 差し替え、選択範囲を末尾へ移動します（RFC 0003 §3.5）。IME 合成中（preedit あり）は
+/// 合成を壊さないため `Err(GPUI_STATUS_BUSY_COMPOSING)`（`-13`）を返して拒否します。
+/// 典型的な利用は `EVENT_INPUT_SUBMIT` ハンドラ内で `input_text` を読んだ直後に
+/// `input_set_text(view, input_id, "")` でクリアすることです。
+pub fn input_set_text(
+  view : Int,
+  input_id : Int,
+  text : String,
+) -> Result[Unit, Int] {
+  let utf8 = to_utf8_bytes(text)
+  let status = gpui_input_set_text_ffi(view, input_id, utf8, utf8.length())
+  if status == 0 {
+    Ok(())
+  } else {
+    Err(status)
   }
 }
 
