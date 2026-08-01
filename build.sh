@@ -185,7 +185,7 @@ echo "    Rust library dir: $RUST_LIB_DIR"
 # + name determine the symbol; keep in sync if you rename the callback.
 PKG_FN_SUFFIX="3app8dispatch"   # …/app :: dispatch  (see notes for the scheme)
 
-echo "==> [0/5] Regenerate ABI constants and C FFI bindings"
+echo "==> [0/5] Regenerate the C header, ABI constants, and C FFI bindings"
 awk '
   BEGIN { print "// Auto-generated from gpui-sys/abi.toml. Do not edit manually." }
   # Grammar: [section] headers or key = non-negative-integer, with whitespace/comments.
@@ -213,6 +213,11 @@ awk '
   END { if (failed) exit 1 }
 ' "$GSYS/abi.toml" > "$MB/abi_constants.mbt"
 ( cd "$MB" && moon fmt abi_constants.mbt )
+# The header must reflect any new Rust C export BEFORE bindgen reads it:
+# bindgen's output gates `moon check`, which gates the `cargo build` that
+# would otherwise be the only thing regenerating the header (issue #71).
+# gen-header depends on cbindgen alone, so this is cheap (no gpui build).
+( cd "$ROOT/gen-header" && cargo run -- "$GSYS" "$GSYS/include/gpui_sys.h" )
 ( cd "$ROOT/bindgen-moonbit" && cargo run -- "$GSYS/include/gpui_sys.h" "$MB/gpui-bindings-ffi.mbt" )
 ( cd "$MB" && moon fmt gpui-bindings-ffi.mbt )
 if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && \
@@ -221,7 +226,11 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && \
 fi
 
 echo "==> [1a/5] MoonBit typecheck"
-( cd "$MB" && moon check ) || { echo "ERROR: MoonBit compilation failed" >&2; exit 1; }
+( cd "$MB" && moon check ) || {
+  echo "ERROR: MoonBit compilation failed" >&2
+  echo "HINT: if you added a new Rust C export, the C header must be regenerated; run ./build.sh (it regenerates the header before bindgen)." >&2
+  exit 1
+}
 
 echo "==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)"
 write_moon_pkg "$PKG_TMPL" "$MB/cmd/main/moon.pkg" ""

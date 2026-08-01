@@ -16,6 +16,9 @@ pub const EVENT_TEXT : Int = 3
 pub const EVENT_NAMED_KEY : Int = 4
 
 ///|
+pub const EVENT_ASYNC : Int = 5
+
+///|
 pub const MOD_CTRL : Int = 1
 
 ///|

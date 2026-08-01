@@ -56,6 +56,71 @@ LD_LIBRARY_PATH=$PWD/../.linux-libs env -u WAYLAND_DISPLAY \
 
 MoonBit 側の型検査だけなら、このディレクトリで `moon check`（および `moon test`）を実行できます。
 
+## 依存として消費する（prebuild 方式、#93）
+
+本モジュールは `--moonbit-unstable-prebuild`（実験的機能）により、**path / git 依存として消費できます**。コンシューマの `moon build` 時に、同梱の `build.py` が Rust staticlib をビルドし、リンクフラグを自動伝播します。**Linux x86_64 で検証済み。macOS / Windows は未検証**です。
+
+### 1. 依存を追加する
+
+DSL 形式の `moon.mod` は registry 依存しか記述できないため、**JSON 形式の `moon.mod.json`** を使います（mooncakes 未公開のため、現状は path / git 依存のみ）:
+
+```jsonc
+// moon.mod.json
+{
+  "name": "your/app",
+  "version": "0.1.0",
+  "source": ".",
+  "deps": {
+    "nakake/gpui-bindings": { "path": "/path/to/gpui-moonbit/moonbit-bindings" }
+  }
+}
+```
+
+git 依存の場合は `{ "git": { "url": "https://github.com/nakake/gpui-moonbit", "subdir": "moonbit-bindings" } }` の形式を使います（未検証）。
+
+### 2. 実行ファイルの moon.pkg で 3 パッケージを import する
+
+```moonbit
+// exe の moon.pkg
+import {
+  "nakake/gpui-bindings",       // 高水準 API（CommandBuffer / build_tree / run_window）
+  "nakake/gpui-bindings/app",   // app.dispatch を保持（callback リンク解決に必須）
+  "nakake/gpui-bindings/link",  // Rust staticlib のリンクフラグ伝播を受ける
+}
+
+options("is-main": true)
+```
+
+`link` パッケージはコードを含まず、prebuild のリンクフラグ伝播の受け口としてだけ存在します。**ライブラリパッケージやテストファイルからは import しないでください**（テスト実行ファイルにフラグが伝播し、tcc リンカが失敗します）。
+
+### 3. main で app.dispatch を明示保持する
+
+Rust staticlib は `app.dispatch` のマングルシンボルを未解決参照として持つため、dead-code elimination で消されないよう明示保持が必須です:
+
+```moonbit
+fn main {
+  let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
+  ignore(_keep)
+  ignore(@nakake/gpui-bindings/link.LINK_MARKER)
+
+  // ... アプリ本体（build_tree / run_window）
+}
+```
+
+### 4. ビルドして実行する
+
+```bash
+moon build --target native
+# Linux / WSLg（X11 経路を明示。システムの XCB/XKB が見つからない場合だけ LD_LIBRARY_PATH 指定）
+env -u WAYLAND_DISPLAY ./_build/native/debug/build/main/main.exe
+```
+
+初回ビルドでは `build.py` が `cargo build` を実行するため時間がかかります（Rust toolchain 必須）。2 回目以降は cargo のインクリメンタルビルドで高速です。
+
+### フォールバック（テンプレートリポジトリ方式）
+
+`--moonbit-unstable-prebuild` は「extremely experimental」で API が予告なく変わり得ます。壊れた場合は、本リポジトリを fork / clone して `build.sh` / `build.ps1` を使うテンプレートリポジトリ方式に退避できます（[スパイレポート](../docs/spikes/2026-07-24-packaging-feasibility.md) の方式 B）。mooncakes 公開は、実験的機能への依存を公開パッケージに固定しないため、意図的に見送っています（[`docs/versioning.md`](../docs/versioning.md) 参照）。
+
 ## 使い方
 
 アプリの実装パターンは [`app/app.mbt`](app/app.mbt)（Counter）が手本です。低水準のコマンドバッファの上に、フレームワーク層（状態・ハンドラ・コンポーネント・イベントループ）を載せます。
@@ -170,15 +235,18 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
 ```
 
 - slot 0 `version`: 常に `ABI_VERSION`（現在は `4`）。不一致なら `framework_dispatch` がハンドラを実行せず `0` を返して古い Rust バイナリを拒否します
-- slot 1 `kind`: イベント種別（`EVENT_CLICK` = 1、`EVENT_KEY` = 2、`EVENT_TEXT` = 3、`EVENT_NAMED_KEY` = 4）
+- slot 1 `kind`: イベント種別（`EVENT_CLICK` = 1、`EVENT_KEY` = 2、`EVENT_TEXT` = 3、`EVENT_NAMED_KEY` = 4、`EVENT_ASYNC` = 5）
 - slot 2 `view`: 再構築対象の view id
 - slot 3–4 `data_a` / `data_b`: 種別依存
   - `EVENT_CLICK`: `data_a` = click_id（`HandlerId` の raw 値）、`data_b` = 0
   - `EVENT_KEY`: `data_a` = codepoint、`data_b` = modifier bits
   - `EVENT_TEXT`: `data_a` = token、`data_b` = byte 長（ペイロードは `gpui_event_copy_text` でコピー）
   - `EVENT_NAMED_KEY`: `data_a` = named_key id（`KEY_ENTER` / `KEY_ESCAPE` / `KEY_UP` …）、`data_b` = modifier bits
+  - `EVENT_ASYNC`: `data_a` = token、`data_b` = byte 長（ペイロードは `copy_async_payload` でコピー。RFC 0002 の非同期注入経路）
 
 `dispatch` は状態が変わった場合に `1`、変わらない場合に `0` を返します。`framework_dispatch` は配送の前後で store の dirty を区切り、`set` が 1 度でも起きたときだけ再構築コールバックを呼んで `1` を返します。`1` のときだけ Rust 側が再描画通知（`cx.notify()`）を行います。再構築に失敗しても Rust 側は旧ツリーを保持しているため、dirty に基づき `1` を返して構いません。
+
+`EVENT_ASYNC` は非同期イベント注入（RFC 0002）の配送種別です。外部 native コードが `gpui_post_event(view, ptr, len)`（ラッパー `post_event`）で任意スレッドからペイロードを push すると、メインスレッドが `EVENT_ASYNC` として `dispatch` に届けます。ペイロードは opaque bytes で、解釈（UTF-8 テキストか否か等）はハンドラ側の契約です。消費者例は `examples/stream` を参照してください。
 
 MoonBit native の `Int` は 32-bit であり、この callback とコマンドバッファの境界も **i32** です（`gpui_abi_probe` で機械検証済み）。値は i32 範囲で扱ってください。
 

@@ -11,6 +11,16 @@
 
 **原理的に可能。** ただし唯一の経路である `--moonbit-unstable-prebuild` は実験的機能であり、API 安定性の保証がない。
 
+> **フォローアップ（#93、2026-08-01）**: 方式 A を実 gpui-sys で実装・検証済み（`moonbit-bindings/build.py`、Linux x86_64）。確定した事実:
+> - **起動プロトコル**: `python -- build.py`、cwd = モジュールルート、stdin = `{"env", "paths": {"module_root", "out_dir": "TODO"}}`、stdout = `BuildScriptOutput` JSON 1 個（全バイトがパースされるためログは stderr へ）。`out_dir` は未実装。
+> - **LinkConfig**: `{ package, link_flags(shlex文字列), link_libs(-l前置), link_search_paths(-L前置) }`。raw フラグ（`-l:libfoo.so.N` 等）は `link_flags` へ。`package` は自モジュール内パッケージのみ指定可。
+> - **伝播**: 依存クロージャの全パッケージの LinkConfig を最終 exe リンク時に集約（native バックエンド専用）。
+> - **`moon check` は prebuild スキップ**、`moon build`/`moon test` は実行。`rerun_if` は無効で毎回再実行。
+> - **path 依存は in-place 参照**（コピーしない）ため、モジュールの sibling（`gpui-sys/`）に到達可能。
+> - **DSL の `moon.mod` は registry 依存のみ**。path/git 依存は JSON 形式の `moon.mod.json` が必要。
+> - **設計上の発見**: LinkConfig をルートパッケージに付けると `moon test` のテスト exe にも伝播し tcc が失敗する。リンク専用 `link/` パッケージを新設して回避した。
+> - マングルシンボルは決定的に計算可能（ブートストラップビルド不要）。cargo build は warm で実用的な時間。
+
 ---
 
 ## 検証した経路と結果
@@ -112,9 +122,9 @@ app モジュール (spike/app)
 
 ## 未検証・今後の課題
 
-- [ ] macOS / Windows での prebuild 動作確認（シェル実行の可否、パス形式）
-- [ ] mooncakes 公開時の `include` で Rust ソースが正しくパッケージされるか
-- [ ] prebuild スクリプトへの `host`/`target` 情報の渡り方（`BuildScriptEnvironment.paths` の詳細）
-- [ ] `vars` 出力で `${build.<var>}` を `moon.pkg` の `cc-link-flags` に展開する経路（per-OS フラグの動的生成）
-- [ ] 実際の gpui-sys（1.2GB の debug `.a`）で prebuild 内の cargo build が実用的な時間で完了するか
-- [ ] `--moonbit-unstable-prebuild` の API 安定性に関する moonbitlang/moon の issue/roadmap 調査
+- [ ] macOS / Windows での prebuild 動作確認（シェル実行の可否、パス形式）— **#93 スコープ外。未検証のまま PR に明記**
+- [ ] mooncakes 公開時の `include` で Rust ソースが正しくパッケージされるか — **公開を見送ったため保留**（#93 決定）
+- [x] prebuild スクリプトへの `host`/`target` 情報の渡り方 — **確定**: stdin の `BuildScriptEnvironment` に `paths.module_root` は来るが host/target はコメントアウト済みで来ない。`rustc -vV` で self-detect する（#93）
+- [x] `vars` 出力で `${build.<var>}` を展開する経路 — **不要と判明**: LinkConfig の `link_flags` に直接フラグを載せる方式で足りた（#93）
+- [x] 実際の gpui-sys（1.2GB の debug `.a`）で prebuild 内の cargo build が実用的な時間で完了するか — **完了**: warm ビルドは数秒。cold は初回のみ（#93）
+- [x] `--moonbit-unstable-prebuild` の API 安定性に関する調査 — **実施**: moon ソース（main @ 2026-07-31）からプロトコルを確定。LinkConfig に "merely a POC" 注記、`rerun_if` は "DOES NOT WORK NOW"。API は不安定と確認（#93）

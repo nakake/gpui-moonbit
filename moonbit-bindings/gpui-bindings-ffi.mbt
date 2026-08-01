@@ -2,6 +2,10 @@
 // Do not edit manually
 
 ///|
+#borrow(ptr)
+extern "C" fn gpui_post_event_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "gpui_post_event"
+
+///|
 #borrow(buf)
 extern "C" fn gpui_event_copy_text_ffi(
   token : Int,

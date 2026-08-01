@@ -35,6 +35,10 @@ pub type NamedKeyHandler = (Int, Int) -> Unit
 pub type TextHandler = (String) -> Unit
 
 ///|
+/// 非同期注入ハンドラ（RFC 0002。opaque ペイロードを受け取ります。解釈は消費側の契約）。
+pub type AsyncHandler = (Bytes) -> Unit
+
+///|
 /// クリックハンドラの型付き id です。中身は `HandlerRegistry` が発行する整数ですが、
 /// 型で区別することで生の `click_id`（envelope の `data_a`）や他の整数と混同する
 /// ことを防ぎます。`set_on_click` には `to_int()` で渡します。
@@ -58,6 +62,7 @@ pub(all) struct HandlerRegistry {
   key : Array[(Int, KeyHandler)]
   named_key : Array[(Int, NamedKeyHandler)]
   text : Array[(Int, TextHandler)]
+  async_ : Array[(Int, AsyncHandler)]
   mut next_id : Int
 }
 
@@ -65,7 +70,7 @@ pub(all) struct HandlerRegistry {
 /// 空のレジストリを作成します。id は 1 から単調に発行されます（0 は「未登録」の
 /// 慣習値として予約されます）。
 pub fn HandlerRegistry::new() -> HandlerRegistry {
-  { click: Map([]), key: [], named_key: [], text: [], next_id: 1 }
+  { click: Map([]), key: [], named_key: [], text: [], async_: [], next_id: 1 }
 }
 
 ///|
@@ -111,6 +116,18 @@ pub fn HandlerRegistry::on_text(self : HandlerRegistry, h : TextHandler) -> Int 
 }
 
 ///|
+/// 非同期注入ハンドラ（RFC 0002）を登録し、id を発行します。登録順の全配信です。
+pub fn HandlerRegistry::on_async(
+  self : HandlerRegistry,
+  h : AsyncHandler,
+) -> Int {
+  let id = self.next_id
+  self.next_id = id + 1
+  self.async_.push((id, h))
+  id
+}
+
+///|
 /// デコード済みの `Event` を対応する型付きハンドラへ配送します。`dispatch` から
 /// 呼ばれます。未知のクリック id は no-op です（従来の `on_click` の else 分岐に相当）。
 pub fn HandlerRegistry::dispatch(
@@ -135,6 +152,10 @@ pub fn HandlerRegistry::dispatch(
     NamedKey(id, mods) =>
       for entry in self.named_key {
         (entry.1)(id, mods)
+      }
+    Async(payload) =>
+      for entry in self.async_ {
+        (entry.1)(payload)
       }
     Unknown => ()
   }

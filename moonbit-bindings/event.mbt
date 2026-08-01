@@ -23,6 +23,7 @@ pub(all) enum Event {
   Key(Int, Int) // codepoint, modifier bits
   Text(String) // 入力テキスト（UTF-8 デコード済み）
   NamedKey(Int, Int) // named_key_id, modifier bits
+  Async(Bytes) // 注入イベント（RFC 0002）。ペイロードは opaque bytes で解釈は消費側の契約
   Unknown
 }
 
@@ -60,6 +61,11 @@ pub fn decode_event(
     }
   } else if kind == EVENT_NAMED_KEY {
     NamedKey(data_a, data_b)
+  } else if kind == EVENT_ASYNC {
+    // RFC 0002 §3.5: data_a = token, data_b = byte length. The opaque payload
+    // rides the same token+copy mechanism as EVENT_TEXT and must be copied
+    // synchronously before dispatch returns.
+    Async(copy_async_payload(data_a, data_b))
   } else {
     Unknown
   }

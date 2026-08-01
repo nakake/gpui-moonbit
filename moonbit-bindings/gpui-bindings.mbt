@@ -31,6 +31,8 @@ pub enum GpuiError {
   NoRoot // GPUI_STATUS_NO_ROOT (-8)
   DuplicateKey // GPUI_STATUS_DUPLICATE_KEY (-9)
   KeyNotFound // GPUI_STATUS_KEY_NOT_FOUND (-10)
+  QueueFull // GPUI_STATUS_QUEUE_FULL (-11)
+  PayloadTooLarge // GPUI_STATUS_PAYLOAD_TOO_LARGE (-12)
   Unknown(Int) // any other code
 }
 
@@ -50,6 +52,8 @@ pub fn classify_status(code : Int) -> GpuiError {
     -8 => NoRoot
     -9 => DuplicateKey
     -10 => KeyNotFound
+    -11 => QueueFull
+    -12 => PayloadTooLarge
     _ => Unknown(code)
   }
 }
@@ -69,6 +73,9 @@ pub fn status_message(code : Int) -> String {
     NoRoot => "command buffer committed without OP_SET_ROOT"
     DuplicateKey => "duplicate explicit key in the committed tree"
     KeyNotFound => "no keyed text node matches in the committed tree"
+    QueueFull => "async injection queue is full: retry later, coalesce, or drop"
+    PayloadTooLarge =>
+      "async injection payload exceeds the per-entry size limit"
     Unknown(c) => "unknown status code \{c}"
   }
 }
@@ -87,6 +94,8 @@ pub fn GpuiError::code(self : GpuiError) -> Int {
     NoRoot => -8
     DuplicateKey => -9
     KeyNotFound => -10
+    QueueFull => -11
+    PayloadTooLarge => -12
     Unknown(c) => c
   }
 }
@@ -766,6 +775,56 @@ pub fn run_window(
     Ok(())
   } else {
     Err(status)
+  }
+}
+
+// --- Async event injection (RFC 0002, issue #84) ---------------------------
+//
+// `gpui_post_event` lets any thread push an opaque payload into a bounded
+// queue; the main thread drains it and dispatches each entry as `EVENT_ASYNC`
+// through the same `dispatch` callback the input events use. The payload rides
+// the `EVENT_QUEUE` token+copy mechanism, so the handler copies it
+// synchronously with `copy_async_payload` before `dispatch` returns.
+
+///|
+/// 任意のスレッドから `view` 宛ての非同期イベントを注入します（RFC 0002 §3.1）。
+/// ペイロードは呼び出し中にコピーされ、呼び出しは即座に戻ります（ブロックしません）。
+/// 本体は opaque なバイト列で、ライブラリは一切解釈しません。フレーミングは生産者と
+/// MoonBit 側の `Event::Async` ハンドラの間の契約です。
+///
+/// `view` は宛先の view id（`VIEWS` の index）で、負値は即座に失敗します。未知の view
+/// 宛ては post 自体は成功しますが、drain 時に破棄されます（RFC 0002 §6-2）。`payload`
+/// は長さ 0 でもよく、「何かが起きた」をペイロードなしで伝えられます。
+///
+/// 戻り値: 成功は `Ok(())`。失敗は `Err(status)` で、`GPUI_STATUS_INVALID_HANDLE`
+/// （負の view、または非ゼロ長でヌルポインタ）、`GPUI_STATUS_PAYLOAD_TOO_LARGE`
+/// （1 エントリの上限超過）、`GPUI_STATUS_QUEUE_FULL`（キュー満杯: 後で再試行するか、
+/// 集約・破棄してください。ライブラリはブロックも破棄も集約もしません）のいずれかです。
+/// ウィンドウ起動前の post もキューに積まれ、起動後の最初の drain で配送されます。
+pub fn post_event(view : Int, payload : Bytes) -> Result[Unit, Int] {
+  let status = gpui_post_event_ffi(view, payload, payload.length())
+  if status == 0 {
+    Ok(())
+  } else {
+    Err(status)
+  }
+}
+
+///|
+/// `EVENT_ASYNC` ディスパッチ中に、そのペイロードを同期的にコピーして返します。
+/// `token` / `len` は `dispatch` の `data_a` / `data_b` です。ペイロードは `dispatch`
+/// が戻るまでの間だけ有効なので、ハンドラはこの呼び出しで即座にコピーしなければ
+/// なりません（`EVENT_TEXT` と同じ契約）。`len == 0` のときは空の `Bytes` を返します。
+pub fn copy_async_payload(token : Int, len : Int) -> Bytes {
+  if len <= 0 {
+    return b""
+  }
+  let buf = Bytes::make(len, b'\x00')
+  let copied = gpui_event_copy_text_ffi(token, buf, len)
+  if copied > 0 {
+    buf[0:copied].to_owned()
+  } else {
+    b""
   }
 }
 

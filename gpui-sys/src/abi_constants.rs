@@ -5,6 +5,7 @@ pub(crate) const EVENT_CLICK: i32 = 1;
 pub(crate) const EVENT_KEY: i32 = 2;
 pub(crate) const EVENT_TEXT: i32 = 3;
 pub(crate) const EVENT_NAMED_KEY: i32 = 4;
+pub(crate) const EVENT_ASYNC: i32 = 5;
 pub(crate) const MOD_CTRL: i32 = 1;
 pub(crate) const MOD_ALT: i32 = 2;
 pub(crate) const MOD_SHIFT: i32 = 4;

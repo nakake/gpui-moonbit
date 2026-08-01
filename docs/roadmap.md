@@ -13,7 +13,7 @@
 ### 未完了
 - 安定した利用者向け API と、より広い GPUI surface。
 - コンポーネントモデルと状態管理の設計 RFC（`G11`〜`G14`）: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
-- 配布整備（#48）: マニフェスト整備（`G1`）とバージョニング方針（`G4`、[`versioning.md`](versioning.md) + [`CHANGELOG.md`](../CHANGELOG.md)）は完了。prebuild パイプライン（`G2`）と macOS 署名（`G5`）は別トラックで保留。
+- 配布整備（#48）: マニフェスト整備（`G1`）とバージョニング方針（`G4`、[`versioning.md`](versioning.md) + [`CHANGELOG.md`](../CHANGELOG.md)）は完了。prebuild パイプライン（`G2`、#93）は Linux で検証済み（macOS/Windows 未検証）。mooncakes 公開と macOS 署名（`G5`）は保留。
 - アクティブな root CI（現在は無い）。
 - Web/WASM を含む将来の展開。
 
