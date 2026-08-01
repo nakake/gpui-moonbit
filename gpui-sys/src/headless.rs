@@ -58,6 +58,7 @@ pub fn layout_bounds(
         focus: cx.focus_handle(),
         view: 0,
         scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+        inputs: Rc::new(RefCell::new(HashMap::new())),
     });
 
     // `add_window_view`'s initial draw leaves the rendered tree in the
@@ -154,6 +155,7 @@ pub fn setup_async_injection(cx: &mut TestAppContext) -> AsyncInjectionTest {
         focus: cx.focus_handle(),
         view: 0,
         scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+        inputs: Rc::new(RefCell::new(HashMap::new())),
     });
     vcx.update(|window, _| window.refresh());
     cx.update(|app| crate::register_view(app, 0, view.downgrade()));

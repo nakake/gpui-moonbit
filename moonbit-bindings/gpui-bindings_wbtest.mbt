@@ -436,6 +436,37 @@ test "command buffer set_tab_stop wire format matches the Rust decoder layout" {
   assert_eq(b.length(), 13)
 }
 
+// --- Text input wire format (RFC 0003, issue #88) ---------------------------
+
+///|
+test "command buffer text_input wire format matches the Rust decoder layout" {
+  // OP_TEXT_INPUT is ABI-frozen at 38 (RFC 0003 §4); pin the value, not just
+  // the generated constant, so a toml renumbering fails here loudly.
+  assert_eq(OP_TEXT_INPUT, 38)
+  let cb = CommandBuffer::new()
+  cb.text_input(7, "あ")
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_TEXT_INPUT | input_id i32 | u32 len | UTF-8 placeholder.
+  assert_eq(b[8].to_int(), OP_TEXT_INPUT)
+  assert_eq(read_i32_le(b, 9), 7)
+  assert_eq(read_u32_le(b, 13), 3) // "あ" = E3 81 82
+  assert_eq(b[17], b'\xE3')
+  assert_eq(b[18], b'\x81')
+  assert_eq(b[19], b'\x82')
+  assert_eq(b.length(), 20)
+}
+
+///|
+test "command buffer text_input with an empty placeholder" {
+  let cb = CommandBuffer::new()
+  cb.text_input(1, "")
+  let b = cb.to_bytes()
+  assert_eq(b[8].to_int(), OP_TEXT_INPUT)
+  assert_eq(read_i32_le(b, 9), 1)
+  assert_eq(read_u32_le(b, 13), 0)
+  assert_eq(b.length(), 17)
+}
+
 // --- G23: MoonBit native Int is a 32-bit two's-complement machine word ------
 //
 // The whole Rust↔MoonBit bridge assumes `Int` == `i32` across the C boundary.
@@ -462,6 +493,7 @@ test "classify_status maps every GPUI_STATUS_* code" {
   assert_eq(classify_status(-10).code(), -10)
   assert_eq(classify_status(-11).code(), -11)
   assert_eq(classify_status(-12).code(), -12)
+  assert_eq(classify_status(-13).code(), -13)
   match classify_status(-1) {
     InvalidHandle => ()
     _ => fail("expected InvalidHandle")
@@ -482,6 +514,10 @@ test "classify_status maps every GPUI_STATUS_* code" {
     PayloadTooLarge => ()
     _ => fail("expected PayloadTooLarge")
   }
+  match classify_status(-13) {
+    BusyComposing => ()
+    _ => fail("expected BusyComposing")
+  }
   // Unmapped codes (including success 0) fall through to Unknown, kept verbatim.
   match classify_status(0) {
     Unknown(0) => ()
@@ -495,7 +531,7 @@ test "classify_status maps every GPUI_STATUS_* code" {
 
 ///|
 test "status_message is a non-empty one-liner per code" {
-  let codes = [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, 0, -99]
+  let codes = [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, 0, -99]
   for c in codes {
     let msg = status_message(c)
     assert_true(msg.length() > 0)

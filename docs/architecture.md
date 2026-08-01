@@ -6,7 +6,7 @@
 
 ## 1. これは何か
 
-**Zed の GPUI**（Rust 製、GPU アクセラレーション UI）を、Rust/C の FFI 層を介して **MoonBit** から呼び出す。現在のデモはインタラクティブな Counter で、ボタン `-1`・`Reset`・`+1`・`+10`（横スクロールコンテナ内）、キー `j`・`k`・`r`、名前付きキー Enter/↑/↓/Escape、数字入力を備える。UI の記述と Counter のロジックは MoonBit 側に、リテイン方式のツリー保存・レンダリング・GPUI イベントループ・ブリッジは Rust 側にある。
+**Zed の GPUI**（Rust 製、GPU アクセラレーション UI）を、Rust/C の FFI 層を介して **MoonBit** から呼び出す。現在のデモはインタラクティブな Counter で、ボタン `-1`・`Reset`・`+1`・`+10`（横スクロールコンテナ内）、キー `j`・`k`・`r`、名前付きキー Enter/↑/↓/Escape、数字入力を備える。数字入力はアプリ級 `EVENT_TEXT` と、編集可能なテキスト入力ボックス（RFC 0003: Enter で確定→`input_text` で pull→クリア）の両方から受け付ける。UI の記述と Counter のロジックは MoonBit 側に、リテイン方式のツリー保存・レンダリング・GPUI イベントループ・ブリッジは Rust 側にある。
 
 - **`main` は MoonBit が所有する**（`moon run` / バンドルされたバイナリ）。Rust はその実行ファイルにリンクされる静的ライブラリである。
 - モデルは **retained + reactive** である。MoonBit がノードツリーを構築して Rust に保存し、GPUI がそれをレンダリングし、イベントは MoonBit へコールバックする。状態を変更するコールバックはツリーを更新（キー付きテキストのその場更新、または全再構築）して `1` を返す。何もしないコールバックは `0` を返す。Rust は `1` のときだけ GPUI に通知する。
@@ -26,7 +26,7 @@
 
 - Rust は `gpui-sys/src/lib.rs` に 1 つの静的ストアを保持する。
   - `static VIEWS: Mutex<Vec<Option<UiNode>>>` — view id ごとのコミット済みツリー。`render` は自分の view のスロットを読む。
-  `UiNode` は `Div` または `Text { content, color, size }` のいずれかである。`Div` はレイアウト・スタイル・イベントの全属性を保持する: コア（`width`/`height`、`bg`、`flex`/`flex_col`、`center`、`gap`、`rounded`、`padding`、`border_width`/`border_color`、`on_click`、`key`、`children`）、G7/G9（issue #51: `bg_color` RGBA・`margin`・`min_size`/`max_size`・`flex_item`・`align`・`overflow`・`opacity`・`shadow`・`cursor`・`position`・`inset`・`padding_sides`）、G8 タイポグラフィ（`text_size`・`text_color`・`font_weight`・`line_height`・`text_align`・`whitespace`・`font_family`）、キーボードナビゲーション（issue #52: `focusable`・`tab_index`・`tab_stop`）。enum 型のスタイル値（align/justify/overflow/cursor/position/text_align/whitespace）は ABI id（`abi.toml` の各セクション）で保持され、`render_node` が gpui の型へマップする。
+  `UiNode` は `Div`・`Text { content, color, size }`・`TextInput { input_id, placeholder }`（RFC 0003）のいずれかである。`TextInput` は leaf ノードで（子を持たない）、編集バッファ・選択範囲・IME preedit はツリーではなく Rust 側のテキストモデルが保持する（下記のテキスト入力状態の項）。`Div` はレイアウト・スタイル・イベントの全属性を保持する: コア（`width`/`height`、`bg`、`flex`/`flex_col`、`center`、`gap`、`rounded`、`padding`、`border_width`/`border_color`、`on_click`、`key`、`children`）、G7/G9（issue #51: `bg_color` RGBA・`margin`・`min_size`/`max_size`・`flex_item`・`align`・`overflow`・`opacity`・`shadow`・`cursor`・`position`・`inset`・`padding_sides`）、G8 タイポグラフィ（`text_size`・`text_color`・`font_weight`・`line_height`・`text_align`・`whitespace`・`font_family`）、キーボードナビゲーション（issue #52: `focusable`・`tab_index`・`tab_stop`）。enum 型のスタイル値（align/justify/overflow/cursor/position/text_align/whitespace）は ABI id（`abi.toml` の各セクション）で保持され、`render_node` が gpui の型へマップする。
 - ツリー構築は **コマンドバッファ**（issue #5）である。MoonBit は `CommandBuffer` に全ノードの記述を 1 つの length-delimited な opcode ストリームとして蓄積し、`build_tree(view, cb)` 1 回の FFI 呼び出しで送信する。Rust はこれをパースしてステージングツリーを組み、ルートとキー重複を検証し、成功時のみ `VIEWS[view]` へ差し替える。失敗時はステージング状態を破棄し、以前のコミット済みツリーは無傷である。
 - コマンドバッファはスタックマシンである。ノード生成（`div`/`text`）がハンドルを内部スタックへ push し、セッターはスタックトップに適用され、`add_child` は child・parent の順に pop して parent を再 push し、`set_root` はトップを pop してルートにする。
 - `FfiView::render` は、mutex を保持したまま自分の view のコミット済みルートをクローンして `VIEWS` をスナップショットし、mutex を解放してから GPUI の要素/リスナーを構築する。これによりロックをリスナーとコールバックの経路から外す。コミット済みツリーがなければ空で描画する。
@@ -35,6 +35,7 @@
 - **安定ノード識別（issue #9）**: `set_key(key)` は div に明示的な安定キーを設定する。設定されたキーは GPUI の `ElementId`（`"gpui_key:{key}"`）になり、クリック有無に関わらず再構築を跨いで stateful element の同一性を保つ。キー未設定のクリック可能 div は従来どおり click_id から ID を合成する（`"gpui_click"`）。click_id はアクションルーティング専用であり、キーとは独立（click_id の重複は許容、キーの重複は `build_tree` が拒否）。
 - **スクロール状態の保持（issue #51 G6）**: `OP_SET_OVERFLOW` で `SCROLL` を指定した軸を持つ div は実際のスクロールコンテナになる。`render_node` は各スクロール div に gpui の `ScrollHandle` を割り当てるが、ツリーは状態変更のたびにゼロから再構築されるため、ハンドルはツリーの外で保持される。保持先は view ごとの `FfiView.scroll_handles: Rc<RefCell<HashMap<String, ScrollHandle>>>` で、`OP_SET_KEY` の値をキーにする。`ScrollHandle` は `Rc` ベースで `Send` でないため、`Mutex` 下のグローバル `VIEWS` には置けず、メインスレッド専用である view エンティティ内に置く。キー付きスクロール div は再構築を跨いでスクロール位置を維持し、キーなしスクロール div は毎回の再構築で新しいハンドル（先頭位置）になる。スクロール追跡には element state が必要なため、スクロール div は常に GPUI id を持つ（キー付きは `"gpui_key:{key}"`、キーなしは一時 id `"gpui_scroll"`）。
 - **キーボードナビゲーション（issue #52）**: `OP_SET_FOCUSABLE` / `OP_SET_TAB_INDEX` / `OP_SET_TAB_STOP` は div を gpui のフォーカス可能要素にする（`.focusable()` / `.tab_index()` / `.tab_stop()`）。これらは `StatefulInteractiveElement` にあるため element id が要る: キーもクリック id もない focusable div には描画ごとの一時 id（`"gpui_focus"`）が合成され、再構築のたびにフォーカスハンドルがリセットされる（再構築を跨ぐ安定フォーカスには `set_key` を使う）。`tab_index` / `tab_stop` の設定は暗黙に focusable を含む。Tab トラバース自体は外側コンテナの `on_key_down` が所有し（上記）、MoonBit の `dispatch` には届かない。
+- **テキスト入力状態の保持（RFC 0003、issue #88）**: `OP_TEXT_INPUT` は leaf ノードで、`input_id` と placeholder（空欄時の薄表示）だけを運ぶ。編集可能なテキストモデル（確定済み全文・選択範囲・IME preedit の marked range・フォーカスハンドル）は、`ScrollHandle` と同じ理由でツリーの外、view ごとの `FfiView.inputs: Rc<RefCell<HashMap<i32, Entity<TextInputModel>>>>` に保持される（`Rc` ベースで `Send` でないため `Mutex` 下の `VIEWS` には置けない。メインスレッド専用）。`render_node` は `input_id` でモデルを取得（なければ生成）し、再構築を跨いで生存する。同一 `input_id` のノードが再送されてもテキストは保持され、placeholder だけがツリーに従う。pull ABI（`gpui_input_*`）は C export が `App` コンテキストを持たないため、コミット時点で更新される `INPUT_MIRROR`（`Mutex` 下の `(view, input_id) -> text/composing` ミラー）を読み書きし、`gpui_input_set_text` の書き込みはキュー経由で widget の次回の prepaint でエンティティに適用される。
 
 ## 4. FFI 契約（双方向）
 
@@ -51,6 +52,9 @@
 | `gpui_debug_dump_text(view, buf, len) -> i32` | `debug_dump_text(view)` — コミット済みツリーの全テキストを DFS pre-order で読み戻す（デバッグ・往復テスト用） |
 | `gpui_abi_probe(value) -> i32` | `abi_probe(v)` — `Int` == `i32` の境界横断往復検証（`cmd/roundtrip` がビルドごとに実行） |
 | `gpui_post_event(view, const uint8_t *ptr, int32_t len) -> i32` | `post_event(view, payload)` — 任意スレッドから `view` へ非同期イベントを注入（RFC 0002）。ペイロードは呼び出し中にコピーされ即座に戻る。`EVENT_ASYNC` としてメインスレッドで配送される |
+| `gpui_input_text_len(view, input_id) -> i32` | `input_text(view, input_id)` の第 1 段 — 現在内容の UTF-8 バイト長（バッファ確保用）。未知の input_id は `INVALID_HANDLE` |
+| `gpui_input_copy_text(view, input_id, buf, len) -> i32` | `input_text(view, input_id)` の第 2 段 — 現在内容を `buf` へコピーし書き込みバイト数を返す（`gpui_event_copy_text` と同じ契約） |
+| `gpui_input_set_text(view, input_id, ptr, len) -> i32` | `input_set_text(view, input_id, text)` — 現在内容を差し替え選択範囲を末尾へ。IME 合成中は `BUSY_COMPOSING` で拒否 |
 
 コマンドバッファのワイヤ形式（すべてリトルエンディアン）:
 
@@ -93,6 +97,7 @@ OP_SET_FONT_FAMILY  u8 | len u32 | utf8[len]
 OP_SET_FOCUSABLE    u8 | mode i32                 (0 以外 = focusable)
 OP_SET_TAB_INDEX    u8 | index i32                (tab 順序; focusable + tab stop を暗黙に含む)
 OP_SET_TAB_STOP     u8 | mode i32                 (0 = Tab ナビゲーションから外す)
+OP_TEXT_INPUT       u8 | input_id i32 | len u32 | utf8[len]   (placeholder; leaf ノード)
 ```
 
 enum オペランド（`align_items` / `justify_content` / `overflow` / `cursor` / `position` / `text_align` / `whitespace` の各 id）は `abi.toml` の同名セクション（`[align_items]`・`[justify_content]`・`[overflow]`・`[cursor]`・`[position]`・`[text_align]`・`[whitespace]`）から両言語へ生成され、opcode と同じ drift guard で保護される。`0`（`*_DEFAULT` / `OVERFLOW_VISIBLE` 等）は「未設定」を意味し、`render_node` は未知の id を無視する。`transform` は意図的に存在しない（gpui 0.2.2 に Style レベルの transform がないため）。gpui 0.2.2 の制約による近似マップ（`TEXT_ALIGN_JUSTIFY` → `Left`、`WHITESPACE_PRE`/`PRE_WRAP` → `Nowrap`/`Normal`）は `render_node` の doc comment と `framework-gaps.md` G8 に記録されている。
@@ -116,6 +121,7 @@ opcode・`BUFFER_VERSION`・enum 定数（`[align_items]` 等の各セクショ�
 | `GPUI_STATUS_KEY_NOT_FOUND`（`-10`） | `gpui_update_text` のキーがコミット済みツリーで見つからない（フルリビルドへフォールバック） |
 | `GPUI_STATUS_QUEUE_FULL`（`-11`） | 非同期注入キューが満杯（back-pressure）。producer は後で再試行・集約・破棄を判断する（RFC 0002 §3.2） |
 | `GPUI_STATUS_PAYLOAD_TOO_LARGE`（`-12`） | 注入ペイロードが 1 エントリの上限（`INJECT_PAYLOAD_MAX_BYTES`）を超過 |
+| `GPUI_STATUS_BUSY_COMPOSING`（`-13`） | `gpui_input_set_text` が IME 合成中（marked range あり）に呼ばれた。合成を壊さないため拒否し、確定後に再試行する（RFC 0003 §3.5） |
 
 全 C export はこれらのステータスを返す（`gpui_event_copy_text` / `gpui_debug_dump_text` は成功時に書き込んだバイト数を返す）。高レベル MoonBit ラッパー（`build_tree` / `run_window` / `update_text` / `debug_dump_text`）は `Result[_, Int]` を返し、`Err(status)` で負の status code を伝播する。`classify_status` / `status_message` / `GpuiError`（issue #54, G20）が生のコードを構造化エラーへ分類し、`expect_ok` が回復不能な失敗を診断メッセージ付きで abort する。`framework_dispatch` は再構築コールバックの失敗を無視して dirty に基づき `1` を返す（Rust 側は旧ツリーを保持済みのため、`cx.notify()` で旧ツリーが再描画される。アプリは `update_text` 失敗時に `build_tree` へフォールバックする）。イベントはビュー単位でルーティングされる: dispatch の slot 2 は view id（`VIEWS` のインデックス、`FfiView.view` 由来）を運び、`build_tree(view)` / `update_text(view, …)` がそのビューのツリーを更新する（issue #41/#49）。
 
@@ -128,6 +134,7 @@ opcode・`BUFFER_VERSION`・enum 定数（`[align_items]` 等の各セクショ�
 - `EVENT_TEXT` のペイロードは Rust 所有のイベントキューに格納され、`gpui_event_copy_text(token, buf, len)` C export 経由で MoonBit が同期的にコピーする。64 ビットポインタは i32 スロットに収まらないため、トークン＋コピー方式を採用する。
 - `EVENT_NAMED_KEY` は Enter/Escape/矢印などの名前付きキーを ABI id（`abi.toml` の `[named_keys]`）で運ぶ。1 文字キーは `key_code` がコードポイントへ変換し `EVENT_KEY` になるのに対し、`key_code` が 0 を返す名前付きキーを `named_key_id` が id へマップして `(4, EVENT_NAMED_KEY, view, named_key_id, mods_bits)` を送る。新しいイベント種別の追加は後方互換（古い MoonBit は未知 kind を `Unknown` として 0 を返す）なので `ABI_VERSION` は据え置き。
 - `EVENT_ASYNC`（`5`）は非同期注入イベントを運ぶ（RFC 0002）。外部 native コードが `gpui_post_event(view, ptr, len)` で任意スレッドからペイロードを有界キューへ push し、メインスレッドの drain pump が各エントリを `(4, EVENT_ASYNC, view, token, byte_len)` として配送する。ペイロードは `EVENT_TEXT` と同じ token+copy 機構（`EVENT_QUEUE` + `gpui_event_copy_text`）に乗り、MoonBit は dispatch 中に `copy_async_payload(token, len)` で同期的にコピーする。ペイロードは opaque bytes でライブラリは一切解釈せず、フレーミングは producer と MoonBit ハンドラの契約である。新しい種別の追加なので `ABI_VERSION` は据え置き（古い MoonBit は `Unknown` を返す）。
+- `EVENT_INPUT_CHANGED`（`6`）/ `EVENT_INPUT_SUBMIT`（`7`）はテキスト入力 widget のイベントを運ぶ（RFC 0003）。envelope は `(4, kind, view, input_id, 0)` で、**ペイロードを運ばない**: 変化通知のたびに全文を積むとペイロードが単調に肥大するため（#70 の教訓）、通知は軽く、現在内容は `gpui_input_text_len` / `gpui_input_copy_text` で明示的に pull する（ラッパー `input_text`）。`EVENT_INPUT_CHANGED` は確定テキストの変化（IME 確定・タイプ・delete・`set_text`）で、preedit 更新（`replace_and_mark_text_in_range`）は Rust 内で完結し MoonBit には届かない。`EVENT_INPUT_SUBMIT` はフォーカス中の input での Enter（単一行の既定動作。改行は挿入しない）。`input_id` は `HandlerRegistry::new_input_id` の発行値で、`HandlerRegistry` の `on_input_changed` / `on_submit` が id ごとの単一配送でルーティングする。新しい種別の追加なので `ABI_VERSION` は据え置き（古い MoonBit は `Unknown` を返す）。
 - `cmd/main/main.mbt` は `app.dispatch` を `_keep` に束縛し、Rust からのみ参照される関数の dead-code elimination（不要コード削除）を防ぐ。
 
 ドライバは固定の `app.dispatch` に対する実際の現在のマングル名を抽出するため、ツールチェーンのマングル方式の変更にも追従する。これはパッケージ/関数名の自動リネームサポートではない。`app` や `dispatch` を変更する場合は、`build.sh` の `PKG_FN_SUFFIX`、`build.ps1` の `$PkgFnSuffix`、および `gpui-sys/build.rs` のコールバック ABI ポリシー/テンプレートを更新する必要がある。MoonBit のマングル名には型が含まれないため、ドライバは `main.c` が利用可能な場合、生成された C から `int32_t` の戻り値と 5 つの `int32_t` パラメータを別途検証する。
@@ -163,8 +170,9 @@ sequenceDiagram
 `EVENT_CLICK=1`、`EVENT_KEY=2`、`EVENT_TEXT=3`、`EVENT_NAMED_KEY=4` は `abi.toml` に由来する（`ABI_VERSION=4`）。クリックリスナーは `(4, EVENT_CLICK, view, click_id, 0)` を供給する。外側のフォーカスされたコンテナは 1 文字のキーをその Unicode コードポイントへマップし `(4, EVENT_KEY, view, codepoint, mods_bits)` を送る。`EVENT_TEXT` は `(4, EVENT_TEXT, view, token, byte_len)` を送り、MoonBit は `gpui_event_copy_text` で UTF-8 ペイロードをコピーする。`key_char`（IME/レイアウト処理後の実際の入力文字）を使用するため、複数文字や合成文字も正しく届く。名前付きキー（Enter/Escape/矢印/Tab/Backspace/Delete/Home/End/PageUp/PageDown）は `key_code` が 0 を返すため、`named_key_id` が `[named_keys]` の id へマップし `(4, EVENT_NAMED_KEY, view, named_key_id, mods_bits)` を送る。Enter は `key_char` が `"
 "` のため `EVENT_TEXT` も同時に発火するが、デモの `on_text` は非数字を無視するため二重カウントにはならない。意味の決定は MoonBit が行う: クリックは `HandlerRegistry` が発行した `HandlerId` でルーティングされ（`btn-decrement` / `btn-reset` / `btn-increment` / `btn-increment-10`）、int 定数も int switch も存在しない（RFC 0001 Phase A/C）。キーは `j=106`→-1、`k=107`→+1、`r=114`→reset、`KEY_ENTER`/`KEY_UP`→+1、`KEY_DOWN`→-1、`KEY_ESCAPE`→reset。ハンドラは `Signal` の `set` のみを行い、再構築はフレームワークが store の dirty 判定でスケジュールする（Phase D）。
 `EVENT_ASYNC=5` は非同期注入経路（RFC 0002）で、外部 producer が `gpui_post_event` で push したペイロードをメインスレッドの drain pump が `(4, EVENT_ASYNC, view, token, byte_len)` として配送する。ペイロードは `EVENT_TEXT` と同じ token+copy 機構に乗り、MoonBit は dispatch 中に同期コピーして `Event::Async(Bytes)` として `HandlerRegistry` の `on_async` ハンドラへ配送する。
+`EVENT_INPUT_CHANGED=6` / `EVENT_INPUT_SUBMIT=7` はテキスト入力 widget の経路（RFC 0003）で、widget のテキストモデルが確定テキストの変化を `(4, EVENT_INPUT_CHANGED, view, input_id, 0)` として、フォーカス中の Enter を `(4, EVENT_INPUT_SUBMIT, view, input_id, 0)` として配送する。ペイロードはなく、MoonBit は `input_text(view, input_id)` で現在内容を pull する（典型的には submit ハンドラ内で読み、`input_set_text(view, input_id, "")` でクリアする）。テキスト入力がフォーカスを持つ間、ルートコンテナの `on_key_down` はアプリ級配送（`EVENT_KEY` / `EVENT_NAMED_KEY` / `EVENT_TEXT`）を**抑止**する: 同じ打鍵が widget の入力ハンドラとアプリの両方に届く二重配送を防ぐためである（RFC 0003 §3.4）。抑止の正確な範囲: Tab / Shift+Tab は抑止の対象外で、従来どおりフォーカストラバース（`focus_next` / `focus_prev`）を継続する。Enter は widget が消費して `EVENT_INPUT_SUBMIT` に変換する（アプリ級 `EVENT_NAMED_KEY` / `EVENT_TEXT` としては届かない）。それ以外のキー（文字・矢印・Backspace/Delete・Home/End・Escape 等）は widget の編集操作として消費され、アプリ級配送は起きない。
 
-Tab / Shift+Tab は外側コンテナの `on_key_down` が消費してフォーカストラバースに使う（issue #52）ため、`EVENT_NAMED_KEY` としては MoonBit に届かない（`KEY_TAB` id は ABI に定義されているが、デモの `dispatch` には到達しない）。
+Tab / Shift+Tab は外側コンテナの `on_key_down` が消費してフォーカストラバースに使う（issue #52）ため、`EVENT_NAMED_KEY` としては MoonBit に届かない（`KEY_TAB` id は ABI に定義されているが、デモの `dispatch` には到達しない）。テキスト入力がフォーカス中でも Tab はトラバースを継続し、次の tab stop へ抜ける（RFC 0003 §3.4 の抑止は Tab に適用されない）。
 
 ## 6. ビルドと実行のパイプライン
 
@@ -247,6 +255,7 @@ exe の `main` では `app.dispatch` を `let _keep : (Int, Int, Int, Int, Int) 
 - **生成された FFI:** `gpui-bindings-ffi.mbt` を手編集しないこと。Rust の C エクスポート変更後は、ヘッダーと突き合わせて検証すること。
 - **インクリメンタル更新:** `update_text` はキー付き div の**最初のテキスト子**だけを書き換える。キー付き div にテキスト子がない、キーがテキストノードを指す、またはツリー未コミットの場合は `GPUI_STATUS_KEY_NOT_FOUND` を返し、呼び出し側は `build_tree` によるフルリビルドにフォールバックしなければならない。汎用 vdom diff は意図的に未実装である。
 - **フォーカス ID:** focusable div（`OP_SET_FOCUSABLE` / `OP_SET_TAB_INDEX` / `OP_SET_TAB_STOP`）は element state のため GPUI id が要る。キーもクリック id もない場合は描画ごとの一時 id（`"gpui_focus"`）が合成され、再構築のたびにフォーカスがリセットされる。再構築を跨ぐ安定フォーカスには `set_key` を使うこと。
+- **テキスト入力と IME 合成（RFC 0003）:** 編集バッファ・選択範囲・preedit は Rust 側の `TextInputModel` が正であり、MoonBit の store には置かない（合成中の値でアプリロジックが走る事故を防ぐ）。`gpui_input_set_text` は IME 合成中（marked range あり）に `GPUI_STATUS_BUSY_COMPOSING`（`-13`）を返して拒否する — 合成を壊さないためであり、呼び出し側は確定後（`EVENT_INPUT_CHANGED` 後）に再試行しなければならない。`EVENT_INPUT_*` はペイロードを運ばないため、ハンドラは `input_text` で pull すること（dispatch 外の遅延 pull も可能だが、値は pull 時点のスナップショットである）。
 
 ## 8. ソースと生成ファイルの所有区分
 
@@ -274,8 +283,8 @@ issue #53 のテスト基盤（G24–G26）がこれを補強する: **G24** は
 - ABI のイベント/修飾定数と固定のコールバックポリシー: `gpui-sys/abi.toml`
 - C→MoonBit の型マッピングと FFI 生成: `bindgen-moonbit/src/main.rs`
 - 生成された低レベルの MoonBit import: `moonbit-bindings/gpui-bindings-ffi.mbt`
-- 高レベルの MoonBit UI API（`CommandBuffer`、`Color`、構造化エラー `GpuiError` / `classify_status` / `expect_ok`、`update_text` / `debug_dump_text` / `abi_probe` ラッパー）と UTF-8 エンコード: `moonbit-bindings/gpui-bindings.mbt`
-- コンポーネント/状態/イベントのフレームワーク層（RFC 0001）: `moonbit-bindings/components.mbt`（`RenderCtx` / `button`）、`store.mbt`（`Store` / `CellId`）、`signal.mbt`（`Signal`）、`event.mbt` / `handlers.mbt`（`Event` / `HandlerRegistry`）、`framework.mbt`（`framework_dispatch`）
+- 高レベルの MoonBit UI API（`CommandBuffer`、`Color`、構造化エラー `GpuiError` / `classify_status` / `expect_ok`、`update_text` / `debug_dump_text` / `abi_probe` / `input_text` / `input_set_text` ラッパー）と UTF-8 エンコード: `moonbit-bindings/gpui-bindings.mbt`
+- コンポーネント/状態/イベントのフレームワーク層（RFC 0001）: `moonbit-bindings/components.mbt`（`RenderCtx` / `button` / `text_input`）、`store.mbt`（`Store` / `CellId`）、`signal.mbt`（`Signal`）、`event.mbt` / `handlers.mbt`（`Event` / `HandlerRegistry` / `InputId`）、`framework.mbt`（`framework_dispatch`）
 - Counter の状態（signal）・コンポーネント列・dispatch 委譲: `moonbit-bindings/app/app.mbt`
 - エントリポイントとコールバックの保持: `moonbit-bindings/cmd/main/main.mbt`
 - OS ネイティブのリンクテンプレート: `moonbit-bindings/cmd/main/moon.pkg.*`

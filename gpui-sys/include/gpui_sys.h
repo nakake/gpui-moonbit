@@ -79,6 +79,14 @@
 #define gpui_GPUI_STATUS_PAYLOAD_TOO_LARGE -12
 
 /**
+ * `gpui_input_set_text` was rejected because the input is mid-IME-composition
+ * (a marked range is active). Overwriting the buffer would destroy the
+ * composition the user sees; retry after the composition commits (RFC 0003
+ * §3.5).
+ */
+#define gpui_GPUI_STATUS_BUSY_COMPOSING -13
+
+/**
  * Maximum number of queued injection entries (RFC 0002 §6-1). A full queue
  * fails `gpui_post_event` with `GPUI_STATUS_QUEUE_FULL` instead of blocking.
  */
@@ -181,5 +189,28 @@ int32_t gpui_update_text(int32_t view,
  * `GPUI_STATUS_INVALID_HANDLE` before any GPUI startup.
  */
 int32_t gpui_run_window(int32_t view, float width, float height);
+
+/**
+ * UTF-8 byte length of the committed content of `(view, input_id)`, for
+ * buffer sizing before `gpui_input_copy_text`. Main-thread contract, same as
+ * every other export called from inside `dispatch`.
+ */
+int32_t gpui_input_text_len(int32_t view, int32_t input_id);
+
+/**
+ * Copy the committed content of `(view, input_id)` into `buf` (up to `len`
+ * bytes). Returns bytes written, or a negative status. Same contract as
+ * `gpui_event_copy_text`.
+ */
+int32_t gpui_input_copy_text(int32_t view, int32_t input_id, uint8_t *buf, int32_t len);
+
+/**
+ * Replace the committed content of `(view, input_id)`; the caret moves to the
+ * end. Rejected with `GPUI_STATUS_BUSY_COMPOSING` while an IME composition is
+ * active (the marked text belongs to the IME, not the app). The write lands
+ * in the mirror immediately (subsequent reads see it) and is applied to the
+ * widget at its next prepaint.
+ */
+int32_t gpui_input_set_text(int32_t view, int32_t input_id, const uint8_t *ptr, int32_t len);
 
 #endif  /* GPUI_SYS_H */

@@ -45,7 +45,9 @@ let handlers : @nakake/gpui-bindings.HandlerRegistry = {
   // fire. `handlers` is referenced by the click-handler lets, `ctx`, and the
   // tests, so building it always wires these registrations. Click handlers
   // stay as separate top-level `let`s because `button_row` references them by
-  // name to write their ids into the wire stream.
+  // name to write their ids into the wire stream; the text-input submit
+  // handler follows the same pattern in `prompt_input`'s initializer
+  // (`prompt_box` references it by name).
   let r = @nakake/gpui-bindings.HandlerRegistry::new()
   let _ = r.on_key(fn(code, mods) { on_key(code, mods) })
   let _ = r.on_named_key(fn(id, mods) { on_named_key(id, mods) })
@@ -85,6 +87,27 @@ let btn_increment_10 : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
 /// する — テスト側でのハードコードは登録の追加・並べ替えで静かに壊れる。
 pub fn increment_handler_id() -> Int {
   btn_increment.to_int()
+}
+
+// Text input (RFC 0003): the prompt box's id is issued once and written into
+// the wire stream by `prompt_box`; the submit handler is registered right
+// there so evaluating `prompt_input` (which `build_tree` does) always wires
+// it — the same keep-alive pattern as the click-handler lets. The handler
+// closure captures the local `id` (not the top-level `prompt_input`) so the
+// definition graph stays acyclic.
+
+///|
+let prompt_input : @nakake/gpui-bindings.InputId = {
+  let id = handlers.new_input_id()
+  handlers.on_submit(id, fn(view) { on_submit_input(view, id) })
+  id
+}
+
+///|
+/// プロンプト入力の生 input_id。リンク済み round-trip テスト（`cmd/roundtrip`）が
+/// `EVENT_INPUT_SUBMIT` 配送経路を叩くために使う（`increment_handler_id` と同じ規約）。
+pub fn prompt_input_id() -> Int {
+  prompt_input.to_int()
 }
 
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
@@ -127,34 +150,56 @@ fn on_named_key(id : Int, _mods : Int) -> Unit {
 // treats a pure-digit string as "set count to N"; anything else is ignored.
 // The parsed value is bounded by i32::MAX so a long digit run cannot wrap the
 // 32-bit boundary silently (issue #81): once the next digit would overflow,
-// the whole input is rejected rather than wrapping to a negative value.
+// the whole input is rejected rather than wrapping to a negative value. The
+// same parser serves the text-input submit path (RFC 0003).
 
 ///|
-fn on_text(text : String) -> Unit {
+fn parse_digits(text : String) -> Option[Int] {
   if text.is_empty() {
-    return
+    return None
   }
-  // Accept only ASCII digits so the demo stays deterministic across locales.
   let mut value = 0
-  let mut all_digits = true
   for c in text {
     if c >= '0' && c <= '9' {
       let digit = c.to_int() - '0'.to_int()
       // Overflow guard: reject the input if the next digit would exceed
       // i32::MAX (0x7FFFFFFF), instead of letting `value * 10 + digit` wrap.
       if value > (0x7FFFFFFF - digit) / 10 {
-        all_digits = false
-        break
+        return None
       }
       value = value * 10 + digit
     } else {
-      all_digits = false
-      break
+      return None
     }
   }
-  if all_digits {
-    count.set(store, value)
+  Some(value)
+}
+
+///|
+fn on_text(text : String) -> Unit {
+  match parse_digits(text) {
+    Some(value) => count.set(store, value)
+    None => ()
   }
+}
+
+// Submit from the text input (RFC 0003): pull the current text (the envelope
+// carries only the input_id), parse it like `on_text`, and clear the box —
+// Enter submits and empties, exactly like the harness prompt this demo
+// mirrors. A pull failure (e.g. no committed model) leaves state untouched.
+
+///|
+fn on_submit_input(view : Int, input_id : @nakake/gpui-bindings.InputId) -> Unit {
+  let text = match
+    @nakake/gpui-bindings.input_text(view, input_id.to_int()) {
+    Ok(t) => t
+    Err(_) => return
+  }
+  match parse_digits(text) {
+    Some(value) => count.set(store, value)
+    None => ()
+  }
+  ignore(@nakake/gpui-bindings.input_set_text(view, input_id.to_int(), ""))
 }
 
 // Render context (RFC 0001 §3.1): components reach the store and handler
@@ -288,6 +333,17 @@ fn button_row(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
 }
 
 ///|
+fn prompt_box(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
+  // Editable single-line input (RFC 0003): the Rust-side text model keeps the
+  // buffer/selection/preedit across rebuilds; the demo pulls on submit only.
+  @nakake/gpui-bindings.text_input(cb, {
+    key: "prompt-input",
+    input_id: prompt_input,
+    placeholder: "type a number, press Enter",
+  })
+}
+
+///|
 fn key_hints(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
   cb.text("keys:  k +1    j -1    r reset", 130, 135, 148, 14.0)
 }
@@ -307,6 +363,8 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   counter_card(cb, ctx)
   cb.add_child()
   button_row(cb)
+  cb.add_child()
+  prompt_box(cb)
   cb.add_child()
   key_hints(cb)
   cb.add_child()

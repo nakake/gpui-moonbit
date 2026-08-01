@@ -19,6 +19,12 @@ pub const EVENT_NAMED_KEY : Int = 4
 pub const EVENT_ASYNC : Int = 5
 
 ///|
+pub const EVENT_INPUT_CHANGED : Int = 6
+
+///|
+pub const EVENT_INPUT_SUBMIT : Int = 7
+
+///|
 pub const MOD_CTRL : Int = 1
 
 ///|
@@ -182,6 +188,9 @@ pub const OP_SET_TAB_INDEX : Int = 36
 
 ///|
 pub const OP_SET_TAB_STOP : Int = 37
+
+///|
+pub const OP_TEXT_INPUT : Int = 38
 
 ///|
 pub const ALIGN_DEFAULT : Int = 0

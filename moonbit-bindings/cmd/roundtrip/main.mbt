@@ -161,5 +161,38 @@ fn main {
   }
   println("PASS: dispatch smoke verified (click/noop/stale/key, state 1→2)")
 
+  // Text-input smoke (RFC 0003): the three new C exports must link and behave
+  // across the boundary. The editable model is created at first render
+  // (run_window), so headlessly the input_id is still unknown: the pull ABI
+  // must propagate GPUI_STATUS_INVALID_HANDLE (-1) cleanly, not crash.
+  let input_id = @nakake/gpui-bindings/app.prompt_input_id()
+  match @nakake/gpui-bindings.input_text(0, input_id) {
+    Ok(t) => abort("input_text unexpectedly succeeded headless: '\{t}'")
+    Err(s) =>
+      if s != -1 {
+        abort("input_text returned \{s}, want -1 (INVALID_HANDLE)")
+      }
+  }
+  match @nakake/gpui-bindings.input_set_text(0, input_id, "42") {
+    Ok(_) => abort("input_set_text unexpectedly succeeded headless")
+    Err(s) =>
+      if s != -1 {
+        abort("input_set_text returned \{s}, want -1 (INVALID_HANDLE)")
+      }
+  }
+  // EVENT_INPUT_SUBMIT decodes and routes to the registered handler; its pull
+  // fails headless, so no state changes and dispatch returns 0 (dirty gate).
+  let changed_submit = @nakake/gpui-bindings/app.dispatch(
+    @nakake/gpui-bindings.ABI_VERSION,
+    @nakake/gpui-bindings.EVENT_INPUT_SUBMIT,
+    0,
+    input_id,
+    0,
+  )
+  if changed_submit != 0 {
+    abort("dispatch(submit) returned \{changed_submit}, want 0 (pull fails headless)")
+  }
+  println("PASS: input smoke verified (pull ABI links, submit routes, headless -1)")
+
   println("PASS: round-trip verified (\{n} bytes)")
 }

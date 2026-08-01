@@ -21,8 +21,9 @@ use abi_constants::{
     ABI_VERSION, ALIGN_CENTER, ALIGN_DEFAULT, ALIGN_END, ALIGN_START, ALIGN_STRETCH,
     BUFFER_VERSION, CURSOR_ARROW, CURSOR_COL_RESIZE, CURSOR_CROSSHAIR, CURSOR_EW_RESIZE,
     CURSOR_GRAB, CURSOR_GRABBING, CURSOR_NONE, CURSOR_NOT_ALLOWED, CURSOR_NS_RESIZE,
-    CURSOR_POINTER, CURSOR_ROW_RESIZE, CURSOR_TEXT, EVENT_ASYNC, EVENT_CLICK, EVENT_KEY,
-    EVENT_NAMED_KEY, EVENT_TEXT, JUSTIFY_CENTER, JUSTIFY_DEFAULT, JUSTIFY_END,
+    CURSOR_POINTER, CURSOR_ROW_RESIZE, CURSOR_TEXT, EVENT_ASYNC, EVENT_CLICK,
+    EVENT_INPUT_CHANGED, EVENT_INPUT_SUBMIT, EVENT_KEY, EVENT_NAMED_KEY, EVENT_TEXT,
+    JUSTIFY_CENTER, JUSTIFY_DEFAULT, JUSTIFY_END,
     JUSTIFY_SPACE_AROUND, JUSTIFY_SPACE_BETWEEN, JUSTIFY_START, KEY_BACKSPACE, KEY_DELETE,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN,
     KEY_RIGHT, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT,
@@ -33,7 +34,8 @@ use abi_constants::{
     OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING, OP_SET_PADDING_SIDES, OP_SET_POSITION,
     OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW, OP_SET_SIZE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP,
     OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE, OP_SET_WHITESPACE, OP_TEXT,
-    OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE, POSITION_RELATIVE,
+    OP_TEXT_INPUT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE,
+    POSITION_RELATIVE,
     TEXT_ALIGN_CENTER, TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY, TEXT_ALIGN_LEFT,
     TEXT_ALIGN_RIGHT, WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP, WHITESPACE_PRE,
     WHITESPACE_PRE_WRAP,
@@ -88,6 +90,11 @@ pub const GPUI_STATUS_KEY_NOT_FOUND: i32 = -10;
 pub const GPUI_STATUS_QUEUE_FULL: i32 = -11;
 /// The async injection payload exceeds the per-entry size limit.
 pub const GPUI_STATUS_PAYLOAD_TOO_LARGE: i32 = -12;
+/// `gpui_input_set_text` was rejected because the input is mid-IME-composition
+/// (a marked range is active). Overwriting the buffer would destroy the
+/// composition the user sees; retry after the composition commits (RFC 0003
+/// §3.5).
+pub const GPUI_STATUS_BUSY_COMPOSING: i32 = -13;
 
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
@@ -309,14 +316,18 @@ fn register_view(cx: &mut App, view: i32, weak: WeakEntity<FfiView>) {
 /// closed window (failed `upgrade`) is dropped silently: the dispatch already
 /// ran, and there is no UI left to refresh.
 fn notify_view(cx: &mut AsyncApp, view: i32) {
-    let _ = cx.update(|app| {
-        // Clone the weak handle out before borrowing `app` mutably for the
-        // update (the registry borrow and the entity update cannot overlap).
-        let weak = app.default_global::<ViewRegistry>().0.get(&view).cloned();
-        if let Some(weak) = weak {
-            let _ = weak.update(app, |_, cx| cx.notify());
-        }
-    });
+    let _ = cx.update(|app| notify_view_app(app, view));
+}
+
+/// `App`-level flavor of [`notify_view`], usable from any main-thread context
+/// that dereferences to `App` (the text-input commit paths, RFC 0003).
+fn notify_view_app(app: &mut App, view: i32) {
+    // Clone the weak handle out before borrowing `app` mutably for the
+    // update (the registry borrow and the entity update cannot overlap).
+    let weak = app.default_global::<ViewRegistry>().0.get(&view).cloned();
+    if let Some(weak) = weak {
+        let _ = weak.update(app, |_, cx| cx.notify());
+    }
 }
 
 /// Dispatch one injected entry as `EVENT_ASYNC` (RFC 0002 §3.4). The payload
@@ -355,7 +366,8 @@ fn drain_injected_events(cx: &mut AsyncApp) {
         if !view_exists {
             continue;
         }
-        if dispatch_injected(entry.view, entry.payload) == 1 {
+        let changed = dispatch_injected(entry.view, entry.payload);
+        if changed == 1 || take_input_dirty() == 1 {
             notify_view(cx, entry.view);
         }
     }
@@ -532,6 +544,9 @@ fn collect_text_contents(node: &UiNode, out: &mut Vec<u8>) {
             out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             out.extend_from_slice(bytes);
         }
+        // The editable content lives in the per-view TextInputModel, not the
+        // committed tree; read it via gpui_input_copy_text instead.
+        UiNode::TextInput { .. } => {}
     }
 }
 
@@ -666,6 +681,15 @@ enum UiNode {
         color: (u8, u8, u8),
         size: f32,
     },
+    /// Editable text input (RFC 0003, issue #88). A leaf: the committed tree
+    /// carries only the widget's identity and placeholder — the editable
+    /// content, selection, and IME marked range live in the per-view
+    /// `TextInputModel` entity (the Rust side is the source of truth), which
+    /// survives rebuilds exactly like `ScrollHandle`s.
+    TextInput {
+        input_id: i32,
+        placeholder: String,
+    },
 }
 
 
@@ -699,7 +723,9 @@ fn div_mut(nodes: &mut [Option<UiNode>], handle: i32) -> Result<&mut UiNode, i32
         None => Err(GPUI_STATUS_INVALID_HANDLE),
         Some(None) => Err(GPUI_STATUS_NODE_ABSENT),
         Some(Some(node @ UiNode::Div { .. })) => Ok(node),
-        Some(Some(UiNode::Text { .. })) => Err(GPUI_STATUS_WRONG_NODE_KIND),
+        Some(Some(UiNode::Text { .. } | UiNode::TextInput { .. })) => {
+            Err(GPUI_STATUS_WRONG_NODE_KIND)
+        }
     }
 }
 
@@ -937,6 +963,26 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                         content,
                         color: (r, g, b),
                         size,
+                    },
+                );
+                if id < 0 {
+                    id
+                } else {
+                    stack.push(id);
+                    GPUI_STATUS_OK
+                }
+            }
+            OP_TEXT_INPUT => {
+                let (Some(input_id), Some(placeholder)) =
+                    (reader.read_i32(), reader.read_string())
+                else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                let id = push_node(
+                    &mut nodes,
+                    UiNode::TextInput {
+                        input_id,
+                        placeholder,
                     },
                 );
                 if id < 0 {
@@ -1436,7 +1482,9 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                 }
                 match &nodes[parent_index] {
                     None => return GPUI_STATUS_NODE_ABSENT,
-                    Some(UiNode::Text { .. }) => return GPUI_STATUS_WRONG_NODE_KIND,
+                    Some(UiNode::Text { .. } | UiNode::TextInput { .. }) => {
+                        return GPUI_STATUS_WRONG_NODE_KIND;
+                    }
                     Some(UiNode::Div { .. }) => {}
                 }
                 if nodes[child_index].is_none() {
@@ -1628,6 +1676,7 @@ fn run_window(view: usize, width: f32, height: f32) {
                             focus,
                             view,
                             scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+                            inputs: Rc::new(RefCell::new(HashMap::new())),
                         }
                     })
                 },
@@ -1672,6 +1721,734 @@ fn run_window_with_fallback(view: usize, width: f32, height: f32) -> i32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Text input widget + IME (RFC 0003, issue #88)
+//
+// The Rust side owns the editable state (content / selection / marked range):
+// the platform IME queries `EntityInputHandler` synchronously with string
+// returns, and no such MoonBit->Rust reply channel exists across the single
+// 5xi32 `mb_dispatch` envelope (RFC 0003 §2). MoonBit is notified of commits
+// via EVENT_INPUT_CHANGED / EVENT_INPUT_SUBMIT (push, no payload) and reads or
+// writes the buffer explicitly through `gpui_input_text_len` /
+// `gpui_input_copy_text` / `gpui_input_set_text` (pull).
+//
+// The pull ABI cannot reach the `TextInputModel` entity (reading an Entity
+// needs an `App` context the C export does not have), so every commit point
+// also updates `INPUT_MIRROR`, a Mutex-guarded (view, input_id) -> text/state
+// mirror the exports read. `gpui_input_set_text` writes the mirror and queues
+// the change; the widget applies queued writes to the entity during its next
+// prepaint (which has the context), and `take_input_dirty()` tells the
+// dispatch sites a redraw is needed even when MoonBit's handler reported no
+// signal change.
+
+/// Mirrored state for the pull ABI, updated at every commit point on the main
+/// thread. `composing` gates `gpui_input_set_text` (BUSY_COMPOSING).
+#[derive(Default, Clone)]
+struct InputMirrorEntry {
+    text: String,
+    composing: bool,
+}
+
+static INPUT_MIRROR: Mutex<Option<HashMap<(i32, i32), InputMirrorEntry>>> = Mutex::new(None);
+
+/// Pending `gpui_input_set_text` writes, applied to the entity at the widget's
+/// next prepaint (the export has no `App` context; prepaint does).
+static INPUT_SET_TEXT_QUEUE: Mutex<Vec<(i32, i32, String)>> = Mutex::new(Vec::new());
+
+/// Set when a queued set_text needs a redraw that MoonBit's `changed` flag
+/// alone would not trigger. Dispatch sites fold `take_input_dirty()` into
+/// their notify decision.
+static INPUT_DIRTY: Mutex<bool> = Mutex::new(false);
+
+fn mirror_update(view: i32, input_id: i32, text: &str, composing: bool) {
+    let mut guard = INPUT_MIRROR.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(HashMap::new).insert(
+        (view, input_id),
+        InputMirrorEntry {
+            text: text.to_string(),
+            composing,
+        },
+    );
+}
+
+fn mirror_get(view: i32, input_id: i32) -> Option<InputMirrorEntry> {
+    INPUT_MIRROR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(&(view, input_id)).cloned())
+}
+
+fn take_input_dirty() -> i32 {
+    let mut guard = INPUT_DIRTY.lock().unwrap_or_else(|e| e.into_inner());
+    if std::mem::take(&mut *guard) { 1 } else { 0 }
+}
+
+/// UTF-16 offset -> UTF-8 byte offset in `s` (clamped to the string's end).
+/// The `EntityInputHandler` contract speaks UTF-16; the model stores UTF-8.
+fn offset_from_utf16(s: &str, utf16_offset: usize) -> usize {
+    let mut utf8_offset = 0;
+    let mut utf16_count = 0;
+    for ch in s.chars() {
+        if utf16_count >= utf16_offset {
+            break;
+        }
+        utf16_count += ch.len_utf16();
+        utf8_offset += ch.len_utf8();
+    }
+    utf8_offset
+}
+
+/// UTF-8 byte offset -> UTF-16 offset in `s` (clamped to the string's end).
+fn offset_to_utf16(s: &str, utf8_offset: usize) -> usize {
+    let mut utf16_offset = 0;
+    let mut utf8_count = 0;
+    for ch in s.chars() {
+        if utf8_count >= utf8_offset {
+            break;
+        }
+        utf8_count += ch.len_utf8();
+        utf16_offset += ch.len_utf16();
+    }
+    utf16_offset
+}
+
+fn range_from_utf16(s: &str, range: &std::ops::Range<usize>) -> std::ops::Range<usize> {
+    offset_from_utf16(s, range.start)..offset_from_utf16(s, range.end)
+}
+
+fn range_to_utf16(s: &str, range: &std::ops::Range<usize>) -> std::ops::Range<usize> {
+    offset_to_utf16(s, range.start)..offset_to_utf16(s, range.end)
+}
+
+/// Pure state transition for `replace_text_in_range` (a commit: typed text,
+/// IME confirmation, paste, backspace/delete). Split out from the entity so
+/// the boundary arithmetic is unit-testable without a gpui context.
+/// All offsets are UTF-8 bytes; `range_utf16` is converted by the caller.
+fn input_apply_replace(
+    content: &mut String,
+    selected: &mut std::ops::Range<usize>,
+    marked: &mut Option<std::ops::Range<usize>>,
+    range: std::ops::Range<usize>,
+    new_text: &str,
+) {
+    let mut next = String::with_capacity(content.len() + new_text.len());
+    next.push_str(&content[..range.start]);
+    next.push_str(new_text);
+    next.push_str(&content[range.end..]);
+    *content = next;
+    let caret = range.start + new_text.len();
+    *selected = caret..caret;
+    *marked = None;
+}
+
+/// Pure state transition for `replace_and_mark_text_in_range` (IME preedit
+/// update). The marked range tracks the freshly inserted text; the selection
+/// lands inside it (or at its end when the IME gives no explicit selection).
+fn input_apply_replace_and_mark(
+    content: &mut String,
+    selected: &mut std::ops::Range<usize>,
+    marked: &mut Option<std::ops::Range<usize>>,
+    range: std::ops::Range<usize>,
+    new_text: &str,
+    new_selected_in_text: Option<std::ops::Range<usize>>,
+) {
+    let mut next = String::with_capacity(content.len() + new_text.len());
+    next.push_str(&content[..range.start]);
+    next.push_str(new_text);
+    next.push_str(&content[range.end..]);
+    *content = next;
+    *marked = if new_text.is_empty() {
+        None
+    } else {
+        Some(range.start..range.start + new_text.len())
+    };
+    *selected = match new_selected_in_text {
+        Some(sel) => range.start + sel.start..range.start + sel.end,
+        None => {
+            let caret = range.start + new_text.len();
+            caret..caret
+        }
+    };
+}
+
+/// The retained, per-widget editable state (RFC 0003 §3.2). Lives in
+/// `FfiView.inputs` keyed by `input_id`, created on first render and surviving
+/// rebuilds. Main-thread only (same reasoning as `ScrollHandle`).
+pub struct TextInputModel {
+    view: i32,
+    input_id: i32,
+    content: String,
+    placeholder: String,
+    /// Selection in UTF-8 byte offsets; empty range = caret.
+    selected_range: std::ops::Range<usize>,
+    /// IME preedit span in UTF-8 byte offsets. While `Some`, the composition
+    /// is drawn underlined and `gpui_input_set_text` is rejected.
+    marked_range: Option<std::ops::Range<usize>>,
+    last_layout: Option<ShapedLine>,
+    last_bounds: Option<Bounds<Pixels>>,
+    focus: FocusHandle,
+}
+
+impl TextInputModel {
+    fn caret(&self) -> usize {
+        self.selected_range.end
+    }
+
+    /// Previous char boundary (backspace / left-arrow granularity).
+    fn previous_boundary(&self, offset: usize) -> usize {
+        self.content[..offset]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+
+    /// Next char boundary (delete / right-arrow granularity).
+    fn next_boundary(&self, offset: usize) -> usize {
+        self.content[offset..]
+            .chars()
+            .next()
+            .map(|c| offset + c.len_utf8())
+            .unwrap_or(self.content.len())
+    }
+
+    fn sync_mirror(&self) {
+        mirror_update(
+            self.view,
+            self.input_id,
+            &self.content,
+            self.marked_range.is_some(),
+        );
+    }
+
+    /// Commit-path change notification to MoonBit (RFC 0003 §3.4): push, no
+    /// payload — the handler pulls via `gpui_input_copy_text` if it cares.
+    /// When the handler reports a state change (or queued a set_text), the
+    /// owning `FfiView` is notified so the committed tree re-renders; the
+    /// window is refreshed regardless because the widget's own visual state
+    /// (text/caret) changed.
+    fn emit_changed(&self, window: &mut Window, app: &mut App) {
+        let changed = unsafe {
+            mb_dispatch(ABI_VERSION, EVENT_INPUT_CHANGED, self.view, self.input_id, 0)
+        };
+        if changed == 1 || take_input_dirty() == 1 {
+            notify_view_app(app, self.view);
+        }
+        window.refresh();
+    }
+
+    /// Apply a queued `gpui_input_set_text` write (called from prepaint, which
+    /// has the context the C export lacks).
+    fn apply_set_text(&mut self, text: String) {
+        self.content = text;
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.marked_range = None;
+        self.sync_mirror();
+    }
+
+    /// Editing keys the widget consumes while focused. Returns true when the
+    /// key was handled (the root container's dispatch suppression means these
+    /// never reach MoonBit anyway; see `FfiView::render`).
+    fn handle_editing_key(&mut self, key: &str, window: &mut Window, app: &mut App) -> bool {
+        match key {
+            "backspace" => {
+                if self.selected_range.is_empty() {
+                    let start = self.previous_boundary(self.caret());
+                    self.selected_range = start..self.caret();
+                }
+                if !self.selected_range.is_empty() {
+                    let range = self.selected_range.clone();
+                    input_apply_replace(
+                        &mut self.content,
+                        &mut self.selected_range,
+                        &mut self.marked_range,
+                        range,
+                        "",
+                    );
+                    self.sync_mirror();
+                    self.emit_changed(window, app);
+                }
+                true
+            }
+            "delete" => {
+                if self.selected_range.is_empty() {
+                    let end = self.next_boundary(self.caret());
+                    self.selected_range = self.caret()..end;
+                }
+                if !self.selected_range.is_empty() {
+                    let range = self.selected_range.clone();
+                    input_apply_replace(
+                        &mut self.content,
+                        &mut self.selected_range,
+                        &mut self.marked_range,
+                        range,
+                        "",
+                    );
+                    self.sync_mirror();
+                    self.emit_changed(window, app);
+                }
+                true
+            }
+            "left" => {
+                let caret = if self.selected_range.is_empty() {
+                    self.previous_boundary(self.caret())
+                } else {
+                    self.selected_range.start
+                };
+                self.selected_range = caret..caret;
+                window.refresh();
+                true
+            }
+            "right" => {
+                let caret = if self.selected_range.is_empty() {
+                    self.next_boundary(self.caret())
+                } else {
+                    self.selected_range.end
+                };
+                self.selected_range = caret..caret;
+                window.refresh();
+                true
+            }
+            "home" => {
+                self.selected_range = 0..0;
+                window.refresh();
+                true
+            }
+            "end" => {
+                let end = self.content.len();
+                self.selected_range = end..end;
+                window.refresh();
+                true
+            }
+            "enter" => {
+                // Single-line input: Enter submits instead of inserting a
+                // newline (RFC 0003 §3.4).
+                let changed = unsafe {
+                    mb_dispatch(ABI_VERSION, EVENT_INPUT_SUBMIT, self.view, self.input_id, 0)
+                };
+                if changed == 1 || take_input_dirty() == 1 {
+                    notify_view_app(app, self.view);
+                    window.refresh();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl EntityInputHandler for TextInputModel {
+    fn text_for_range(
+        &mut self,
+        range_utf16: std::ops::Range<usize>,
+        adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = range_from_utf16(&self.content, &range_utf16);
+        adjusted_range.replace(range_to_utf16(&self.content, &range));
+        Some(self.content[range].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: range_to_utf16(&self.content, &self.selected_range),
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        self.marked_range
+            .as_ref()
+            .map(|range| range_to_utf16(&self.content, range))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.marked_range = None;
+        self.sync_mirror();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|r| range_from_utf16(&self.content, r))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+        input_apply_replace(
+            &mut self.content,
+            &mut self.selected_range,
+            &mut self.marked_range,
+            range,
+            new_text,
+        );
+        self.sync_mirror();
+        self.emit_changed(window, cx);
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<std::ops::Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|r| range_from_utf16(&self.content, r))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+        // The IME's selection is relative to `new_text`; convert against it.
+        let new_selected = new_selected_range_utf16
+            .as_ref()
+            .map(|r| range_from_utf16(new_text, r));
+        input_apply_replace_and_mark(
+            &mut self.content,
+            &mut self.selected_range,
+            &mut self.marked_range,
+            range,
+            new_text,
+            new_selected,
+        );
+        // Preedit stays Rust-internal (RFC 0003 §3.3): update the mirror and
+        // redraw, but do NOT notify MoonBit until the composition commits.
+        self.sync_mirror();
+        window.refresh();
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: std::ops::Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let layout = self.last_layout.as_ref()?;
+        let range = range_from_utf16(&self.content, &range_utf16);
+        Some(Bounds::from_corners(
+            point(
+                element_bounds.left() + layout.x_for_index(range.start),
+                element_bounds.top(),
+            ),
+            point(
+                element_bounds.left() + layout.x_for_index(range.end),
+                element_bounds.bottom(),
+            ),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let bounds = self.last_bounds.as_ref()?;
+        let layout = self.last_layout.as_ref()?;
+        let utf8_index = layout.index_for_x(point.x - bounds.left())?;
+        Some(offset_to_utf16(&self.content, utf8_index))
+    }
+}
+
+/// Custom element that shapes and paints one text-input line: committed text,
+/// preedit underline run, selection highlight, caret, and the
+/// `Window::handle_input` registration (the paint-time hook that connects the
+/// focused widget to the platform IME). Adapted from gpui's `examples/input.rs`.
+struct TextInputElement {
+    input: Entity<TextInputModel>,
+}
+
+struct TextInputPrepaint {
+    line: Option<ShapedLine>,
+    cursor: Option<PaintQuad>,
+    selection: Option<PaintQuad>,
+}
+
+impl IntoElement for TextInputElement {
+    type Element = Self;
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for TextInputElement {
+    type RequestLayoutState = ();
+    type PrepaintState = TextInputPrepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = window.line_height().into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        // Apply queued gpui_input_set_text writes first: the C export has no
+        // App context, so the widget itself is the application point.
+        let (view, input_id) = {
+            let m = self.input.read(cx);
+            (m.view, m.input_id)
+        };
+        let pending: Vec<String> = {
+            let mut q = INPUT_SET_TEXT_QUEUE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut taken = Vec::new();
+            q.retain(|(v, i, text)| {
+                if *v == view && *i == input_id {
+                    taken.push(text.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            taken
+        };
+        if !pending.is_empty() {
+            self.input.update(cx, |m, _| {
+                for text in pending {
+                    m.apply_set_text(text);
+                }
+            });
+        }
+
+        let input = self.input.read(cx);
+        let content = input.content.clone();
+        let selected_range = input.selected_range.clone();
+        let marked_range = input.marked_range.clone();
+        let cursor_offset = input.caret();
+        let style = window.text_style();
+
+        let (display_text, text_color): (SharedString, Hsla) = if content.is_empty() {
+            (input.placeholder.clone().into(), hsla(0., 0., 0.5, 0.6))
+        } else {
+            (content.clone().into(), style.color)
+        };
+
+        let base_run = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: text_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        // Three runs: committed / preedit (underlined) / committed. The
+        // preedit underline is the visual contract that tells the user which
+        // span the IME still owns (RFC 0003 §3.3).
+        let runs = match (&marked_range, content.is_empty()) {
+            (Some(marked), false) => vec![
+                TextRun {
+                    len: marked.start,
+                    ..base_run.clone()
+                },
+                TextRun {
+                    len: marked.end - marked.start,
+                    underline: Some(UnderlineStyle {
+                        color: Some(base_run.color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    }),
+                    ..base_run.clone()
+                },
+                TextRun {
+                    len: display_text.len() - marked.end,
+                    ..base_run
+                },
+            ]
+            .into_iter()
+            .filter(|run| run.len > 0)
+            .collect(),
+            _ => vec![base_run],
+        };
+
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line = window
+            .text_system()
+            .shape_line(display_text, font_size, &runs, None);
+
+        let show_marks = !content.is_empty();
+        let cursor_x = if show_marks {
+            line.x_for_index(cursor_offset)
+        } else {
+            px(0.)
+        };
+        let (selection, cursor) = if selected_range.is_empty() || !show_marks {
+            (
+                None,
+                Some(fill(
+                    Bounds::new(
+                        point(bounds.left() + cursor_x, bounds.top()),
+                        size(px(2.), bounds.bottom() - bounds.top()),
+                    ),
+                    rgb(0x3B82F6),
+                )),
+            )
+        } else {
+            (
+                Some(fill(
+                    Bounds::from_corners(
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.top(),
+                        ),
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.bottom(),
+                        ),
+                    ),
+                    rgba(0x3B82F640),
+                )),
+                None,
+            )
+        };
+        TextInputPrepaint {
+            line: Some(line),
+            cursor,
+            selection,
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus = self.input.read(cx).focus.clone();
+        // The paint-time registration that routes platform IME queries to this
+        // widget while it holds focus (`a11y-ime.md` §2.2, window.rs:3400).
+        window.handle_input(&focus, ElementInputHandler::new(bounds, self.input.clone()), cx);
+        if let Some(selection) = prepaint.selection.take() {
+            window.paint_quad(selection);
+        }
+        let line = prepaint.line.take().unwrap();
+        line.paint(bounds.origin, window.line_height(), window, cx)
+            .unwrap();
+        if focus.is_focused(window) {
+            if let Some(cursor) = prepaint.cursor.take() {
+                window.paint_quad(cursor);
+            }
+        }
+        self.input.update(cx, |m, _| {
+            m.last_layout = Some(line);
+            m.last_bounds = Some(bounds);
+        });
+    }
+}
+
+/// UTF-8 byte length of the committed content of `(view, input_id)`, for
+/// buffer sizing before `gpui_input_copy_text`. Main-thread contract, same as
+/// every other export called from inside `dispatch`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_input_text_len(view: i32, input_id: i32) -> i32 {
+    ffi_export("gpui_input_text_len", || match mirror_get(view, input_id) {
+        Some(entry) => entry.text.len() as i32,
+        None => GPUI_STATUS_INVALID_HANDLE,
+    })
+}
+
+/// Copy the committed content of `(view, input_id)` into `buf` (up to `len`
+/// bytes). Returns bytes written, or a negative status. Same contract as
+/// `gpui_event_copy_text`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_input_copy_text(view: i32, input_id: i32, buf: *mut u8, len: i32) -> i32 {
+    ffi_export("gpui_input_copy_text", || {
+        if buf.is_null() || len < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        let Some(entry) = mirror_get(view, input_id) else {
+            return GPUI_STATUS_INVALID_HANDLE;
+        };
+        let bytes = entry.text.as_bytes();
+        let copy_len = (len as usize).min(bytes.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, copy_len);
+        }
+        copy_len as i32
+    })
+}
+
+/// Replace the committed content of `(view, input_id)`; the caret moves to the
+/// end. Rejected with `GPUI_STATUS_BUSY_COMPOSING` while an IME composition is
+/// active (the marked text belongs to the IME, not the app). The write lands
+/// in the mirror immediately (subsequent reads see it) and is applied to the
+/// widget at its next prepaint.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_input_set_text(view: i32, input_id: i32, ptr: *const u8, len: i32) -> i32 {
+    ffi_export("gpui_input_set_text", || {
+        if len < 0 || (ptr.is_null() && len != 0) {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        let Some(entry) = mirror_get(view, input_id) else {
+            return GPUI_STATUS_INVALID_HANDLE;
+        };
+        if entry.composing {
+            return GPUI_STATUS_BUSY_COMPOSING;
+        }
+        let text = if len == 0 {
+            String::new()
+        } else {
+            // SAFETY: `ptr` points to `len` readable bytes for the duration of
+            // this call (the standard FFI borrow contract).
+            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
+                .into_owned()
+        };
+        mirror_update(view, input_id, &text, false);
+        INPUT_SET_TEXT_QUEUE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((view, input_id, text));
+        *INPUT_DIRTY.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        GPUI_STATUS_OK
+    })
+}
+
 pub struct FfiView {
     focus: FocusHandle,
     /// Index into `VIEWS` whose committed tree this view renders.
@@ -1685,6 +2462,10 @@ pub struct FfiView {
     /// up (or inserts) the handle for keyed scroll divs; keyless scroll divs
     /// get a fresh handle per render and reset to the top on each rebuild.
     scroll_handles: Rc<RefCell<HashMap<String, ScrollHandle>>>,
+    /// Retained text-input models, keyed by `input_id` (RFC 0003 §3.2). Same
+    /// lifetime story as `scroll_handles`: the tree rebuilds, the models
+    /// survive, and everything here is main-thread only.
+    inputs: Rc<RefCell<HashMap<i32, Entity<TextInputModel>>>>,
 }
 
 impl Render for FfiView {
@@ -1717,16 +2498,31 @@ impl Render for FfiView {
                     }
                     return;
                 }
+                // Text-input suppression (RFC 0003 §3.4): while a text input
+                // holds focus, keystrokes belong to the widget — typed text
+                // flows through the platform input handler into
+                // `replace_text_in_range`, and editing keys are consumed by
+                // the widget's own listener. Forwarding them to the app-level
+                // EVENT_KEY / EVENT_NAMED_KEY / EVENT_TEXT as well would
+                // double-deliver every keystroke.
+                let input_focused = this
+                    .inputs
+                    .borrow()
+                    .values()
+                    .any(|model| model.read(cx).focus.is_focused(win));
+                if input_focused {
+                    return;
+                }
                 let code = key_code(ev);
                 let mods = mods_bits(&ev.keystroke.modifiers);
                 if code != 0 {
                     let changed =
                         unsafe { mb_dispatch(ABI_VERSION, EVENT_KEY, view, code, mods) };
-                    notify_if_changed(changed, || cx.notify());
+                    notify_if_changed(changed.max(take_input_dirty()), || cx.notify());
                 } else if let Some(key_id) = named_key_id(&ev.keystroke.key) {
                     let changed =
                         unsafe { mb_dispatch(ABI_VERSION, EVENT_NAMED_KEY, view, key_id, mods) };
-                    notify_if_changed(changed, || cx.notify());
+                    notify_if_changed(changed.max(take_input_dirty()), || cx.notify());
                 }
                 // Emit a text event for keys that produce typed characters
                 // (including multi-char keys and IME-composed text). The
@@ -1746,13 +2542,20 @@ impl Render for FfiView {
                     // dispatch call; drop it on return so the queue cannot
                     // accumulate one entry per keystroke.
                     EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
-                    notify_if_changed(changed, || cx.notify());
+                    notify_if_changed(changed.max(take_input_dirty()), || cx.notify());
                 }
             }));
         if let Some(node) = &root {
-            if let Some(el) =
-                render_node(node, cx, true, &self.scroll_handles, &Cell::new(0), &Cell::new(0))
-            {
+            if let Some(el) = render_node(
+                node,
+                cx,
+                true,
+                &self.scroll_handles,
+                &self.inputs,
+                self.view as i32,
+                &Cell::new(0),
+                &Cell::new(0),
+            ) {
                 d = d.child(el);
             }
         }
@@ -1958,6 +2761,8 @@ fn render_node(
     cx: &mut Context<FfiView>,
     fill_available_space: bool,
     scroll_handles: &Rc<RefCell<HashMap<String, ScrollHandle>>>,
+    inputs: &Rc<RefCell<HashMap<i32, Entity<TextInputModel>>>>,
+    view_id: i32,
     keyless_scroll_id: &Cell<usize>,
     keyless_focus_id: &Cell<usize>,
 ) -> Option<AnyElement> {
@@ -2011,6 +2816,8 @@ fn render_node(
                     cx,
                     false,
                     scroll_handles,
+                    inputs,
+                    view_id,
                     keyless_scroll_id,
                     keyless_focus_id,
                 ) {
@@ -2266,7 +3073,7 @@ fn render_node(
                             .on_click(cx.listener(move |this, _ev: &ClickEvent, _win, cx| {
                                 let view = this.view as i32;
                                 let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_CLICK, view, cid, 0) };
-                                notify_if_changed(changed, || cx.notify());
+                                notify_if_changed(changed.max(take_input_dirty()), || cx.notify());
                             }));
                     }
                     Some(d.into_any_element())
@@ -2283,7 +3090,7 @@ fn render_node(
                         .on_click(cx.listener(move |this, _ev: &ClickEvent, _win, cx| {
                             let view = this.view as i32;
                             let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_CLICK, view, cid, 0) };
-                            notify_if_changed(changed, || cx.notify());
+                            notify_if_changed(changed.max(take_input_dirty()), || cx.notify());
                         }))
                         .into_any_element();
                     Some(el)
@@ -2337,6 +3144,65 @@ fn render_node(
                 child: text.into_any_element(),
             };
             Some(inset.into_any_element())
+        }
+        UiNode::TextInput {
+            input_id,
+            placeholder,
+        } => {
+            let input_id = *input_id;
+            // Get-or-create the retained model (RFC 0003 §3.2): the entity
+            // survives rebuilds; only the placeholder follows the tree.
+            let model = {
+                let mut map = inputs.borrow_mut();
+                map.entry(input_id)
+                    .or_insert_with(|| {
+                        let focus = cx.focus_handle();
+                        let model = cx.new(|_| TextInputModel {
+                            view: view_id,
+                            input_id,
+                            content: String::new(),
+                            placeholder: placeholder.clone(),
+                            selected_range: 0..0,
+                            marked_range: None,
+                            last_layout: None,
+                            last_bounds: None,
+                            focus,
+                        });
+                        // Seed the mirror so the pull ABI works before the
+                        // first edit.
+                        mirror_update(view_id, input_id, "", false);
+                        model
+                    })
+                    .clone()
+            };
+            model.update(cx, |m, _| {
+                if m.placeholder != *placeholder {
+                    m.placeholder = placeholder.clone();
+                }
+            });
+            let focus = model.read(cx).focus.clone();
+            let mouse_model = model.clone();
+            let key_model = model.clone();
+            let el = div()
+                .id(("gpui_input", input_id as usize))
+                .w_full()
+                .track_focus(&focus)
+                .tab_index(0)
+                .tab_stop(true)
+                .cursor(CursorStyle::IBeam)
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    let focus = mouse_model.read(cx).focus.clone();
+                    window.focus(&focus);
+                })
+                .on_key_down(move |ev: &KeyDownEvent, window, cx| {
+                    key_model.update(cx, |m, cx| {
+                        m.handle_editing_key(ev.keystroke.key.as_str(), window, cx);
+                    });
+                })
+                // G24 headless harness hook, mirroring the text arm.
+                .debug_selector(|| format!("input:{input_id}"))
+                .child(TextInputElement { input: model });
+            Some(el.into_any_element())
         }
     }
 }
@@ -2438,6 +3304,197 @@ mod headless_tests;
 /// observed through the `test-dispatch-stub` recorder (needs the feature).
 #[cfg(all(test, feature = "test-dispatch-stub"))]
 mod async_inject_tests;
+
+/// Text-input state-machine and pull-ABI tests (RFC 0003, issue #88). The
+/// entity/IME wiring needs a windowed context, but the boundary arithmetic and
+/// the mirror-backed C exports are plain logic — fixed here without gpui.
+#[cfg(test)]
+mod text_input_tests {
+    use super::*;
+
+    /// Serializes tests that touch the process-global INPUT_MIRROR /
+    /// INPUT_SET_TEXT_QUEUE / INPUT_DIRTY statics.
+    static INPUT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_input_statics() {
+        *INPUT_MIRROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        INPUT_SET_TEXT_QUEUE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *INPUT_DIRTY.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+
+    #[::core::prelude::v1::test]
+    fn utf16_offsets_round_trip_across_surrogates() {
+        // "aあ🎉b": 'a'=1/1 (u8/u16), 'あ'=3/1, '🎉'=4/2 (surrogate pair), 'b'=1/1.
+        let s = "aあ🎉b";
+        for (u8_off, u16_off) in [(0, 0), (1, 1), (4, 2), (8, 4), (9, 5)] {
+            assert_eq!(offset_to_utf16(s, u8_off), u16_off, "to_utf16({u8_off})");
+            assert_eq!(offset_from_utf16(s, u16_off), u8_off, "from_utf16({u16_off})");
+        }
+        // Clamped past the end.
+        assert_eq!(offset_to_utf16(s, 100), 5);
+        assert_eq!(offset_from_utf16(s, 100), 9);
+    }
+
+    #[::core::prelude::v1::test]
+    fn replace_commits_text_and_clears_the_mark() {
+        let mut content = String::from("こんにちは");
+        let mut sel = 15..15; // caret at end (5 chars × 3 bytes)
+        let mut marked = Some(6..15); // pretend にちは is preedit
+        input_apply_replace(&mut content, &mut sel, &mut marked, 6..15, "日は");
+        assert_eq!(content, "こん日は");
+        assert_eq!(sel, 12..12); // 6 + "日は".len()
+        assert_eq!(marked, None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn replace_and_mark_tracks_the_preedit_span() {
+        let mut content = String::new();
+        let mut sel = 0..0;
+        let mut marked = None;
+        // Type "に" via IME: preedit "に" appears, selected at its end.
+        input_apply_replace_and_mark(&mut content, &mut sel, &mut marked, 0..0, "に", None);
+        assert_eq!(content, "に");
+        assert_eq!(marked, Some(0..3));
+        assert_eq!(sel, 3..3);
+        // Preedit grows to "にほ" (IME replaces the whole marked span).
+        input_apply_replace_and_mark(&mut content, &mut sel, &mut marked, 0..3, "にほ", None);
+        assert_eq!(content, "にほ");
+        assert_eq!(marked, Some(0..6));
+        // Candidate selection swaps in "日本" with an explicit inner selection.
+        input_apply_replace_and_mark(
+            &mut content,
+            &mut sel,
+            &mut marked,
+            0..6,
+            "日本",
+            Some(0..6),
+        );
+        assert_eq!(content, "日本");
+        assert_eq!(marked, Some(0..6));
+        assert_eq!(sel, 0..6);
+        // Commit clears the mark.
+        input_apply_replace(&mut content, &mut sel, &mut marked, 0..6, "日本");
+        assert_eq!(content, "日本");
+        assert_eq!(marked, None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn empty_preedit_unmarks() {
+        let mut content = String::from("xにほ");
+        let mut sel = 7..7;
+        let mut marked = Some(1..7);
+        // IME cancel: replace the marked span with "".
+        input_apply_replace_and_mark(&mut content, &mut sel, &mut marked, 1..7, "", None);
+        assert_eq!(content, "x");
+        assert_eq!(marked, None);
+        assert_eq!(sel, 1..1);
+    }
+
+    #[::core::prelude::v1::test]
+    fn pull_abi_reads_the_mirror() {
+        let _lock = INPUT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_input_statics();
+        assert_eq!(gpui_input_text_len(0, 7), GPUI_STATUS_INVALID_HANDLE);
+        mirror_update(0, 7, "héllo", false);
+        assert_eq!(gpui_input_text_len(0, 7), 6); // é is 2 bytes
+        let mut buf = [0u8; 16];
+        let n = gpui_input_copy_text(0, 7, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(n, 6);
+        assert_eq!(&buf[..6], "héllo".as_bytes());
+        // Truncating copy still reports bytes written.
+        let n = gpui_input_copy_text(0, 7, buf.as_mut_ptr(), 2);
+        assert_eq!(n, 2);
+        // Bad args.
+        assert_eq!(
+            gpui_input_copy_text(0, 7, std::ptr::null_mut(), 4),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        assert_eq!(
+            gpui_input_copy_text(0, 7, buf.as_mut_ptr(), -1),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn set_text_queues_and_is_rejected_mid_composition() {
+        let _lock = INPUT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_input_statics();
+        // Unknown widget.
+        assert_eq!(
+            gpui_input_set_text(0, 9, b"x".as_ptr(), 1),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        mirror_update(0, 9, "old", false);
+        assert_eq!(gpui_input_set_text(0, 9, b"new".as_ptr(), 3), GPUI_STATUS_OK);
+        // The mirror sees the write immediately; the entity write is queued
+        // and the dirty flag arms the next dispatch site's notify.
+        assert_eq!(mirror_get(0, 9).unwrap().text, "new");
+        assert_eq!(
+            INPUT_SET_TEXT_QUEUE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1
+        );
+        assert_eq!(take_input_dirty(), 1);
+        assert_eq!(take_input_dirty(), 0); // consumed
+        // Mid-composition writes are rejected (RFC 0003 §3.5).
+        mirror_update(0, 9, "にほ", true);
+        assert_eq!(
+            gpui_input_set_text(0, 9, b"z".as_ptr(), 1),
+            GPUI_STATUS_BUSY_COMPOSING
+        );
+        assert_eq!(mirror_get(0, 9).unwrap().text, "にほ");
+        // Clearing with len 0 / null ptr is allowed when not composing.
+        mirror_update(0, 9, "done", false);
+        assert_eq!(gpui_input_set_text(0, 9, std::ptr::null(), 0), GPUI_STATUS_OK);
+        assert_eq!(mirror_get(0, 9).unwrap().text, "");
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_input_decodes_as_a_leaf() {
+        // GPUI magic + version, OP_TEXT_INPUT(input_id=5, "hint"), OP_SET_ROOT.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"GPUI");
+        buf.extend_from_slice(&(BUFFER_VERSION as u32).to_le_bytes());
+        buf.push(OP_TEXT_INPUT as u8);
+        buf.extend_from_slice(&5i32.to_le_bytes());
+        buf.extend_from_slice(&(4u32).to_le_bytes());
+        buf.extend_from_slice(b"hint");
+        buf.push(OP_SET_ROOT as u8);
+        let _lock = TEST_VIEWS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        VIEWS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let status = build_tree_from_buffer(0, &buf);
+        assert_eq!(status, GPUI_STATUS_OK);
+        let guard = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.first().and_then(|slot| slot.as_ref()) {
+            Some(UiNode::TextInput {
+                input_id,
+                placeholder,
+            }) => {
+                assert_eq!(*input_id, 5);
+                assert_eq!(placeholder, "hint");
+            }
+            _ => panic!("expected TextInput root"),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_input_content_is_not_in_the_debug_dump() {
+        let mut out = Vec::new();
+        collect_text_contents(
+            &UiNode::TextInput {
+                input_id: 1,
+                placeholder: "p".into(),
+            },
+            &mut out,
+        );
+        assert!(out.is_empty());
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3155,6 +4212,8 @@ mod tests {
             ("EVENT_TEXT", EVENT_TEXT),
             ("EVENT_NAMED_KEY", EVENT_NAMED_KEY),
             ("EVENT_ASYNC", EVENT_ASYNC),
+            ("EVENT_INPUT_CHANGED", EVENT_INPUT_CHANGED),
+            ("EVENT_INPUT_SUBMIT", EVENT_INPUT_SUBMIT),
             ("MOD_CTRL", MOD_CTRL),
             ("MOD_ALT", MOD_ALT),
             ("MOD_SHIFT", MOD_SHIFT),
@@ -3236,6 +4295,7 @@ mod tests {
             ("OP_SET_FOCUSABLE", OP_SET_FOCUSABLE),
             ("OP_SET_TAB_INDEX", OP_SET_TAB_INDEX),
             ("OP_SET_TAB_STOP", OP_SET_TAB_STOP),
+            ("OP_TEXT_INPUT", OP_TEXT_INPUT),
             ("TEXT_ALIGN_DEFAULT", TEXT_ALIGN_DEFAULT),
             ("TEXT_ALIGN_LEFT", TEXT_ALIGN_LEFT),
             ("TEXT_ALIGN_CENTER", TEXT_ALIGN_CENTER),

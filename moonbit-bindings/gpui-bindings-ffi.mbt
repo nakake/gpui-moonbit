@@ -44,3 +44,24 @@ extern "C" fn gpui_run_window_ffi(
   width : Float,
   height : Float,
 ) -> Int = "gpui_run_window"
+
+///|
+extern "C" fn gpui_input_text_len_ffi(view : Int, input_id : Int) -> Int = "gpui_input_text_len"
+
+///|
+#borrow(buf)
+extern "C" fn gpui_input_copy_text_ffi(
+  view : Int,
+  input_id : Int,
+  buf : Bytes,
+  len : Int,
+) -> Int = "gpui_input_copy_text"
+
+///|
+#borrow(ptr)
+extern "C" fn gpui_input_set_text_ffi(
+  view : Int,
+  input_id : Int,
+  ptr : Bytes,
+  len : Int,
+) -> Int = "gpui_input_set_text"

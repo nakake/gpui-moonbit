@@ -105,3 +105,25 @@ test "text handler rejects digit runs that would overflow i32" {
   on_text("99999999999") // 11 digits → rejected
   assert_eq(count.get(store), 5)
 }
+
+///|
+test "submit handler parses digits and sets count" {
+  // `input_text` / `input_set_text` are Rust FFI and cannot run under
+  // `moon test`, so the pull/clear half of `on_submit_input` is covered by
+  // the linked round-trip (cmd/roundtrip). The parse half is pure:
+  count.set(store, 0)
+  match parse_digits("42") {
+    Some(value) => count.set(store, value)
+    None => ()
+  }
+  assert_eq(count.get(store), 42)
+}
+
+///|
+test "submit parser rejects empty, non-digit, and overflowing input" {
+  assert_eq(parse_digits(""), None)
+  assert_eq(parse_digits("12a"), None)
+  assert_eq(parse_digits("2147483647"), Some(2147483647))
+  assert_eq(parse_digits("2147483648"), None) // i32::MAX + 1
+  assert_eq(parse_digits("99999999999"), None)
+}

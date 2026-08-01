@@ -52,7 +52,7 @@ LD_LIBRARY_PATH=$PWD/../.linux-libs env -u WAYLAND_DISPLAY \
 .\moonbit-bindings\_build\native\debug\build\cmd\main\main.exe
 ```
 
-起動すると Counter デモが表示されます。`-1` / `Reset` / `+1` / `+10` ボタン、`j` / `k` / `r` キー、Enter/Escape/矢印キー、数字入力で値を操作できます。
+起動すると Counter デモが表示されます。`-1` / `Reset` / `+1` / `+10` ボタン、`j` / `k` / `r` キー、Enter/Escape/矢印キー、数字入力で値を操作できます。テキスト入力ボックス（RFC 0003）に数字を入力して Enter を押すと、その値がカウントにセットされボックスはクリアされます（IME 合成にも対応）。
 
 MoonBit 側の型検査だけなら、このディレクトリで `moon check`（および `moon test`）を実行できます。
 
@@ -80,7 +80,7 @@ git 依存の場合は `{ "git": { "url": "https://github.com/nakake/gpui-moonbi
 
 ### 2. 実行ファイルの moon.pkg で 3 パッケージを import する
 
-```moonbit
+```moonbit nocheck
 // exe の moon.pkg
 import {
   "nakake/gpui-bindings",       // 高水準 API（CommandBuffer / build_tree / run_window）
@@ -97,7 +97,8 @@ options("is-main": true)
 
 Rust staticlib は `app.dispatch` のマングルシンボルを未解決参照として持つため、dead-code elimination で消されないよう明示保持が必須です:
 
-```moonbit
+```moonbit nocheck
+///|
 fn main {
   let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
   ignore(_keep)
@@ -161,9 +162,30 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
 }
 ```
 
-利用可能なコマンド: `div` / `text` / `set_size` / `set_bg` / `set_flex_row` / `set_flex_col` / `set_center` / `set_gap` / `set_rounded` / `set_on_click` / `set_key` / `set_padding` / `set_border` / `add_child` / `set_root`。色成分は 0–255 にクランプされます。テキストは内部で UTF-8 にエンコードされ、明示長で送られます（NUL 終端なし）。繰り返し現れる部分木は**コンポーネント**（`button(cb, props)` など、`components.mbt`）として切り出せます。コンポーネントは `CommandBuffer` に部分木を書き、ルートはスタックに残るので、呼び出し側が `add_child()` で接続します。
+利用可能なコマンド: `div` / `text` / `text_input` / `set_size` / `set_bg` / `set_flex_row` / `set_flex_col` / `set_center` / `set_gap` / `set_rounded` / `set_on_click` / `set_key` / `set_padding` / `set_border` / `add_child` / `set_root`。色成分は 0–255 にクランプされます。テキストは内部で UTF-8 にエンコードされ、明示長で送られます（NUL 終端なし）。繰り返し現れる部分木は**コンポーネント**（`button(cb, props)` / `text_input(cb, props)` など、`components.mbt`）として切り出せます。コンポーネントは `CommandBuffer` に部分木を書き、ルートはスタックに残るので、呼び出し側が `add_child()` で接続します。
 
 **色の渡し方**: alpha 付きの `Color` を取る API（`set_bg_color` / `set_text_color` / `set_shadow` / `set_border_color`）を推奨します。生の `r, g, b` トリプレットを取る `set_bg` / `set_border` / `text` も引き続き利用可能で、wire format は同一です（issue #81 で整合化）。`Color` は `Color::rgb(r, g, b)` / `Color::rgba(r, g, b, a)` で作ります。
+
+**テキスト入力ボックス**（RFC 0003）: `text_input(cb, props)` コンポーネント（`components.mbt`）が編集可能な 1 行ボックスを描きます。`TextInputProps { key, input_id, placeholder }` を取り、`input_id` は `HandlerRegistry::new_input_id()` で発行します。編集バッファは Rust 側のテキストモデルが正であり（再構築を跨いで生存）、MoonBit の store には置きません。イベントは **pull 型**です: `EVENT_INPUT_CHANGED`（確定テキストの変化）/ `EVENT_INPUT_SUBMIT`（Enter）は `(4, kind, view, input_id, 0)` で届き、ペイロードを運びません。ハンドラは `input_text(view, input_id)` で現在内容を読み、`input_set_text(view, input_id, text)` で書き換えます。`input_set_text` は IME 合成中に `GPUI_STATUS_BUSY_COMPOSING`（`-13`）で拒否します。登録パターンはクリックハンドラと同じく、id の発行とハンドラ登録を 1 つの top-level let に束ねます（DCE 安全）:
+
+```moonbit nocheck
+///|
+let prompt_input = {
+  let id = handlers.new_input_id()
+  handlers.on_submit(fn(view) {
+    match input_text(view, id) {
+      Ok(text) => {
+        // ... text を使って状態を更新
+        ignore(input_set_text(view, id, "")) // クリア
+      }
+      Err(_) => ()
+    }
+  })
+  id
+}
+```
+
+ツリー側では `text_input(cb, { key: "prompt-input", input_id: prompt_input, placeholder: "..." })` を呼び `add_child()` で接続します。`on_input_changed(fn(view){…})` も登録可能で、確定テキストのたびに呼ばれます（preedit 更新では呼ばれません）。
 
 ### 2. ウィンドウを開く
 
@@ -235,7 +257,7 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
 ```
 
 - slot 0 `version`: 常に `ABI_VERSION`（現在は `4`）。不一致なら `framework_dispatch` がハンドラを実行せず `0` を返して古い Rust バイナリを拒否します
-- slot 1 `kind`: イベント種別（`EVENT_CLICK` = 1、`EVENT_KEY` = 2、`EVENT_TEXT` = 3、`EVENT_NAMED_KEY` = 4、`EVENT_ASYNC` = 5）
+- slot 1 `kind`: イベント種別（`EVENT_CLICK` = 1、`EVENT_KEY` = 2、`EVENT_TEXT` = 3、`EVENT_NAMED_KEY` = 4、`EVENT_ASYNC` = 5、`EVENT_INPUT_CHANGED` = 6、`EVENT_INPUT_SUBMIT` = 7）
 - slot 2 `view`: 再構築対象の view id
 - slot 3–4 `data_a` / `data_b`: 種別依存
   - `EVENT_CLICK`: `data_a` = click_id（`HandlerId` の raw 値）、`data_b` = 0
@@ -243,6 +265,7 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
   - `EVENT_TEXT`: `data_a` = token、`data_b` = byte 長（ペイロードは `gpui_event_copy_text` でコピー）
   - `EVENT_NAMED_KEY`: `data_a` = named_key id（`KEY_ENTER` / `KEY_ESCAPE` / `KEY_UP` …）、`data_b` = modifier bits
   - `EVENT_ASYNC`: `data_a` = token、`data_b` = byte 長（ペイロードは `copy_async_payload` でコピー。RFC 0002 の非同期注入経路）
+  - `EVENT_INPUT_CHANGED` / `EVENT_INPUT_SUBMIT`: `data_a` = input_id（`InputId` の raw 値）、`data_b` = 0。ペイロードはなく、現在内容は `input_text(view, input_id)` で pull する（RFC 0003）
 
 `dispatch` は状態が変わった場合に `1`、変わらない場合に `0` を返します。`framework_dispatch` は配送の前後で store の dirty を区切り、`set` が 1 度でも起きたときだけ再構築コールバックを呼んで `1` を返します。`1` のときだけ Rust 側が再描画通知（`cx.notify()`）を行います。再構築に失敗しても Rust 側は旧ツリーを保持しているため、dirty に基づき `1` を返して構いません。
 
@@ -254,14 +277,14 @@ MoonBit native の `Int` は 32-bit であり、この callback とコマンド�
 
 ## Examples
 
-- [`app/app.mbt`](app/app.mbt) — interactive Counter（ボタン 4 つ + キー操作 + テキスト入力）。`cmd/main` から起動する現行デモです。
+- [`app/app.mbt`](app/app.mbt) — interactive Counter（ボタン 4 つ + キー操作 + テキスト入力ボックス）。`cmd/main` から起動する現行デモです。テキストボックスへの数字入力 + Enter でカウントをセットします（`on_submit` + `input_text` / `input_set_text`、RFC 0003）。
 - [`examples/hello/`](examples/hello/) — Counter 以外の最小例。静的なタイトルと ON/OFF が切り替わるステータスカード、1 つのトグルボタン、`space` / `Escape` キー操作を実装しています。
 
 `examples/hello` は `app/` と同じく**ライブラリパッケージ**です。`moon check` / `moon build` で型検査・コンパイルされ、API 変更に対して常に追従します。実行可能ファイルの生成には Rust staticlib とのリンクが必要で、それは root の build driver が `cmd/main` 向けにだけ準備するため、現状はコード例としての提供です。実行可能にするには、`cmd/main` と同じ OS 別 link template 方式で `cmd/hello` エントリを追加し build driver に組み込む作業が別途必要です（将来の作業）。`hello.mbt` の `launch()` が、その際の実行ファイルから呼ぶエントリポイントです。
 
 ## API リファレンス
 
-公開 API（`CommandBuffer` の各メソッド、`build_tree` / `run_window`、フレームワーク層の `Store` / `CellId` / `Signal` / `HandlerRegistry` / `HandlerId` / `RenderCtx` / `button` / `framework_dispatch`、`Event`、および `abi_constants.mbt` の定数群）には MoonBit の doc comment `///|` が付いています。ソースと併せて参照してください。
+公開 API（`CommandBuffer` の各メソッド、`build_tree` / `run_window` / `input_text` / `input_set_text`、フレームワーク層の `Store` / `CellId` / `Signal` / `HandlerRegistry` / `HandlerId` / `InputId` / `RenderCtx` / `button` / `text_input` / `framework_dispatch`、`Event`、および `abi_constants.mbt` の定数群）には MoonBit の doc comment `///|` が付いています。ソースと併せて参照してください。
 
 - 対象ファイル: [`gpui-bindings.mbt`](gpui-bindings.mbt)（高水準 API）、[`components.mbt`](components.mbt) / [`store.mbt`](store.mbt) / [`signal.mbt`](signal.mbt) / [`event.mbt`](event.mbt) / [`handlers.mbt`](handlers.mbt) / [`framework.mbt`](framework.mbt)（フレームワーク層、RFC 0001）、[`deprecated.mbt`](deprecated.mbt)（非推奨エイリアス）、[`abi_constants.mbt`](abi_constants.mbt)（`gpui-sys/abi.toml` から生成される ABI 定数）
 - ドキュメント生成: MoonBit ツールチェーンの標準手段は `moon doc`（`moon doc --serve` でローカルサーバ起動）です。現行ツールチェーン（moon 0.1.20260721 時点）では、パッケージ単位の JSON（`_build/doc/nakake/gpui-bindings/package_data.json` 等、`///|` doc comment を含む）は生成されますが、最終的なドキュメントサイト組み立て段階で moondoc が `moon.mod.json` を要求して例外終了します（本モジュールは新形式の `moon.mod` を使用）。サイト生成は moondoc 側の対応待ちです。それまでは `///|` doc comment とソースが API リファレンスの正本です。

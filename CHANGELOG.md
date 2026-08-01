@@ -8,6 +8,9 @@
 
 ### Added
 
+- テキスト入力 widget と IME 合成の実装（#88、RFC 0003、G6 / G19）:
+  - **Rust 側**（`gpui-sys`）: `UiNode::TextInput` leaf ノード（`OP_TEXT_INPUT` = 38、operand は `input_id i32 | len u32 | utf8[len]` の placeholder）。編集バッファ・選択範囲・preedit は view ごとの `TextInputModel` エンティティ（`FfiView.inputs`、再構築を跨いで生存）が保持し、Rust を正とする。`EntityInputHandler` 実装（UTF-16↔UTF-8 境界変換、preedit は下線付きで Rust 内に留まる）。確定で `EVENT_INPUT_CHANGED`（6）、フォーカス中の Enter で `EVENT_INPUT_SUBMIT`（7）を配送（envelope `(4, kind, view, input_id, 0)`、ペイロードなしの pull 型）。pull ABI `gpui_input_text_len` / `gpui_input_copy_text` / `gpui_input_set_text`（メインスレッド更新のミラー経由。`set_text` は合成中に `GPUI_STATUS_BUSY_COMPOSING`（`-13`）で拒否し、widget の次回 prepaint で適用）。input フォーカス中はルートコンテナが `EVENT_KEY` / `EVENT_NAMED_KEY` / `EVENT_TEXT` を抑止（二重配送の防止、Tab トラバースは継続）。8 本の unit test + drift guard。
+  - **MoonBit 側**（`moonbit-bindings`）: `CommandBuffer::text_input(input_id, placeholder)` opcode ラッパー、`input_text(view, input_id)` / `input_set_text(view, input_id, text)` pull ラッパー、`GpuiError::BusyComposing`（`-13`）、`Event::InputChanged` / `InputSubmit` デコード、`HandlerRegistry` の `InputId` newtype + `new_input_id` / `on_input_changed` / `on_submit`（id ごとの単一配送）、`text_input(cb, props)` コンポーネント（`components.mbt`）。Counter デモにテキストボックスを追加: 数字を入力して Enter でカウントにセットしボックスをクリア（`parse_digits` を `on_text` と共有、i32 オーバーフローガード付き）。`cmd/roundtrip` に headless input smoke を追加（pull ABI のリンク・submit のルーティング・headless での `INVALID_HANDLE` を検証）。wire format ピンニング test・registry test・コンポーネント test を追加。
 - コンポーネントモデルと状態管理の実装（#86、RFC 0001 Phase A–D、G11–G14）:
   - **Phase A** — 型付きイベントとハンドラレジストリ: `event.mbt`（`Event` enum / `decode_event`）と `handlers.mbt`（`HandlerRegistry`、`on_click` / `on_key` / `on_named_key` / `on_text`、fan-out 配送）。`BTN_*` int 定数と int switch を撤廃。
   - **Phase B** — 型付き状態ストア: `store.mbt`（`Store` / `CellId[T]`、`cell_for_key`）。`Array[Int]` / `Array[Bool]` のグローバル可変配列を置換。RFC の `Any + downcast` 案はこのツールチェーンに `Any` が無いため不採用で、`CellId[T]` が型付き get/set クロージャを保持する設計を採用（RFC §6）。
