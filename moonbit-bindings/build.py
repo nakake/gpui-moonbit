@@ -143,7 +143,18 @@ def main():
     elif system == "Darwin":
         os_pkg = "macos"
     elif system == "Windows":
-        os_pkg = "windows"
+        # Windows prebuild consumption is not implemented yet: the flags below
+        # are cc/ld style (-L / -l), which MSVC's cl misparses — on CI this
+        # broke `moon test`'s link.blackbox_test with CVT1100 (duplicate
+        # manifest). Until MSVC-style flags (/LIBPATH:, gpui_sys.lib) are
+        # implemented and verified, emit no LinkConfig: in-repo builds keep
+        # using build.ps1, and Windows consumers use the template-repo
+        # fallback documented in README (§prebuild).
+        log("Windows: prebuild link-flag propagation not yet supported; "
+            "emitting empty LinkConfig (use build.ps1 / the template-repo "
+            "fallback).")
+        print(json.dumps({"link_configs": []}))
+        return
     else:
         log(f"ERROR: unsupported OS: {system}")
         sys.exit(1)

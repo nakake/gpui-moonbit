@@ -46,6 +46,7 @@
 
 ### Fixed
 
+- Windows CI の `moon test` が #93 の prebuild 導入後に失敗していた問題を修正: `build.py` が cc/ld 形式のリンクフラグ（`-L`/`-l`）を MSVC の `cl` に渡し、`link` パッケージのテスト exe が `CVT1100`（duplicate manifest）でリンク失敗していた。Windows では prebuild のフラグ伝播を無効化（空の LinkConfig）し、MSVC 形式フラグの実装・検証は後続 issue とする。
 - テキストの空白パディング workaround を撤廃し、paint-time ¼px オフセット（`TextGlyphInset`）に置換。コンテンツ汚染を解消（#16、G10）。
 - `on_text` が 10 桁以上の数字入力で i32 境界を wrap して負値になり得た問題を、オーバーフローガードで修正（#81）。
 - 新規 FFI 関数追加時のビルドデッドロックを修正（#71）: bindgen が消費する `gpui-sys/include/gpui_sys.h` を、`moon check` ゲートより前に `gen-header`（cbindgen のみ依存の小クレート）で再生成するように `build.sh` / `build.ps1` の順序を変更。新しい `#[unsafe(no_mangle)] pub extern "C"` を追加してもドライバ 1 回でビルドが通る。`moon check` 失敗時にはヘッダー再生成のヒントを表示。`build.ps1` 側は Windows 未検証。
