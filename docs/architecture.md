@@ -50,6 +50,7 @@
 | `gpui_event_copy_text(token, buf, len) -> i32` | `app.mbt` 内の `gpui_event_copy_text_ffi`（直接 FFI）— `EVENT_TEXT` のペイロードを同期コピー |
 | `gpui_debug_dump_text(view, buf, len) -> i32` | `debug_dump_text(view)` — コミット済みツリーの全テキストを DFS pre-order で読み戻す（デバッグ・往復テスト用） |
 | `gpui_abi_probe(value) -> i32` | `abi_probe(v)` — `Int` == `i32` の境界横断往復検証（`cmd/roundtrip` がビルドごとに実行） |
+| `gpui_post_event(view, const uint8_t *ptr, int32_t len) -> i32` | `post_event(view, payload)` — 任意スレッドから `view` へ非同期イベントを注入（RFC 0002）。ペイロードは呼び出し中にコピーされ即座に戻る。`EVENT_ASYNC` としてメインスレッドで配送される |
 
 コマンドバッファのワイヤ形式（すべてリトルエンディアン）:
 
@@ -113,6 +114,8 @@ opcode・`BUFFER_VERSION`・enum 定数（`[align_items]` 等の各セクショ�
 | `GPUI_STATUS_NO_ROOT`（`-8`） | `OP_SET_ROOT` なしでバッファが終了した |
 | `GPUI_STATUS_DUPLICATE_KEY`（`-9`） | コミットするツリー内で 2 つ以上のノードが同じキーを持つ |
 | `GPUI_STATUS_KEY_NOT_FOUND`（`-10`） | `gpui_update_text` のキーがコミット済みツリーで見つからない（フルリビルドへフォールバック） |
+| `GPUI_STATUS_QUEUE_FULL`（`-11`） | 非同期注入キューが満杯（back-pressure）。producer は後で再試行・集約・破棄を判断する（RFC 0002 §3.2） |
+| `GPUI_STATUS_PAYLOAD_TOO_LARGE`（`-12`） | 注入ペイロードが 1 エントリの上限（`INJECT_PAYLOAD_MAX_BYTES`）を超過 |
 
 全 C export はこれらのステータスを返す（`gpui_event_copy_text` / `gpui_debug_dump_text` は成功時に書き込んだバイト数を返す）。高レベル MoonBit ラッパー（`build_tree` / `run_window` / `update_text` / `debug_dump_text`）は `Result[_, Int]` を返し、`Err(status)` で負の status code を伝播する。`classify_status` / `status_message` / `GpuiError`（issue #54, G20）が生のコードを構造化エラーへ分類し、`expect_ok` が回復不能な失敗を診断メッセージ付きで abort する。`dispatch` 内の更新失敗時はログ出力して `changed` をそのまま返す（Rust 側は旧ツリーを保持済みのため、`cx.notify()` で旧ツリーが再描画される）。イベントはビュー単位でルーティングされる: dispatch の slot 2 は view id（`VIEWS` のインデックス、`FfiView.view` 由来）を運び、`build_tree(view)` / `update_text(view, …)` がそのビューのツリーを更新する（issue #41/#49）。
 
@@ -124,6 +127,7 @@ opcode・`BUFFER_VERSION`・enum 定数（`[align_items]` 等の各セクショ�
 - イベント種別・エンベロープ定数・コールバックのパラメータと戻り値型は `gpui-sys/abi.toml` に由来する。ドライバが定数を生成し、シグネチャを検証する。
 - `EVENT_TEXT` のペイロードは Rust 所有のイベントキューに格納され、`gpui_event_copy_text(token, buf, len)` C export 経由で MoonBit が同期的にコピーする。64 ビットポインタは i32 スロットに収まらないため、トークン＋コピー方式を採用する。
 - `EVENT_NAMED_KEY` は Enter/Escape/矢印などの名前付きキーを ABI id（`abi.toml` の `[named_keys]`）で運ぶ。1 文字キーは `key_code` がコードポイントへ変換し `EVENT_KEY` になるのに対し、`key_code` が 0 を返す名前付きキーを `named_key_id` が id へマップして `(4, EVENT_NAMED_KEY, view, named_key_id, mods_bits)` を送る。新しいイベント種別の追加は後方互換（古い MoonBit は未知 kind を `Unknown` として 0 を返す）なので `ABI_VERSION` は据え置き。
+- `EVENT_ASYNC`（`5`）は非同期注入イベントを運ぶ（RFC 0002）。外部 native コードが `gpui_post_event(view, ptr, len)` で任意スレッドからペイロードを有界キューへ push し、メインスレッドの drain pump が各エントリを `(4, EVENT_ASYNC, view, token, byte_len)` として配送する。ペイロードは `EVENT_TEXT` と同じ token+copy 機構（`EVENT_QUEUE` + `gpui_event_copy_text`）に乗り、MoonBit は dispatch 中に `copy_async_payload(token, len)` で同期的にコピーする。ペイロードは opaque bytes でライブラリは一切解釈せず、フレーミングは producer と MoonBit ハンドラの契約である。新しい種別の追加なので `ABI_VERSION` は据え置き（古い MoonBit は `Unknown` を返す）。
 - `cmd/main/main.mbt` は `app.dispatch` を `_keep` に束縛し、Rust からのみ参照される関数の dead-code elimination（不要コード削除）を防ぐ。
 
 ドライバは固定の `app.dispatch` に対する実際の現在のマングル名を抽出するため、ツールチェーンのマングル方式の変更にも追従する。これはパッケージ/関数名の自動リネームサポートではない。`app` や `dispatch` を変更する場合は、`build.sh` の `PKG_FN_SUFFIX`、`build.ps1` の `$PkgFnSuffix`、および `gpui-sys/build.rs` のコールバック ABI ポリシー/テンプレートを更新する必要がある。MoonBit のマングル名には型が含まれないため、ドライバは `main.c` が利用可能な場合、生成された C から `int32_t` の戻り値と 5 つの `int32_t` パラメータを別途検証する。
@@ -157,6 +161,7 @@ sequenceDiagram
 ```
 
 `EVENT_CLICK=1`、`EVENT_KEY=2`、`EVENT_TEXT=3`、`EVENT_NAMED_KEY=4` は `abi.toml` に由来する（`ABI_VERSION=4`）。クリックリスナーは `(4, EVENT_CLICK, view, click_id, 0)` を供給する。外側のフォーカスされたコンテナは 1 文字のキーをその Unicode コードポイントへマップし `(4, EVENT_KEY, view, codepoint, mods_bits)` を送る。`EVENT_TEXT` は `(4, EVENT_TEXT, view, token, byte_len)` を送り、MoonBit は `gpui_event_copy_text` で UTF-8 ペイロードをコピーする。`key_char`（IME/レイアウト処理後の実際の入力文字）を使用するため、複数文字や合成文字も正しく届く。名前付きキー（Enter/Escape/矢印/Tab/Backspace/Delete/Home/End/PageUp/PageDown）は `key_code` が 0 を返すため、`named_key_id` が `[named_keys]` の id へマップし `(4, EVENT_NAMED_KEY, view, named_key_id, mods_bits)` を送る。Enter は `key_char` が `"\n"` のため `EVENT_TEXT` も同時に発火するが、デモの `on_text` は非数字を無視するため二重カウントにはならない。意味の決定は MoonBit が行う: `BTN_DECREMENT=1`、`BTN_RESET=2`、`BTN_INCREMENT=3`、`BTN_INCREMENT_10=4`、`j=106`、`k=107`、`r=114`、`KEY_ENTER`/`KEY_UP`→+1、`KEY_DOWN`→-1、`KEY_ESCAPE`→reset。
+`EVENT_ASYNC=5` は非同期注入経路（RFC 0002）で、外部 producer が `gpui_post_event` で push したペイロードをメインスレッドの drain pump が `(4, EVENT_ASYNC, view, token, byte_len)` として配送する。ペイロードは `EVENT_TEXT` と同じ token+copy 機構に乗り、MoonBit は dispatch 中に同期コピーする。
 
 Tab / Shift+Tab は外側コンテナの `on_key_down` が消費してフォーカストラバースに使う（issue #52）ため、`EVENT_NAMED_KEY` としては MoonBit に届かない（`KEY_TAB` id は ABI に定義されているが、デモの `dispatch` には到達しない）。
 

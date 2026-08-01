@@ -18,11 +18,13 @@
 - キーボードナビゲーション: `OP_SET_FOCUSABLE` / `OP_SET_TAB_INDEX` / `OP_SET_TAB_STOP`（35–37）と Tab / Shift+Tab トラバース。a11y / IME の境界を `docs/a11y-ime.md` に文書化（#52、G18 / G19）。
 - 計測で正当化したインクリメンタル更新: keyed in-place `gpui_update_text` FFI。24 行ツリーで full rebuild 比 約440x（11.4µs → 25.9ns）。汎用 vdom diff は意図的に未実装（#10）。
 - prebuild パイプライン（#93、G2）: `moonbit-bindings/build.py` を `--moonbit-unstable-prebuild` で登録。path/git 依存で本モジュールを消費したコンシューマの `moon build` 時に Rust staticlib をビルドし、LinkConfig でリンクフラグを伝播する。`link/` パッケージを新設し、コンシューマ exe が import することで伝播を受ける設計（テスト exe への意図しない伝播を回避）。Linux x86_64 で検証済み。macOS/Windows は未検証。
+- 非同期イベント注入（RFC 0002、#84）: 公開 C ABI `gpui_post_event(view, ptr, len)` で任意スレッドから有界キュー（1024 エントリ / 1 エントリ 1 MiB 上限）へペイロードを push。メインスレッドの drain pump が各エントリを新種別 `EVENT_ASYNC`（`5`、`ABI_VERSION` 据え置き）として配送し、`changed==1` で view を notify。新ステータス `GPUI_STATUS_QUEUE_FULL`（`-11`）/ `GPUI_STATUS_PAYLOAD_TOO_LARGE`（`-12`）。MoonBit 側は `post_event` / `copy_async_payload` ラッパー、`GpuiError::QueueFull` / `PayloadTooLarge`、`Event::Async` デコード、消費者例 `examples/stream` を追加。
 
 ### Fixed
 
 - テキストの空白パディング workaround を撤廃し、paint-time ¼px オフセット（`TextGlyphInset`）に置換。コンテンツ汚染を解消（#16、G10）。
 - 新規 FFI 関数追加時のビルドデッドロックを修正（#71）: bindgen が消費する `gpui-sys/include/gpui_sys.h` を、`moon check` ゲートより前に `gen-header`（cbindgen のみ依存の小クレート）で再生成するように `build.sh` / `build.ps1` の順序を変更。新しい `#[unsafe(no_mangle)] pub extern "C"` を追加してもドライバ 1 回でビルドが通る。`moon check` 失敗時にはヘッダー再生成のヒントを表示。`build.ps1` 側は Windows 未検証。
+- `EVENT_TEXT` dispatch 後の `EVENT_QUEUE` 未クリアによるペイロードリークを修正（#70）: dispatch 復帰直後にキューをクリアし、`gpui_event_copy_text` のトークンが再利用されないことを保証。非同期注入経路も同じ契約に従う。正常系・境界・リーク回帰の unit test を追加。
 
 ## [0.1.0] - 2026-07-24
 

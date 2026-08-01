@@ -115,3 +115,68 @@ pub fn assert_bounds_eq(
         "golden bounds mismatch for {selector:?}"
     );
 }
+
+/// Wire the async injection path (RFC 0002) into a headless window, for tests
+/// that exercise producer → `gpui_post_event` → drain pump → `EVENT_ASYNC`
+/// dispatch without a GPU or display.
+///
+/// Mirrors `run_window`'s startup: attaches a fresh wake channel, spawns the
+/// drain pump on the foreground executor, opens a window rendering `VIEWS[0]`
+/// (committing a minimal tree so view 0 is a valid dispatch target), and
+/// registers the view so pump notifications route to it. The pump drains any
+/// queued backlog on its first poll, so events posted before this call are
+/// delivered by the first `run_until_parked`.
+///
+/// The returned guard holds the crate-wide `TEST_VIEWS_MUTEX` for the test's
+/// lifetime (the harness commits into the process-global `VIEWS`, shared with
+/// every other test) and clears `VIEWS` on drop. The caller drives the
+/// executor with `cx.run_until_parked()`.
+pub fn setup_async_injection(cx: &mut TestAppContext) -> AsyncInjectionTest {
+    let guard = crate::TEST_VIEWS_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // Slot 0 is harness-private under the lock above; commit a minimal tree
+    // (one empty div as root) through the real decoder so view 0 is a valid
+    // dispatch target — the drain drops events for views without a committed
+    // tree.
+    let mut buffer = Vec::new();
+    buffer.extend_from_slice(crate::BUFFER_MAGIC);
+    buffer.extend_from_slice(&(crate::BUFFER_VERSION as u32).to_le_bytes());
+    buffer.push(crate::abi_constants::OP_DIV as u8);
+    buffer.push(crate::abi_constants::OP_SET_ROOT as u8);
+    assert_eq!(crate::build_tree_from_buffer(0, &buffer), crate::GPUI_STATUS_OK);
+
+    let wake_rx = cx.update(|_| crate::install_inject_queue());
+    cx.update(|app| crate::spawn_drain_pump(app, wake_rx));
+
+    let (view, vcx) = cx.add_window_view(|_window, cx| FfiView {
+        focus: cx.focus_handle(),
+        view: 0,
+        scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+    });
+    vcx.update(|window, _| window.refresh());
+    cx.update(|app| crate::register_view(app, 0, view.downgrade()));
+
+    AsyncInjectionTest {
+        view,
+        _guard: guard,
+    }
+}
+
+/// Handle returned by [`setup_async_injection`]. Holds the view entity (for
+/// notification tests) and the shared-lock guard, which clears `VIEWS` and
+/// releases the lock on drop. Drive the pump with `cx.run_until_parked()`.
+pub struct AsyncInjectionTest {
+    pub view: gpui::Entity<FfiView>,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for AsyncInjectionTest {
+    fn drop(&mut self) {
+        // Stop this test's drain pump so it cannot drain a later test's posts
+        // (the injection queue and recorder are process globals).
+        crate::stop_drain_pump();
+        crate::VIEWS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}

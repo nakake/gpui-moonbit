@@ -10,6 +10,7 @@
 //   EVENT_KEY:   data_a = codepoint, data_b = modifier bits
 //   EVENT_TEXT:  data_a = token, data_b = byte length (copy via gpui_event_copy_text)
 //   EVENT_NAMED_KEY: data_a = named_key_id, data_b = modifier bits
+//   EVENT_ASYNC: data_a = token, data_b = byte length (copy via copy_async_payload)
 //
 // NOTE: changing `dispatch`'s signature does NOT change the mangled symbol name
 // (MoonBit mangling excludes types), so the Rust `extern` must be kept in sync —
@@ -55,6 +56,7 @@ priv enum Event {
   Key(Int, Int) // codepoint, modifier bits
   Text(String) // typed text (UTF-8 decoded)
   NamedKey(Int, Int) // named_key_id, modifier bits
+  Async // injected event (RFC 0002); payload is opaque and unused by this counter app
   Unknown
 }
 
@@ -82,6 +84,10 @@ fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
     }
   } else if kind == @nakake/gpui-bindings.EVENT_NAMED_KEY {
     NamedKey(data_a, data_b)
+  } else if kind == @nakake/gpui-bindings.EVENT_ASYNC {
+    // data_a = token, data_b = byte length. Copy the opaque payload from
+    // Rust's event queue synchronously before returning from dispatch.
+    Async
   } else {
     Unknown
   }
@@ -119,6 +125,7 @@ fn apply_event(event : Event) -> Int {
     Key(code, mods) => on_key(code, mods)
     Text(text) => on_text(text)
     NamedKey(id, mods) => on_named_key(id, mods)
+    Async => 0 // injected events carry no counter semantics in this app
     Unknown => 0
   }
 }

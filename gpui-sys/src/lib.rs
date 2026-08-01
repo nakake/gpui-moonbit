@@ -1,10 +1,12 @@
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::stream::StreamExt;
 use gpui::*;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// Headless layout harness (G24): decode a command buffer through the real
 /// decoder, render it in a gpui `TestAppContext` window (no GPU, no display),
@@ -19,21 +21,22 @@ use abi_constants::{
     ABI_VERSION, ALIGN_CENTER, ALIGN_DEFAULT, ALIGN_END, ALIGN_START, ALIGN_STRETCH,
     BUFFER_VERSION, CURSOR_ARROW, CURSOR_COL_RESIZE, CURSOR_CROSSHAIR, CURSOR_EW_RESIZE,
     CURSOR_GRAB, CURSOR_GRABBING, CURSOR_NONE, CURSOR_NOT_ALLOWED, CURSOR_NS_RESIZE,
-    CURSOR_POINTER, CURSOR_ROW_RESIZE, CURSOR_TEXT, EVENT_CLICK, EVENT_KEY, EVENT_NAMED_KEY,
-    EVENT_TEXT, JUSTIFY_CENTER, JUSTIFY_DEFAULT, JUSTIFY_END, JUSTIFY_SPACE_AROUND,
-    JUSTIFY_SPACE_BETWEEN, JUSTIFY_START, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
-    KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN, KEY_RIGHT, KEY_TAB,
-    KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT, OP_ADD_CHILD, OP_DIV,
-    OP_SET_ALIGN, OP_SET_BG, OP_SET_BG_COLOR, OP_SET_BORDER, OP_SET_CENTER, OP_SET_CURSOR,
-    OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_FOCUSABLE, OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT,
-    OP_SET_GAP, OP_SET_INSET, OP_SET_KEY, OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE,
-    OP_SET_MIN_SIZE, OP_SET_ON_CLICK, OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING,
-    OP_SET_PADDING_SIDES, OP_SET_POSITION, OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW,
-    OP_SET_SIZE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP, OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR,
-    OP_SET_TEXT_SIZE, OP_SET_WHITESPACE, OP_TEXT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL,
-    OVERFLOW_VISIBLE, POSITION_ABSOLUTE, POSITION_RELATIVE, TEXT_ALIGN_CENTER,
-    TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY, TEXT_ALIGN_LEFT, TEXT_ALIGN_RIGHT,
-    WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP, WHITESPACE_PRE, WHITESPACE_PRE_WRAP,
+    CURSOR_POINTER, CURSOR_ROW_RESIZE, CURSOR_TEXT, EVENT_ASYNC, EVENT_CLICK, EVENT_KEY,
+    EVENT_NAMED_KEY, EVENT_TEXT, JUSTIFY_CENTER, JUSTIFY_DEFAULT, JUSTIFY_END,
+    JUSTIFY_SPACE_AROUND, JUSTIFY_SPACE_BETWEEN, JUSTIFY_START, KEY_BACKSPACE, KEY_DELETE,
+    KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN,
+    KEY_RIGHT, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_FUNCTION, MOD_PLATFORM, MOD_SHIFT,
+    OP_ADD_CHILD, OP_DIV, OP_SET_ALIGN, OP_SET_BG, OP_SET_BG_COLOR, OP_SET_BORDER,
+    OP_SET_CENTER, OP_SET_CURSOR, OP_SET_FLEX, OP_SET_FLEX_ITEM, OP_SET_FOCUSABLE,
+    OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT, OP_SET_GAP, OP_SET_INSET, OP_SET_KEY,
+    OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE, OP_SET_MIN_SIZE, OP_SET_ON_CLICK,
+    OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING, OP_SET_PADDING_SIDES, OP_SET_POSITION,
+    OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW, OP_SET_SIZE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP,
+    OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE, OP_SET_WHITESPACE, OP_TEXT,
+    OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE, POSITION_RELATIVE,
+    TEXT_ALIGN_CENTER, TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY, TEXT_ALIGN_LEFT,
+    TEXT_ALIGN_RIGHT, WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP, WHITESPACE_PRE,
+    WHITESPACE_PRE_WRAP,
 };
 
 // Reference the version as a build-time sanity anchor until runtime FFI negotiation exists.
@@ -79,6 +82,12 @@ pub const GPUI_STATUS_DUPLICATE_KEY: i32 = -9;
 /// / belongs to a text node). Callers treat this as "fall back to a full
 /// `gpui_build_tree` rebuild".
 pub const GPUI_STATUS_KEY_NOT_FOUND: i32 = -10;
+/// The async injection queue is full (back-pressure): the producer should
+/// retry later, coalesce, or drop — the library never blocks, discards, or
+/// merges on its own (RFC 0002 §3.2).
+pub const GPUI_STATUS_QUEUE_FULL: i32 = -11;
+/// The async injection payload exceeds the per-entry size limit.
+pub const GPUI_STATUS_PAYLOAD_TOO_LARGE: i32 = -12;
 
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
@@ -109,8 +118,384 @@ include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
 /// Rust-owned event payload queue. Text events store their UTF-8 bytes here;
 /// the callback passes a token (index) and byte length so MoonBit can copy
 /// the payload via `gpui_event_copy_text`. Entries are valid only during the
-/// synchronous dispatch call — MoonBit must copy before returning.
+/// synchronous dispatch call — MoonBit must copy before returning, and every
+/// dispatch site clears the queue immediately after `mb_dispatch` returns
+/// (#70), so it holds at most one entry at a time and can never grow with the
+/// number of events delivered.
 static EVENT_QUEUE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+// --- Async event injection (RFC 0002) --------------------------------------
+//
+// External native code pushes opaque payloads from any thread via
+// `gpui_post_event`; a foreground drain pump (installed by `run_window`)
+// moves them onto the main thread as `EVENT_ASYNC` dispatches. The queue is
+// bounded on both axes (entry count and per-entry size) and the drain pops
+// ownership, so unbounded growth is structurally impossible — the lesson of
+// #70 ("a queue with no release contract always leaks").
+
+/// Maximum number of queued injection entries (RFC 0002 §6-1). A full queue
+/// fails `gpui_post_event` with `GPUI_STATUS_QUEUE_FULL` instead of blocking.
+pub const INJECT_QUEUE_MAX_ENTRIES: usize = 1024;
+
+/// Maximum payload size of a single injection entry, in bytes (RFC 0002
+/// §6-1). Larger payloads fail with `GPUI_STATUS_PAYLOAD_TOO_LARGE`.
+pub const INJECT_PAYLOAD_MAX_BYTES: usize = 1024 * 1024;
+
+/// One queued injection: the destination view id and the copied payload.
+struct InjectEntry {
+    view: i32,
+    payload: Vec<u8>,
+}
+
+/// The process-wide injection queue plus its wake channel. `entries` is a
+/// single FIFO across all producers (Mutex acquisition order); `wake_tx`
+/// carries only `()` — the data lives in the queue, and the drain pump empties
+/// it on every wake, so coalesced wakes lose nothing.
+///
+/// `wake_tx` is behind a `Mutex` because it is swapped each time a window
+/// starts: the receiver lives with that window's drain pump, so a sender left
+/// over from a closed window would wake nothing. A post that arrives before
+/// any window installs a disconnected sender (its receiver is dropped), so
+/// the send is a harmless no-op and the entry simply waits in the queue for
+/// the first window's startup drain.
+struct InjectQueue {
+    entries: Mutex<VecDeque<InjectEntry>>,
+    wake_tx: Mutex<UnboundedSender<()>>,
+}
+
+static INJECT: OnceLock<InjectQueue> = OnceLock::new();
+
+/// Serializes every test that touches the process-global injection queue
+/// (`INJECT`): the `gpui_post_event` unit tests (`mod tests`) and the
+/// headless drain-pump tests (`async_inject_tests`) post into and drain the
+/// same queue, so one shared lock keeps them from interleaving.
+#[cfg(test)]
+static INJECT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Ensure the injection queue exists and attach a fresh wake channel, handing
+/// the receiver to the caller (which spawns the drain pump with it). Called on
+/// the main thread at window startup; swapping the sender is what re-arms wake
+/// delivery for this window's pump.
+fn install_inject_queue() -> UnboundedReceiver<()> {
+    let (wake_tx, wake_rx) = unbounded::<()>();
+    match INJECT.get() {
+        Some(queue) => {
+            *queue.wake_tx.lock().unwrap_or_else(|e| e.into_inner()) = wake_tx;
+        }
+        None => {
+            let _ = INJECT.set(InjectQueue {
+                entries: Mutex::new(VecDeque::new()),
+                wake_tx: Mutex::new(wake_tx),
+            });
+        }
+    }
+    wake_rx
+}
+
+/// Swap in a disconnected wake sender so the current drain pump's receiver
+/// yields `None` and it exits. Test-only: gives async-injection tests a clean
+/// teardown so a pump never survives into the next test (the injection queue
+/// and recorder are process globals).
+#[cfg(any(test, feature = "test-support"))]
+pub fn stop_drain_pump() {
+    if let Some(queue) = INJECT.get() {
+        let (wake_tx, wake_rx) = unbounded::<()>();
+        drop(wake_rx);
+        *queue.wake_tx.lock().unwrap_or_else(|e| e.into_inner()) = wake_tx;
+    }
+}
+
+/// Push an event from any thread into the injection queue (RFC 0002 §3.1).
+/// Non-blocking: the payload is copied under the queue lock and the call
+/// returns immediately. The payload is opaque bytes — the library never
+/// interprets it; framing is a contract between the producer and the MoonBit
+/// `Event::Async` handler.
+///
+/// `view` is the destination view id (index into `VIEWS`); a negative value
+/// fails up front, an unknown one is dropped at drain time. `ptr` is borrowed
+/// only for the duration of the call and copied internally (same contract as
+/// every other FFI here). `len` may be 0: an entry can carry "something
+/// happened" with no payload.
+///
+/// Returns `GPUI_STATUS_OK`, `GPUI_STATUS_INVALID_HANDLE` (negative view, or
+/// a null pointer with a nonzero length), `GPUI_STATUS_PAYLOAD_TOO_LARGE`, or
+/// `GPUI_STATUS_QUEUE_FULL`. Posts made before any window starts are queued
+/// and delivered by the first drain after startup.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_post_event(view: i32, ptr: *const u8, len: i32) -> i32 {
+    ffi_export("gpui_post_event", || {
+        if view < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        if len < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        let len = len as usize;
+        if len > INJECT_PAYLOAD_MAX_BYTES {
+            return GPUI_STATUS_PAYLOAD_TOO_LARGE;
+        }
+        if ptr.is_null() && len != 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        // SAFETY: `ptr` points to at least `len` readable bytes for the
+        // duration of this call (the standard FFI borrow contract); `len` is
+        // validated above. A null pointer is only reachable here with len 0.
+        let payload = if len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+        };
+        let queue = INJECT.get_or_init(|| {
+            // A post that arrives before any window: install the queue with a
+            // disconnected sender (its receiver is dropped immediately), so
+            // the wake below is a no-op and the entry waits for the first
+            // window's startup drain.
+            let (wake_tx, wake_rx) = unbounded::<()>();
+            drop(wake_rx);
+            InjectQueue {
+                entries: Mutex::new(VecDeque::new()),
+                wake_tx: Mutex::new(wake_tx),
+            }
+        });
+        {
+            let mut entries = queue.entries.lock().unwrap_or_else(|e| e.into_inner());
+            if entries.len() >= INJECT_QUEUE_MAX_ENTRIES {
+                return GPUI_STATUS_QUEUE_FULL;
+            }
+            entries.push_back(InjectEntry { view, payload });
+        }
+        // Wake the drain pump. A closed channel (no window running) is fine:
+        // the entry stays queued for the next window's startup drain.
+        let _ = queue
+            .wake_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unbounded_send(());
+        GPUI_STATUS_OK
+    })
+}
+
+/// Pop the oldest queued injection entry, if any. The queue lock is held only
+/// for the pop; the caller owns the payload afterwards.
+fn pop_injected() -> Option<InjectEntry> {
+    INJECT
+        .get()?
+        .entries
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop_front()
+}
+
+/// Main-thread registry of open views, keyed by view id (RFC 0002 §3.4). The
+/// drain pump has no entity context of its own, so it routes `cx.notify()`
+/// through the `WeakEntity` registered here when the view opened. Main-thread
+/// only: `WeakEntity` is not `Send`, so this cannot live in a `Mutex`-guarded
+/// global (same reason as `ScrollHandle`; `architecture.md` §3).
+#[derive(Default)]
+struct ViewRegistry(HashMap<i32, WeakEntity<FfiView>>);
+
+impl Global for ViewRegistry {}
+
+/// Register an open view so the drain pump can notify it. Called on the main
+/// thread when the `FfiView` entity is created. Takes a `WeakEntity` (not the
+/// `Entity`) because the only non-test-gated way to reach the window's root
+/// entity from a `WindowHandle` is `read`, which hands the entity to a closure
+/// and drops it on return — the caller downgrades inside that closure.
+fn register_view(cx: &mut App, view: i32, weak: WeakEntity<FfiView>) {
+    cx.default_global::<ViewRegistry>().0.insert(view, weak);
+}
+
+/// Notify the view that its committed tree changed (dispatch returned 1). A
+/// closed window (failed `upgrade`) is dropped silently: the dispatch already
+/// ran, and there is no UI left to refresh.
+fn notify_view(cx: &mut AsyncApp, view: i32) {
+    let _ = cx.update(|app| {
+        // Clone the weak handle out before borrowing `app` mutably for the
+        // update (the registry borrow and the entity update cannot overlap).
+        let weak = app.default_global::<ViewRegistry>().0.get(&view).cloned();
+        if let Some(weak) = weak {
+            let _ = weak.update(app, |_, cx| cx.notify());
+        }
+    });
+}
+
+/// Dispatch one injected entry as `EVENT_ASYNC` (RFC 0002 §3.4). The payload
+/// rides the existing `EVENT_QUEUE` token+copy mechanism — MoonBit copies it
+/// with `gpui_event_copy_text` during the synchronous dispatch — and the queue
+/// is cleared immediately after dispatch returns, the same #70 contract the
+/// `EVENT_TEXT` path follows. Returns the dispatch's `changed` flag.
+fn dispatch_injected(view: i32, payload: Vec<u8>) -> i32 {
+    let len = payload.len() as i32;
+    let token = {
+        let mut q = EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        q.push(payload);
+        (q.len() - 1) as i32
+    };
+    let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_ASYNC, view, token, len) };
+    EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    changed
+}
+
+/// Drain every queued injection entry, dispatching each as `EVENT_ASYNC` and
+/// notifying the view when the dispatch reports a change. Runs to completion
+/// on the main thread (called from the drain pump), so a wake that arrives
+/// mid-drain simply schedules another pass.
+///
+/// An entry addressed to a view with no committed tree is dropped here rather
+/// than dispatched (RFC 0002 §6-2): the producer cannot validate the view at
+/// post time without a TOCTOU race, so validation happens at drain, on the
+/// main thread, where `VIEWS` is cheap to read.
+fn drain_injected_events(cx: &mut AsyncApp) {
+    while let Some(entry) = pop_injected() {
+        let view_exists = VIEWS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(entry.view as usize)
+            .map_or(false, |slot| slot.is_some());
+        if !view_exists {
+            continue;
+        }
+        if dispatch_injected(entry.view, entry.payload) == 1 {
+            notify_view(cx, entry.view);
+        }
+    }
+}
+
+/// Spawn the foreground drain pump (RFC 0002 §3.3). It drains the queue once
+/// at startup (delivering any backlog posted before the window opened), then
+/// runs one full `drain_injected_events` per `()` on the wake channel; the
+/// pump exits when every wake sender is dropped (the window closed).
+/// `cx.spawn` schedules the future on the foreground executor, so the drain —
+/// and every `mb_dispatch` it makes — runs on the main thread.
+fn spawn_drain_pump(cx: &App, wake_rx: UnboundedReceiver<()>) {
+    cx.spawn(async move |mut cx: &mut AsyncApp| {
+        drain_injected_events(&mut cx);
+        let mut wake_rx = wake_rx;
+        while wake_rx.next().await.is_some() {
+            drain_injected_events(&mut cx);
+        }
+    })
+    .detach();
+}
+
+// --- Test-only dispatch recorder -------------------------------------------
+//
+// With the `test-dispatch-stub` feature, build.rs replaces `mb_dispatch` with
+// a stub that returns 0. The async-injection tests need to observe dispatches
+// (kind/view/payload) and drive the `changed` return value, so the stub
+// routes through this recorder when one is installed.
+#[cfg(feature = "test-dispatch-stub")]
+mod dispatch_recorder {
+    use std::sync::{Mutex, OnceLock};
+
+    /// One observed dispatch. `payload` is the `EVENT_QUEUE` entry at `token`
+    /// (copied synchronously, as a real MoonBit handler would).
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct RecordedDispatch {
+        pub kind: i32,
+        pub view: i32,
+        pub data_a: i32,
+        pub data_b: i32,
+        pub payload: Vec<u8>,
+    }
+
+    static RECORDER: OnceLock<Mutex<Recorder>> = OnceLock::new();
+
+    #[derive(Default)]
+    struct Recorder {
+        events: Vec<RecordedDispatch>,
+        changed: i32,
+    }
+
+    /// Install a fresh recorder and return a guard that removes it on drop.
+    #[cfg(test)]
+    pub fn install() -> RecorderGuard {
+        let recorder = RECORDER.get_or_init(|| Mutex::new(Recorder::default()));
+        *recorder.lock().unwrap_or_else(|e| e.into_inner()) = Recorder::default();
+        RecorderGuard
+    }
+
+    #[cfg(test)]
+    pub struct RecorderGuard;
+
+    #[cfg(test)]
+    impl Drop for RecorderGuard {
+        fn drop(&mut self) {
+            if let Some(recorder) = RECORDER.get() {
+                *recorder.lock().unwrap_or_else(|e| e.into_inner()) = Recorder::default();
+            }
+        }
+    }
+
+    /// Make subsequent dispatches return `changed` (1 → the pump notifies the
+    /// view; 0 → it does not).
+    #[cfg(test)]
+    pub fn set_changed(changed: i32) {
+        if let Some(recorder) = RECORDER.get() {
+            recorder.lock().unwrap_or_else(|e| e.into_inner()).changed = changed;
+        }
+    }
+
+    /// Snapshot of every dispatch observed since `install`.
+    #[cfg(test)]
+    pub fn take_events() -> Vec<RecordedDispatch> {
+        RECORDER
+            .get()
+            .map(|recorder| {
+                std::mem::take(&mut recorder.lock().unwrap_or_else(|e| e.into_inner()).events)
+            })
+            .unwrap_or_default()
+    }
+
+    /// Called by the generated `mb_dispatch` stub.
+    pub fn record(kind: i32, view: i32, data_a: i32, data_b: i32) -> i32 {
+        let Some(recorder) = RECORDER.get() else {
+            return 0;
+        };
+        let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
+        // Only EVENT_TEXT / EVENT_ASYNC carry a payload in EVENT_QUEUE (data_a
+        // is the token); for click/key events data_a is a click_id/codepoint, so
+        // indexing the queue with it would capture an unrelated entry.
+        let payload = if kind == crate::EVENT_TEXT || kind == crate::EVENT_ASYNC {
+            crate::EVENT_QUEUE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(data_a as usize)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        recorder.events.push(RecordedDispatch {
+            kind,
+            view,
+            data_a,
+            data_b,
+            payload,
+        });
+        recorder.changed
+    }
+}
+
+#[cfg(feature = "test-dispatch-stub")]
+pub use dispatch_recorder::RecordedDispatch;
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+pub use dispatch_recorder::RecorderGuard;
+
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+fn install_dispatch_recorder() -> dispatch_recorder::RecorderGuard {
+    dispatch_recorder::install()
+}
+
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+fn set_dispatch_changed(changed: i32) {
+    dispatch_recorder::set_changed(changed)
+}
+
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+fn take_recorded_dispatches() -> Vec<RecordedDispatch> {
+    dispatch_recorder::take_events()
+}
 
 /// Copy the text payload for a pending EVENT_TEXT dispatch.
 ///
@@ -1218,29 +1603,43 @@ pub extern "C" fn gpui_run_window(view: i32, width: f32, height: f32) -> i32 {
 
 fn run_window(view: usize, width: f32, height: f32) {
     Application::new().run(move |cx: &mut App| {
+        // Attach a fresh wake channel and start the drain pump before the
+        // window opens, so events posted from other threads — including any
+        // backlog queued before startup — are drained as soon as the loop
+        // runs (RFC 0002 §3.3).
+        spawn_drain_pump(cx, install_inject_queue());
+        let view_id = view as i32;
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                cx.new(|cx| {
-                    // Focus the view at construction (with `window` available), the
-                    // same way GPUI's own examples do — focusing during `render`
-                    // does not reliably make the element the OS first responder,
-                    // so key events never arrive.
-                    let focus = cx.focus_handle();
-                    window.focus(&focus);
-                    FfiView {
-                        focus,
-                        view,
-                        scroll_handles: Rc::new(RefCell::new(HashMap::new())),
-                    }
-                })
-            },
-        )
-        .unwrap();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| {
+                        // Focus the view at construction (with `window` available), the
+                        // same way GPUI's own examples do — focusing during `render`
+                        // does not reliably make the element the OS first responder,
+                        // so key events never arrive.
+                        let focus = cx.focus_handle();
+                        window.focus(&focus);
+                        FfiView {
+                            focus,
+                            view,
+                            scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+                        }
+                    })
+                },
+            )
+            .unwrap();
+        // Route drain-pump notifications to this view (RFC 0002 §3.4). The
+        // root entity is only reachable through `read_window` (the `root`
+        // accessor is test-support-gated), so downgrade inside the closure and
+        // register the weak handle.
+        if let Ok(weak) = cx.read_window(&window, |entity, _| entity.downgrade()) {
+            register_view(cx, view_id, weak);
+        }
         cx.activate(true);
     });
 }
@@ -1273,7 +1672,7 @@ fn run_window_with_fallback(view: usize, width: f32, height: f32) -> i32 {
     }
 }
 
-struct FfiView {
+pub struct FfiView {
     focus: FocusHandle,
     /// Index into `VIEWS` whose committed tree this view renders.
     view: usize,
@@ -1343,6 +1742,10 @@ impl Render for FfiView {
                     let changed = unsafe {
                         mb_dispatch(ABI_VERSION, EVENT_TEXT, view, token, bytes.len() as i32)
                     };
+                    // #70: the payload is only valid during the synchronous
+                    // dispatch call; drop it on return so the queue cannot
+                    // accumulate one entry per keystroke.
+                    EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     notify_if_changed(changed, || cx.notify());
                 }
             }));
@@ -2030,6 +2433,11 @@ impl IntoElement for TextGlyphInset {
 /// G24 golden layout tests: decode → headless render → assert exact bounds.
 #[cfg(test)]
 mod headless_tests;
+
+/// RFC 0002 async injection tests: producer → post → drain pump → dispatch,
+/// observed through the `test-dispatch-stub` recorder (needs the feature).
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+mod async_inject_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2746,6 +3154,7 @@ mod tests {
             ("EVENT_KEY", EVENT_KEY),
             ("EVENT_TEXT", EVENT_TEXT),
             ("EVENT_NAMED_KEY", EVENT_NAMED_KEY),
+            ("EVENT_ASYNC", EVENT_ASYNC),
             ("MOD_CTRL", MOD_CTRL),
             ("MOD_ALT", MOD_ALT),
             ("MOD_SHIFT", MOD_SHIFT),
@@ -3778,6 +4187,199 @@ mod tests {
                 text.len() as i32,
             );
             assert_eq!(status, GPUI_STATUS_KEY_NOT_FOUND);
+        });
+    }
+
+    // --- EVENT_QUEUE / gpui_event_copy_text (issue #70) --------------------
+
+    /// Test helper: push a payload into `EVENT_QUEUE` and return its token,
+    /// mirroring the dispatch sites' push (the queue is cleared after every
+    /// dispatch, so a test may seed it directly).
+    fn push_event_payload(payload: &[u8]) -> i32 {
+        let mut q = EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        q.push(payload.to_vec());
+        (q.len() - 1) as i32
+    }
+
+    fn clear_event_queue() {
+        EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    #[::core::prelude::v1::test]
+    fn copy_text_copies_payload() {
+        let token = push_event_payload(b"hello");
+        let mut buf = [0u8; 8];
+        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(n, 5);
+        assert_eq!(&buf[..5], b"hello");
+        clear_event_queue();
+    }
+
+    #[::core::prelude::v1::test]
+    fn copy_text_truncates_to_buffer_len() {
+        let token = push_event_payload(b"hello world");
+        let mut buf = [0u8; 5];
+        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"hello");
+        clear_event_queue();
+    }
+
+    #[::core::prelude::v1::test]
+    fn copy_text_zero_len_writes_nothing() {
+        let token = push_event_payload(b"abc");
+        let mut buf = [0xAAu8; 4];
+        let n = gpui_event_copy_text(token, buf.as_mut_ptr(), 0);
+        assert_eq!(n, 0);
+        assert_eq!(&buf, &[0xAA; 4]);
+        clear_event_queue();
+    }
+
+    #[::core::prelude::v1::test]
+    fn copy_text_rejects_invalid_arguments() {
+        let token = push_event_payload(b"abc");
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            gpui_event_copy_text(-1, buf.as_mut_ptr(), 4),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        assert_eq!(gpui_event_copy_text(token, std::ptr::null_mut(), 4), GPUI_STATUS_INVALID_HANDLE);
+        assert_eq!(
+            gpui_event_copy_text(token, buf.as_mut_ptr(), -1),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        // Token past the end of the queue.
+        assert_eq!(
+            gpui_event_copy_text(token + 1, buf.as_mut_ptr(), 4),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        clear_event_queue();
+    }
+
+    /// #70 regression: the payload must be valid only during the synchronous
+    /// dispatch. After the dispatch site clears the queue, the token no longer
+    /// resolves — and the queue holds no stale entries to leak.
+    #[::core::prelude::v1::test]
+    fn copy_text_token_invalid_after_clear() {
+        let token = push_event_payload(b"leak-me");
+        let mut buf = [0u8; 8];
+        assert_eq!(gpui_event_copy_text(token, buf.as_mut_ptr(), 8), 7);
+        // Dispatch sites clear immediately after mb_dispatch returns.
+        clear_event_queue();
+        assert_eq!(
+            gpui_event_copy_text(token, buf.as_mut_ptr(), 8),
+            GPUI_STATUS_INVALID_HANDLE
+        );
+        assert!(EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+    }
+
+    // --- gpui_post_event / injection queue (RFC 0002) ----------------------
+
+    /// Serializes the injection-queue tests against each other and against the
+    /// headless drain-pump tests (`async_inject_tests`): `INJECT` is a process
+    /// global, so both suites lock `crate::INJECT_TEST_LOCK`.
+
+    fn with_inject_test(f: impl FnOnce()) {
+        let _lock = INJECT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(q) = INJECT.get() {
+            q.entries.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+        f();
+        if let Some(q) = INJECT.get() {
+            q.entries.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_queues_payload_for_drain() {
+        with_inject_test(|| {
+            let payload = b"hello";
+            assert_eq!(gpui_post_event(3, payload.as_ptr(), payload.len() as i32), GPUI_STATUS_OK);
+            let entry = pop_injected().expect("queued entry");
+            assert_eq!(entry.view, 3);
+            assert_eq!(entry.payload, payload);
+            assert!(pop_injected().is_none());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_zero_len_carries_no_payload() {
+        with_inject_test(|| {
+            assert_eq!(gpui_post_event(0, std::ptr::null(), 0), GPUI_STATUS_OK);
+            let entry = pop_injected().expect("queued entry");
+            assert_eq!(entry.view, 0);
+            assert!(entry.payload.is_empty());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_rejects_invalid_arguments() {
+        with_inject_test(|| {
+            let payload = b"x";
+            assert_eq!(
+                gpui_post_event(-1, payload.as_ptr(), 1),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(
+                gpui_post_event(0, payload.as_ptr(), -1),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(gpui_post_event(0, std::ptr::null(), 1), GPUI_STATUS_INVALID_HANDLE);
+            assert!(pop_injected().is_none());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_enforces_payload_limit() {
+        with_inject_test(|| {
+            // Exactly at the limit: accepted.
+            let max_payload = vec![0xABu8; INJECT_PAYLOAD_MAX_BYTES];
+            assert_eq!(
+                gpui_post_event(0, max_payload.as_ptr(), INJECT_PAYLOAD_MAX_BYTES as i32),
+                GPUI_STATUS_OK
+            );
+            assert_eq!(
+                pop_injected().expect("queued entry").payload.len(),
+                INJECT_PAYLOAD_MAX_BYTES
+            );
+            // One byte over: rejected before any copy.
+            assert_eq!(
+                gpui_post_event(0, max_payload.as_ptr(), INJECT_PAYLOAD_MAX_BYTES as i32 + 1),
+                GPUI_STATUS_PAYLOAD_TOO_LARGE
+            );
+            assert!(pop_injected().is_none());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_back_pressures_when_full() {
+        with_inject_test(|| {
+            let payload = b"x";
+            for _ in 0..INJECT_QUEUE_MAX_ENTRIES {
+                assert_eq!(gpui_post_event(0, payload.as_ptr(), 1), GPUI_STATUS_OK);
+            }
+            // The 1025th entry is rejected, not dropped-silently or blocked on.
+            assert_eq!(
+                gpui_post_event(0, payload.as_ptr(), 1),
+                GPUI_STATUS_QUEUE_FULL
+            );
+            // Draining one entry frees one slot.
+            assert!(pop_injected().is_some());
+            assert_eq!(gpui_post_event(0, payload.as_ptr(), 1), GPUI_STATUS_OK);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn post_event_preserves_fifo_order() {
+        with_inject_test(|| {
+            for i in 0..8u8 {
+                assert_eq!(gpui_post_event(i as i32, &i, 1), GPUI_STATUS_OK);
+            }
+            for i in 0..8u8 {
+                let entry = pop_injected().expect("queued entry");
+                assert_eq!(entry.view, i as i32);
+                assert_eq!(entry.payload, [i]);
+            }
         });
     }
 }
