@@ -79,6 +79,14 @@ let btn_increment_10 : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
   count.set(store, count.get(store) + 10)
 })
 
+///|
+/// +1 ボタンの実ハンドラ id。リンク済み round-trip テスト（`cmd/roundtrip`）が
+/// dispatch 経路を叩くために使う。id は共有カウンタで発行されるため登録順に依存
+/// する — テスト側でのハードコードは登録の追加・並べ替えで静かに壊れる。
+pub fn increment_handler_id() -> Int {
+  btn_increment.to_int()
+}
+
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
 
 ///|

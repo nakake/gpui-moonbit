@@ -96,7 +96,7 @@ fn main {
     @nakake/gpui-bindings.ABI_VERSION,
     @nakake/gpui-bindings.EVENT_CLICK,
     0,
-    3, // btn-increment handler id (4th registered click handler)
+    @nakake/gpui-bindings/app.increment_handler_id(), // 実 id（登録順に依存するためハードコードしない）
     0,
   )
   if changed_click != 1 {
@@ -134,7 +134,7 @@ fn main {
     @nakake/gpui-bindings.ABI_VERSION + 1,
     @nakake/gpui-bindings.EVENT_CLICK,
     0,
-    3,
+    @nakake/gpui-bindings/app.increment_handler_id(),
     0,
   )
   if changed_stale != 0 {
