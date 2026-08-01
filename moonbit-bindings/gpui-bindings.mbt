@@ -9,10 +9,6 @@
 //
 // FFI declarations are auto-generated in gpui-bindings-ffi.mbt.
 
-///|
-/// Rust 側の retained node tree のノードを指すハンドルです。現行の高水準 API はノードをスタックで暗黙に管理するため、この型を直接取り回す必要はありません。
-pub type NodeHandle = Int
-
 // --- Structured errors and diagnostics (issue #54, G20/G21) -----------------
 //
 // The Rust side answers across the C boundary with negative `GPUI_STATUS_*`
@@ -231,7 +227,7 @@ pub fn CommandBuffer::div(self : CommandBuffer) -> Unit {
 }
 
 ///|
-/// 新しいテキストノードをプッシュします（RGB 各成分は 0–255 にクランプ）。プッシュしたノードはスタックトップになります。
+/// 新しいテキストノードをプッシュします（RGB 各成分は 0–255 にクランプ）。プッシュしたノードはスタックトップになります。テキスト色を `Color`（alpha 付き）で指定する場合は `text` の後に `set_text_color(color)` を呼んでください。
 pub fn CommandBuffer::text(
   self : CommandBuffer,
   content : String,
@@ -261,7 +257,7 @@ pub fn CommandBuffer::set_size(
 }
 
 ///|
-/// スタックトップの div の背景色を設定します（RGB 各成分は 0–255 にクランプ）。
+/// スタックトップの div の背景色を設定します（RGB 各成分は 0–255 にクランプ）。alpha 付きの `Color` で指定する場合は `set_bg_color(color)` を使ってください。
 pub fn CommandBuffer::set_bg(
   self : CommandBuffer,
   r : Int,
@@ -340,7 +336,7 @@ pub fn CommandBuffer::set_padding(
 
 ///|
 /// スタックトップの div に枠線を設定します。均一な太さと RGB 色（0–255 にクランプ）
-/// を取ります。太さが 0 以下の場合は枠線を描画しません。
+/// を取ります。太さが 0 以下の場合は枠線を描画しません。alpha 付きの `Color` で指定する場合は `set_border_color(width, color)` を使ってください。
 pub fn CommandBuffer::set_border(
   self : CommandBuffer,
   width : Float,
@@ -353,6 +349,22 @@ pub fn CommandBuffer::set_border(
   self.buf.write_byte(clamp_color_component(r).to_byte())
   self.buf.write_byte(clamp_color_component(g).to_byte())
   self.buf.write_byte(clamp_color_component(b).to_byte())
+}
+
+///|
+/// スタックトップの div に枠線を `Color`（alpha 付き）で設定します。均一な太さと
+/// 色（各成分 0–255 にクランプ）を取ります。太さが 0 以下の場合は枠線を描画しません。
+/// `set_border(width, r, g, b)` は引き続き利用可能で、wire format は同一です。
+pub fn CommandBuffer::set_border_color(
+  self : CommandBuffer,
+  width : Float,
+  color : Color,
+) -> Unit {
+  self.op(OP_SET_BORDER)
+  self.buf.write_float_le(width)
+  self.buf.write_byte(clamp_color_component(color.red).to_byte())
+  self.buf.write_byte(clamp_color_component(color.green).to_byte())
+  self.buf.write_byte(clamp_color_component(color.blue).to_byte())
 }
 
 // --- G7 core layout/style + G9 color (issue #51) ---------------------------
@@ -502,17 +514,17 @@ pub fn CommandBuffer::set_cursor(self : CommandBuffer, kind : Int) -> Unit {
 }
 
 ///|
-/// スタックトップの div を絶対配置（absolute position）にします。`POSITION_ABSOLUTE`
-/// を渡すとレイアウトから外れ、`set_inset` の値で位置が決まります。
-/// `POSITION_RELATIVE`（既定）に戻すこともできます。
-pub fn CommandBuffer::set_absolute(self : CommandBuffer, mode : Int) -> Unit {
+/// スタックトップの div の配置モードを設定します。`POSITION_ABSOLUTE` を渡すと
+/// レイアウトから外れ、`set_inset` の値で位置が決まります。`POSITION_RELATIVE`
+/// （既定）に戻すこともできます。
+pub fn CommandBuffer::set_position(self : CommandBuffer, mode : Int) -> Unit {
   self.op(OP_SET_POSITION)
   self.buf.write_int_le(mode)
 }
 
 ///|
 /// 配置済み要素の inset（top, right, bottom, left、px）を設定します。辺ごとに負値
-/// （例: -1）を渡すとその辺は auto になります。`set_absolute(POSITION_ABSOLUTE)` と
+/// （例: -1）を渡すとその辺は auto になります。`set_position(POSITION_ABSOLUTE)` と
 /// 組み合わせて使います。
 pub fn CommandBuffer::set_inset(
   self : CommandBuffer,

@@ -1,85 +1,107 @@
-// The rebuild gate (rebuild only when changed == 1) is now inlined in
-// `dispatch`, which transitively references Rust FFI (`gpui_build_tree_ffi`,
-// `gpui_event_copy_text_ffi`) and cannot run under `moon test`. The gate is
-// verified by the CI linked-binary roundtrip test (cmd/roundtrip) and the
-// full build driver's headless round-trip.
+// Whitebox tests for the Counter app's pure logic. `dispatch` itself
+// transitively references Rust FFI (`gpui_build_tree_ffi`,
+// `gpui_event_copy_text_ffi`) and cannot run under `moon test`; the framework
+// glue it delegates to (`framework_dispatch`) is covered by the library's
+// `signal_wbtest.mbt`, and the full envelope → rebuild path by the build
+// driver's linked round-trip.
+
 
 ///|
-test "event application preserves unknown events" {
-  count[0] = 9
-  assert_eq(apply_event(Unknown), 0)
-  assert_eq(apply_event(Click(999)), 0)
-  assert_eq(apply_event(Key(0, 0)), 0)
-  assert_eq(count[0], 9)
+test "app-level key handlers are registered in the registry" {
+  // Regression guard (issue #86): the key/named-key/text handlers must survive
+  // dead-code elimination. If their registration is dropped, dispatching a Key
+  // event through the registry leaves `count` untouched.
+  count.set(store, 100)
+  handlers.dispatch(Key(KEY_K, 0), 0)
+  assert_eq(count.get(store), 101)
+}
+///|
+test "registered click handlers mutate count" {
+  count.set(store, 0)
+  handlers.dispatch(Click(btn_decrement.to_int()), 0)
+  assert_eq(count.get(store), -1)
+  handlers.dispatch(Click(btn_increment.to_int()), 0)
+  assert_eq(count.get(store), 0)
+  handlers.dispatch(Click(btn_increment_10.to_int()), 0)
+  assert_eq(count.get(store), 10)
 }
 
 ///|
-test "click handlers report state changes" {
-  count[0] = 0
-  assert_eq(on_click(BTN_DECREMENT), 1)
-  assert_eq(count[0], -1)
-  assert_eq(on_click(BTN_INCREMENT), 1)
-  assert_eq(count[0], 0)
-  assert_eq(on_click(BTN_INCREMENT_10), 1)
-  assert_eq(count[0], 10)
+test "reset handler zeroes count" {
+  count.set(store, 5)
+  handlers.dispatch(Click(btn_reset.to_int()), 0)
+  assert_eq(count.get(store), 0)
 }
 
 ///|
-test "click reset reports only real changes" {
-  count[0] = 5
-  assert_eq(on_click(BTN_RESET), 1)
-  assert_eq(count[0], 0)
-  assert_eq(on_click(BTN_RESET), 0)
-  assert_eq(count[0], 0)
+test "unknown click id leaves count untouched" {
+  count.set(store, 7)
+  handlers.dispatch(Click(999), 0)
+  assert_eq(count.get(store), 7)
 }
 
 ///|
-test "unknown click is unchanged" {
-  count[0] = 7
-  assert_eq(on_click(999), 0)
-  assert_eq(count[0], 7)
+test "key handler mutates count" {
+  count.set(store, 0)
+  on_key(KEY_K, 0)
+  assert_eq(count.get(store), 1)
+  on_key(KEY_J, 0)
+  assert_eq(count.get(store), 0)
+  count.set(store, 5)
+  on_key(KEY_R, 0)
+  assert_eq(count.get(store), 0)
 }
 
 ///|
-test "key handlers report state changes" {
-  count[0] = 0
-  assert_eq(on_key(KEY_K, 0), 1)
-  assert_eq(count[0], 1)
-  assert_eq(on_key(KEY_J, 0), 1)
-  assert_eq(count[0], 0)
-  count[0] = 5
-  assert_eq(on_key(KEY_R, 0), 1)
-  assert_eq(count[0], 0)
-  assert_eq(on_key(KEY_R, 0), 0)
+test "unknown key leaves count untouched" {
+  count.set(store, 11)
+  on_key(0, 0)
+  assert_eq(count.get(store), 11)
+  // NOTE: decode_event() is not called here because it transitively references
+  // gpui_event_copy_text (Rust FFI), which is unavailable in moon test. The
+  // version handshake is verified by the CI linked-binary run.
 }
 
 ///|
-test "unknown key and event are unchanged" {
-  count[0] = 11
-  assert_eq(on_key(0, 0), 0)
-  assert_eq(count[0], 11)
-  // NOTE: decode() is not called here because it transitively references
-  // gpui_event_copy_text (Rust FFI), which is unavailable in moon test.
-  // The version handshake is verified by the CI linked-binary run.
+test "named key handler mutates count" {
+  count.set(store, 0)
+  on_named_key(@nakake/gpui-bindings.KEY_ENTER, 0)
+  assert_eq(count.get(store), 1)
+  on_named_key(@nakake/gpui-bindings.KEY_UP, 0)
+  assert_eq(count.get(store), 2)
+  on_named_key(@nakake/gpui-bindings.KEY_DOWN, 0)
+  assert_eq(count.get(store), 1)
+  on_named_key(@nakake/gpui-bindings.KEY_ESCAPE, 0)
+  assert_eq(count.get(store), 0)
 }
 
 ///|
-test "named key handlers report state changes" {
-  count[0] = 0
-  assert_eq(on_named_key(@nakake/gpui-bindings.KEY_ENTER, 0), 1)
-  assert_eq(count[0], 1)
-  assert_eq(on_named_key(@nakake/gpui-bindings.KEY_UP, 0), 1)
-  assert_eq(count[0], 2)
-  assert_eq(on_named_key(@nakake/gpui-bindings.KEY_DOWN, 0), 1)
-  assert_eq(count[0], 1)
-  assert_eq(on_named_key(@nakake/gpui-bindings.KEY_ESCAPE, 0), 1)
-  assert_eq(count[0], 0)
-  assert_eq(on_named_key(@nakake/gpui-bindings.KEY_ESCAPE, 0), 0) // already 0
+test "unknown named key leaves count untouched" {
+  count.set(store, 5)
+  on_named_key(99, 0)
+  assert_eq(count.get(store), 5)
 }
 
 ///|
-test "unknown named key is unchanged" {
-  count[0] = 5
-  assert_eq(on_named_key(99, 0), 0)
-  assert_eq(count[0], 5)
+test "text handler parses digit strings" {
+  count.set(store, 0)
+  on_text("42")
+  assert_eq(count.get(store), 42)
+  on_text("abc") // non-digit ignored
+  assert_eq(count.get(store), 42)
+  on_text("")
+  assert_eq(count.get(store), 42)
+}
+
+///|
+test "text handler rejects digit runs that would overflow i32" {
+  count.set(store, 0)
+  // 0x7FFFFFFF = 2147483647 fits; one digit longer must be rejected (no wrap).
+  on_text("2147483647")
+  assert_eq(count.get(store), 2147483647)
+  count.set(store, 5)
+  on_text("2147483648") // i32::MAX + 1 → rejected, count unchanged
+  assert_eq(count.get(store), 5)
+  on_text("99999999999") // 11 digits → rejected
+  assert_eq(count.get(store), 5)
 }

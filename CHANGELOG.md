@@ -8,6 +8,12 @@
 
 ### Added
 
+- コンポーネントモデルと状態管理の実装（#86、RFC 0001 Phase A–D、G11–G14）:
+  - **Phase A** — 型付きイベントとハンドラレジストリ: `event.mbt`（`Event` enum / `decode_event`）と `handlers.mbt`（`HandlerRegistry`、`on_click` / `on_key` / `on_named_key` / `on_text`、fan-out 配送）。`BTN_*` int 定数と int switch を撤廃。
+  - **Phase B** — 型付き状態ストア: `store.mbt`（`Store` / `CellId[T]`、`cell_for_key`）。`Array[Int]` / `Array[Bool]` のグローバル可変配列を置換。RFC の `Any + downcast` 案はこのツールチェーンに `Any` が無いため不採用で、`CellId[T]` が型付き get/set クロージャを保持する設計を採用（RFC §6）。
+  - **Phase C** — 再利用可能コンポーネント: `components.mbt`（`RenderCtx` / `button`）、`HandlerId` newtype。`build_tree` をコンポーネント呼び出しの列に再構成。
+  - **Phase D** — signal とフレームワーク dispatch: `signal.mbt`（`Signal[T]`）と `framework.mbt`（`framework_dispatch`）。ハンドラは signal の `set` のみを行い、フレームワークが store の dirty 追跡で再構築をスケジュール。`changed` 戻り値の報告を撤廃。dispatch の変化/不変化ゲートはリンク済み往復テスト（`cmd/roundtrip`）で検証。
+
 - イベントの view 単位ルーティング: dispatch を 5 スロット envelope `app.dispatch(version, kind, view, data_a, data_b)` に拡張し、`ABI_VERSION` を 4 に bump（#49、24c3809）。
 - `moonbit-bindings/moon.mod` のメタデータ整備（`description` / `repository` / `keywords`）と、バージョニング方針文書 `docs/versioning.md`（#48、G1 / G4）。
 - コンポーネントモデルと状態管理の設計 RFC `docs/rfc/0001-component-model.md`（#50、G11–G14）。
@@ -17,12 +23,28 @@
 - テスト基盤（#53）: gpui `test-support` によるヘッドレス layout golden テスト（G24）、in-crate シード PRNG ファジング + 任意の `fuzz/` scaffold（G25）、criterion ベンチ harness（G26）。
 - キーボードナビゲーション: `OP_SET_FOCUSABLE` / `OP_SET_TAB_INDEX` / `OP_SET_TAB_STOP`（35–37）と Tab / Shift+Tab トラバース。a11y / IME の境界を `docs/a11y-ime.md` に文書化（#52、G18 / G19）。
 - 計測で正当化したインクリメンタル更新: keyed in-place `gpui_update_text` FFI。24 行ツリーで full rebuild 比 約440x（11.4µs → 25.9ns）。汎用 vdom diff は意図的に未実装（#10）。
+- `set_border_color(width, color)`: 枠線を alpha 付き `Color` で設定する API。`set_border(width, r, g, b)` と wire format は同一（#81）。
 - prebuild パイプライン（#93、G2）: `moonbit-bindings/build.py` を `--moonbit-unstable-prebuild` で登録。path/git 依存で本モジュールを消費したコンシューマの `moon build` 時に Rust staticlib をビルドし、LinkConfig でリンクフラグを伝播する。`link/` パッケージを新設し、コンシューマ exe が import することで伝播を受ける設計（テスト exe への意図しない伝播を回避）。Linux x86_64 で検証済み。macOS/Windows は未検証。
-- 非同期イベント注入（RFC 0002、#84）: 公開 C ABI `gpui_post_event(view, ptr, len)` で任意スレッドから有界キュー（1024 エントリ / 1 エントリ 1 MiB 上限）へペイロードを push。メインスレッドの drain pump が各エントリを新種別 `EVENT_ASYNC`（`5`、`ABI_VERSION` 据え置き）として配送し、`changed==1` で view を notify。新ステータス `GPUI_STATUS_QUEUE_FULL`（`-11`）/ `GPUI_STATUS_PAYLOAD_TOO_LARGE`（`-12`）。MoonBit 側は `post_event` / `copy_async_payload` ラッパー、`GpuiError::QueueFull` / `PayloadTooLarge`、`Event::Async` デコード、消費者例 `examples/stream` を追加。
+- 非同期イベント注入（RFC 0002、#84）: 公開 C ABI `gpui_post_event(view, ptr, len)` で任意スレッドから有界キュー（1024 エントリ / 1 エントリ 1 MiB 上限）へペイロードを push。メインスレッドの drain pump が各エントリを新種別 `EVENT_ASYNC`（`5`、`ABI_VERSION` 据え置き）として配送し、`changed==1` で view を notify。新ステータス `GPUI_STATUS_QUEUE_FULL`（`-11`）/ `GPUI_STATUS_PAYLOAD_TOO_LARGE`（`-12`）。MoonBit 側は `post_event` / `copy_async_payload` ラッパー、`GpuiError::QueueFull` / `PayloadTooLarge`、`Event::Async` デコード（RFC 0001 の `Event` enum / `HandlerRegistry::on_async` に統合）、消費者例 `examples/stream` を追加。
+
+### Changed
+
+- `set_absolute(mode)` を `set_position(mode)` にリネーム。実態は position-mode setter（`POSITION_RELATIVE` / `POSITION_ABSOLUTE`）であり、「absolute にするだけ」の旧名は誤解を招いたため（#81）。
+- 色の API を `Color` 受けに寄せる方針を文書化。生 `r, g, b` トリプレット版（`set_bg` / `set_border` / `text`）は引き続き利用可能で、`Color` 版（`set_bg_color` / `set_border_color` / `set_text_color`）を推奨（#81）。
+- `on_text` の数値パースに i32 オーバーフローガードを追加。桁あふれする数字入力は wrap せず無視する（#81）。
+
+### Deprecated
+
+- `set_absolute(mode)`: `set_position(mode)` を使用のこと。`deprecated.mbt` に非推奨エイリアスとして残置（#81）。
+
+### Removed
+
+- 未使用の `NodeHandle` 型（宣言のみで使用箇所ゼロのデッドコード）を削除（#81）。
 
 ### Fixed
 
 - テキストの空白パディング workaround を撤廃し、paint-time ¼px オフセット（`TextGlyphInset`）に置換。コンテンツ汚染を解消（#16、G10）。
+- `on_text` が 10 桁以上の数字入力で i32 境界を wrap して負値になり得た問題を、オーバーフローガードで修正（#81）。
 - 新規 FFI 関数追加時のビルドデッドロックを修正（#71）: bindgen が消費する `gpui-sys/include/gpui_sys.h` を、`moon check` ゲートより前に `gen-header`（cbindgen のみ依存の小クレート）で再生成するように `build.sh` / `build.ps1` の順序を変更。新しい `#[unsafe(no_mangle)] pub extern "C"` を追加してもドライバ 1 回でビルドが通る。`moon check` 失敗時にはヘッダー再生成のヒントを表示。`build.ps1` 側は Windows 未検証。
 - `EVENT_TEXT` dispatch 後の `EVENT_QUEUE` 未クリアによるペイロードリークを修正（#70）: dispatch 復帰直後にキューをクリアし、`gpui_event_copy_text` のトークンが再利用されないことを保証。非同期注入経路も同じ契約に従う。正常系・境界・リーク回帰の unit test を追加。
 

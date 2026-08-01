@@ -132,6 +132,26 @@ test "command buffer set_border wire format matches the Rust decoder layout" {
 }
 
 ///|
+test "set_border_color emits the same wire format as set_border" {
+  let a = CommandBuffer::new()
+  a.set_border(2.0, 10, 20, 30)
+  let b = CommandBuffer::new()
+  b.set_border_color(2.0, Color::rgb(10, 20, 30))
+  assert_eq(b.to_bytes(), a.to_bytes())
+}
+
+///|
+test "command buffer set_position wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.set_position(POSITION_ABSOLUTE)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_SET_POSITION | mode i32.
+  assert_eq(b[8].to_int(), OP_SET_POSITION)
+  assert_eq(read_i32_le(b, 9), POSITION_ABSOLUTE)
+  assert_eq(b.length(), 13)
+}
+
+///|
 fn read_i32_le(b : Bytes, offset : Int) -> Int {
   // MoonBit's Int is a 32-bit wrapping two's-complement word, so the four
   // little-endian bytes assembled by read_u32_le already carry the correct
@@ -241,17 +261,6 @@ test "command buffer set_cursor wire format matches the Rust decoder layout" {
   // 8-byte header, then OP_SET_CURSOR | kind i32.
   assert_eq(b[8].to_int(), OP_SET_CURSOR)
   assert_eq(read_i32_le(b, 9), CURSOR_POINTER)
-  assert_eq(b.length(), 13)
-}
-
-///|
-test "command buffer set_absolute wire format matches the Rust decoder layout" {
-  let cb = CommandBuffer::new()
-  cb.set_absolute(POSITION_ABSOLUTE)
-  let b = cb.to_bytes()
-  // 8-byte header, then OP_SET_POSITION | mode i32.
-  assert_eq(b[8].to_int(), OP_SET_POSITION)
-  assert_eq(read_i32_le(b, 9), POSITION_ABSOLUTE)
   assert_eq(b.length(), 13)
 }
 

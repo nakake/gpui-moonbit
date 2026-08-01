@@ -56,10 +56,10 @@
 
 ## 3. コンポーネントモデルと状態管理
 
-- **`G11` コンポーネント抽象がない。** アプリは `click_id` の int を手配線し（`moonbit-bindings/app/app.mbt:108`）、状態はグローバル可変 `count : Array[Int]`（`app.mbt:28`）。props / local state / hooks / context / 再利用可能コンポーネントが皆無。 **RFC**: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
-- **`G12` イベントルーティングが手動 int switch。** ノード単位の型付きハンドラ/クロージャを張れない。根因は MoonBit native の callback 制約（スカラーのみ、クロージャの C 互換 export がない、codex §2）。 **RFC**: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
-- **`G13` 状態がグローバル可変配列。** 複数 view / 複数コンポーネントへスケールしない。 **RFC**: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
-- **`G14` reactive ループが `dispatch` 内にハードコード。** `changed == 1 → ツリー再構築`（`app.mbt:85-93`）。signal 等の宣言的リアクティブプリミティブがない。 **RFC**: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
+- **`G11` コンポーネント抽象がない。** ✅ #86 解決済み（RFC 0001 Phase A–D）: `components.mbt` に `RenderCtx`（`{ view, store, handlers }`）と再利用可能コンポーネント `button(cb, props)` を導入。アプリは `build_tree` をコンポーネント呼び出しの列として記述し、各コンポーネントが `CommandBuffer` に部分木を書いてルートをスタックに残す。click_id の手配線は `HandlerId` に置換。
+- **`G12` イベントルーティングが手動 int switch。** ✅ #86 解決済み（RFC 0001 Phase A）: `event.mbt` の型付き `Event` enum と `decode_event`、`handlers.mbt` の `HandlerRegistry`（`on_click` / `on_key` / `on_named_key` / `on_text`、`dispatch` で fan-out）を導入。int 定数・int switch は撤廃。MoonBit native の callback 制約（スカラーのみ）は、envelope を型付き `Event` にデコードしレジストリで配送することで回避。
+- **`G13` 状態がグローバル可変配列。** ✅ #86 解決済み（RFC 0001 Phase B）: `store.mbt` に型付き状態ストア `Store` / `CellId[T]` を導入。`Array[Int]` / `Array[Bool]` のグローバル可変配列は `CellId[Int]` / `CellId[Bool]` に置換。`cell_for_key` でキー付き共有セルも利用可能。
+- **`G14` reactive ループが `dispatch` 内にハードコード。** ✅ #86 解決済み（RFC 0001 Phase D）: `signal.mbt` の `Signal[T]` と `framework.mbt` の `framework_dispatch` を導入。ハンドラは signal の `set` のみを行い、フレームワークが store の dirty 追跡で再構築をスケジュールする（dirty のときだけ rebuild + `1`）。`changed` 戻り値の報告は撤廃。dirty は現状グローバル（全ツリー再構築）。サブツリー単位の dirty は #10 のサブツリー patch opcode 待ち（Signal API は不変）。
 
 ---
 
@@ -104,7 +104,7 @@
 
 1. **~~【調査・最優先】`G3` パッケージングの成立性。~~** ✅ 検証済み（2026-07-24）。`--moonbit-unstable-prebuild` で成立。[スパイレポート](spikes/2026-07-24-packaging-feasibility.md)参照。次のアクション: 実際の gpui-sys で prebuild スクリプトのプロトタイプ実装（#48 の G2 に接続）。
 2. **~~`G17` マルチ view/ウィンドウのイベントルーティング。~~** ✅ 完了（#49、2026-07-25）。5 スロット envelope（`ABI_VERSION=4`）で確定済み。
-3. **`G11`〜`G14` コンポーネント/状態抽象の設計。** click_id int 配線とグローバル可変状態を再利用可能な層へ。フレームワークの骨格。
+3. **~~`G11`〜`G14` コンポーネント/状態抽象の設計。~~** ✅ #86 完了（RFC 0001 Phase A–D）。型付きハンドラレジストリ・状態ストア・signal・コンポーネント・フレームワーク dispatch を導入。click_id int 配線とグローバル可変状態を再利用可能な層へ置換。
 4. **`G6`〜`G10` API 表現力の拡充** と **`G18`/`G19` a11y/IME。** 3 の抽象の上に乗せる。
 5. **~~`G24`〜`G26` テスト基盤~~** ✅ #53 完了（ヘッドレス layout 検証・ファジング・ベンチ）。4 と #10 の安全網。
 6. **`G1`/`G2`/`G4`/`G5`/`G27`〜`G29` 配布整備**（マニフェスト・署名・semver・docs・example）。

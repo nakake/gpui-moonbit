@@ -1,47 +1,28 @@
 // Interactive app: state + logic, written in MoonBit.
 //
 // `dispatch` is the single event entry point that Rust (gpui-sys) calls via its
-// compiled symbol. The five i32 slots carry a versioned event envelope:
-//   (abi_version, event_kind, view, data_a, data_b)
-// Slot 0 is always ABI_VERSION so a stale Rust binary is rejected at runtime.
-// Slot 1 selects the event kind; slot 2 is the view id (routes the rebuild
-// target); slots 3–4 are kind-dependent:
-//   EVENT_CLICK: data_a = click_id, data_b = 0
-//   EVENT_KEY:   data_a = codepoint, data_b = modifier bits
-//   EVENT_TEXT:  data_a = token, data_b = byte length (copy via gpui_event_copy_text)
-//   EVENT_NAMED_KEY: data_a = named_key_id, data_b = modifier bits
-//   EVENT_ASYNC: data_a = token, data_b = byte length (copy via copy_async_payload)
+// compiled symbol. The five i32 slots carry a versioned event envelope
+// (docs/architecture.md §4b). The whole event loop — decode, typed handler
+// dispatch, dirty detection, and rebuild scheduling — is the library's
+// `framework_dispatch` (RFC 0001 §3.4): handlers `set` signals and never
+// report "changed"; the framework rebuilds only when state actually moved.
 //
 // NOTE: changing `dispatch`'s signature does NOT change the mangled symbol name
 // (MoonBit mangling excludes types), so the Rust `extern` must be kept in sync —
 // it is generated from a template in `gpui-sys/build.rs`.
 
-// Direct FFI: declared here (not in the root package) so `moon test` on
-// gpui-bindings never compiles a reference to the Rust-only symbol.
-///|
-#borrow(buf)
-extern "C" fn gpui_event_copy_text_ffi(
-  token : Int,
-  buf : Bytes,
-  len : Int,
-) -> Int = "gpui_event_copy_text"
+// State lives in a typed store cell (RFC 0001 §3.3); handlers mutate it
+// through the `count` signal (RFC 0001 §3.4), which is what the framework's
+// dirty tracking observes.
 
 ///|
-let count : Array[Int] = [0]
-
-// Button click ids (each clickable div carries one; routed in `on_click`).
+let store : @nakake/gpui-bindings.Store = @nakake/gpui-bindings.Store::new()
 
 ///|
-const BTN_DECREMENT : Int = 1
+let count_cell : @nakake/gpui-bindings.CellId[Int] = store.new_cell(0)
 
 ///|
-const BTN_RESET : Int = 2
-
-///|
-const BTN_INCREMENT : Int = 3
-
-///|
-const BTN_INCREMENT_10 : Int = 4
+let count : @nakake/gpui-bindings.Signal[Int] = store.signal(count_cell)
 
 // Stable key for the count display card's text node. `update_text` addresses it
 // for the incremental in-place update (issue #10); the full `build_tree` path
@@ -50,102 +31,60 @@ const BTN_INCREMENT_10 : Int = 4
 ///|
 const COUNT_KEY : String = "count-label"
 
+// Handler registry (RFC 0001 §3.2): closures are registered once at setup; the
+// issued ids are written by `set_on_click` and routed back through
+// `HandlerRegistry::dispatch`. No int constants, no int switch.
+
 ///|
-priv enum Event {
-  Click(Int) // click_id
-  Key(Int, Int) // codepoint, modifier bits
-  Text(String) // typed text (UTF-8 decoded)
-  NamedKey(Int, Int) // named_key_id, modifier bits
-  Async // injected event (RFC 0002); payload is opaque and unused by this counter app
-  Unknown
+let handlers : @nakake/gpui-bindings.HandlerRegistry = {
+  // App-level handlers (key / named key / text reach the focused outer
+  // container, not a node) are registered here, in `handlers`' own
+  // initializer. They must NOT live in unreferenced top-level `let`s: MoonBit
+  // only evaluates a top-level binding when something references it, so a
+  // `_`-prefixed registration would be silently dropped and the handler never
+  // fire. `handlers` is referenced by the click-handler lets, `ctx`, and the
+  // tests, so building it always wires these registrations. Click handlers
+  // stay as separate top-level `let`s because `button_row` references them by
+  // name to write their ids into the wire stream.
+  let r = @nakake/gpui-bindings.HandlerRegistry::new()
+  let _ = r.on_key(fn(code, mods) { on_key(code, mods) })
+  let _ = r.on_named_key(fn(id, mods) { on_named_key(id, mods) })
+  let _ = r.on_text(fn(text) { on_text(text) })
+  r
 }
 
 ///|
-fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
-  // Runtime version handshake: reject a stale Rust binary.
-  if version != @nakake/gpui-bindings.ABI_VERSION {
-    return Unknown
-  }
-  if kind == @nakake/gpui-bindings.EVENT_CLICK {
-    Click(data_a)
-  } else if kind == @nakake/gpui-bindings.EVENT_KEY {
-    Key(data_a, data_b)
-  } else if kind == @nakake/gpui-bindings.EVENT_TEXT {
-    // data_a = token, data_b = byte length. Copy the UTF-8 payload from
-    // Rust's event queue synchronously before returning from dispatch.
-    let len = data_b
-    let buf = Bytes::make(len, b'\x00')
-    let copied = gpui_event_copy_text_ffi(data_a, buf, len)
-    if copied > 0 {
-      let text = @utf8.decode(buf[0:copied]) catch { _ => "" }
-      Text(text)
-    } else {
-      Unknown
-    }
-  } else if kind == @nakake/gpui-bindings.EVENT_NAMED_KEY {
-    NamedKey(data_a, data_b)
-  } else if kind == @nakake/gpui-bindings.EVENT_ASYNC {
-    // data_a = token, data_b = byte length. Copy the opaque payload from
-    // Rust's event queue synchronously before returning from dispatch.
-    Async
-  } else {
-    Unknown
-  }
-}
+let btn_decrement : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
+  _view,
+) {
+  count.set(store, count.get(store) - 1)
+})
 
 ///|
-pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : Int) -> Int {
-  let changed = apply_event(decode(version, kind, data_a, data_b))
-  if changed == 1 {
-    // Incremental path (issue #10): the only state is `count`, and the only
-    // visible change is the count label text. Update that one keyed text node
-    // in place instead of re-encoding and re-decoding the whole tree. On any
-    // failure (tree not yet committed, key missing) fall back to the full
-    // `build_tree`, which is always correct. Either way, returning `changed`
-    // (1) lets Rust call `cx.notify()` so GPUI re-renders the (now updated)
-    // committed tree.
-    match @nakake/gpui-bindings.update_text(view, COUNT_KEY, "Count: \{count[0]}") {
-      Ok(_) => ()
-      Err(_) =>
-        match build_tree(view) {
-          Ok(_) => ()
-          Err(status) => println(
-            "app: build_tree failed: \{@nakake/gpui-bindings.classify_status(status).to_string()}",
-          )
-        }
-    }
-  }
-  changed
-}
+let btn_reset : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(_view) {
+  count.set(store, 0)
+})
 
 ///|
-fn apply_event(event : Event) -> Int {
-  match event {
-    Click(click_id) => on_click(click_id)
-    Key(code, mods) => on_key(code, mods)
-    Text(text) => on_text(text)
-    NamedKey(id, mods) => on_named_key(id, mods)
-    Async => 0 // injected events carry no counter semantics in this app
-    Unknown => 0
-  }
-}
+let btn_increment : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
+  _view,
+) {
+  count.set(store, count.get(store) + 1)
+})
 
 ///|
-fn on_click(click_id : Int) -> Int {
-  if click_id == BTN_DECREMENT {
-    count[0] = count[0] - 1
-    1
-  } else if click_id == BTN_RESET {
-    reset_count()
-  } else if click_id == BTN_INCREMENT {
-    count[0] = count[0] + 1
-    1
-  } else if click_id == BTN_INCREMENT_10 {
-    count[0] = count[0] + 10
-    1
-  } else {
-    0
-  }
+let btn_increment_10 : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
+  _view,
+) {
+  count.set(store, count.get(store) + 10)
+})
+
+///|
+/// +1 ボタンの実ハンドラ id。リンク済み round-trip テスト（`cmd/roundtrip`）が
+/// dispatch 経路を叩くために使う。id は共有カウンタで発行されるため登録順に依存
+/// する — テスト側でのハードコードは登録の追加・並べ替えで静かに壊れる。
+pub fn increment_handler_id() -> Int {
+  btn_increment.to_int()
 }
 
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).
@@ -160,27 +99,13 @@ const KEY_J : Int = 106 // 'j' → -1
 const KEY_R : Int = 114 // 'r' → reset
 
 ///|
-fn reset_count() -> Int {
-  if count[0] == 0 {
-    0
-  } else {
-    count[0] = 0
-    1
-  }
-}
-
-///|
-fn on_key(code : Int, _mods : Int) -> Int {
+fn on_key(code : Int, _mods : Int) -> Unit {
   if code == KEY_K {
-    count[0] = count[0] + 1
-    1
+    count.set(store, count.get(store) + 1)
   } else if code == KEY_J {
-    count[0] = count[0] - 1
-    1
+    count.set(store, count.get(store) - 1)
   } else if code == KEY_R {
-    reset_count()
-  } else {
-    0
+    count.set(store, 0)
   }
 }
 
@@ -188,71 +113,183 @@ fn on_key(code : Int, _mods : Int) -> Int {
 // Enter/Up → +1, Down → -1, Escape → reset, mirroring k/j/r.
 
 ///|
-fn on_named_key(id : Int, _mods : Int) -> Int {
+fn on_named_key(id : Int, _mods : Int) -> Unit {
   if id == @nakake/gpui-bindings.KEY_ENTER || id == @nakake/gpui-bindings.KEY_UP {
-    count[0] = count[0] + 1
-    1
+    count.set(store, count.get(store) + 1)
   } else if id == @nakake/gpui-bindings.KEY_DOWN {
-    count[0] = count[0] - 1
-    1
+    count.set(store, count.get(store) - 1)
   } else if id == @nakake/gpui-bindings.KEY_ESCAPE {
-    reset_count()
-  } else {
-    0
+    count.set(store, 0)
   }
 }
 
 // Text events carry typed characters (including IME-composed text). The demo
 // treats a pure-digit string as "set count to N"; anything else is ignored.
+// The parsed value is bounded by i32::MAX so a long digit run cannot wrap the
+// 32-bit boundary silently (issue #81): once the next digit would overflow,
+// the whole input is rejected rather than wrapping to a negative value.
 
 ///|
-fn on_text(text : String) -> Int {
+fn on_text(text : String) -> Unit {
   if text.is_empty() {
-    return 0
+    return
   }
   // Accept only ASCII digits so the demo stays deterministic across locales.
   let mut value = 0
   let mut all_digits = true
   for c in text {
     if c >= '0' && c <= '9' {
-      value = value * 10 + (c.to_int() - '0'.to_int())
+      let digit = c.to_int() - '0'.to_int()
+      // Overflow guard: reject the input if the next digit would exceed
+      // i32::MAX (0x7FFFFFFF), instead of letting `value * 10 + digit` wrap.
+      if value > (0x7FFFFFFF - digit) / 10 {
+        all_digits = false
+        break
+      }
+      value = value * 10 + digit
     } else {
       all_digits = false
       break
     }
   }
-  if all_digits && value != count[0] {
-    count[0] = value
-    1
-  } else {
-    0
+  if all_digits {
+    count.set(store, value)
   }
 }
 
-// Build one labelled, clickable button onto the command buffer. The button div
-// is pushed, configured, given a text label child, and left on the stack so the
-// caller can `add_child` it into its parent.
+// Render context (RFC 0001 §3.1): components reach the store and handler
+// registry through it. `view` is fixed to slot 0 (the single window).
 
 ///|
-fn make_button(
-  cb : @nakake/gpui-bindings.CommandBuffer,
-  key : String,
-  label : String,
-  click_id : Int,
-  r : Int,
-  g : Int,
-  b : Int,
-) -> Unit {
+let ctx : @nakake/gpui-bindings.RenderCtx = { view: 0, store, handlers }
+
+///|
+pub fn dispatch(
+  version : Int,
+  kind : Int,
+  view : Int,
+  data_a : Int,
+  data_b : Int,
+) -> Int {
+  @nakake/gpui-bindings.framework_dispatch(
+    ctx,
+    version,
+    kind,
+    view,
+    data_a,
+    data_b,
+    fn(v) { update_count_view(v) },
+  )
+}
+
+// The rebuild the framework schedules when state changed (RFC 0001 §3.4).
+// Incremental path first (issue #10): the only state is `count`, and the only
+// visible change is the count label text, so update that one keyed text node
+// in place instead of re-encoding the whole tree. On any failure (tree not yet
+// committed, key missing) fall back to the full `build_tree`, which is always
+// correct.
+
+///|
+fn update_count_view(view : Int) -> Result[Unit, Int] {
+  match
+    @nakake/gpui-bindings.update_text(
+      view,
+      COUNT_KEY,
+      "Count: \{count.get(store)}",
+    ) {
+    Ok(_) => Ok(())
+    Err(_) => build_tree(view)
+  }
+}
+
+// --- Components (RFC 0001 §3.1) ---------------------------------------------
+//
+// `build_tree` is a sequence of component calls; each component emits its
+// subtree onto the command buffer and leaves the subtree root on the stack so
+// the caller attaches it with `add_child`.
+
+///|
+fn title(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
+  // A wrapper div carries the bold weight (G8 typography), inherited by the
+  // text child.
   cb.div()
-  cb.set_key(key)
-  cb.set_size(92.0, 56.0)
-  cb.set_bg(r, g, b)
-  cb.set_rounded(10.0)
-  cb.set_flex_col()
-  cb.set_center()
-  cb.set_on_click(click_id)
-  cb.text(label, 255, 255, 255, 18.0)
-  cb.add_child() // attach the label to the button; button stays on top
+  cb.set_font_weight(700)
+  cb.text("Counter", 236, 239, 245, 30.0)
+  cb.add_child()
+}
+
+///|
+fn counter_card(
+  cb : @nakake/gpui-bindings.CommandBuffer,
+  ctx : @nakake/gpui-bindings.RenderCtx,
+) -> Unit {
+  // Count display card: bordered, padded, rounded, with a soft shadow (G7/G9).
+  // Keyed so `update_text` can address its text child for the incremental
+  // in-place update (issue #10) without a full rebuild.
+  cb.div()
+  cb.set_key(COUNT_KEY)
+  cb.set_bg_color(@nakake/gpui-bindings.Color::rgb(38, 42, 52))
+  cb.set_padding(16.0)
+  cb.set_border_color(2.0, @nakake/gpui-bindings.Color::rgb(120, 200, 255))
+  cb.set_rounded(12.0)
+  cb.set_shadow(0, 4, 8, 0, @nakake/gpui-bindings.Color::rgba(0, 0, 0, 96))
+  cb.text("Count: \{count.get(ctx.store)}", 120, 200, 255, 44.0)
+  cb.add_child()
+}
+
+///|
+fn button_row(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
+  // A row of buttons; each carries a registry-issued handler id. The row sits
+  // inside a keyed horizontal-scroll container (G6): its retained ScrollHandle
+  // keeps the scroll position across the rebuild every click triggers. The
+  // 404px row (4×92 + 3×12 gap) overflows the 300px container, so the wheel
+  // scrolls it sideways (a vertical wheel maps to the x-axis when only x
+  // scrolls).
+  cb.div() // scroll container
+  cb.set_key("button-scroll")
+  cb.set_size(300.0, 60.0)
+  cb.set_overflow(
+    @nakake/gpui-bindings.OVERFLOW_SCROLL,
+    @nakake/gpui-bindings.OVERFLOW_VISIBLE,
+  )
+  cb.div() // row
+  cb.set_size(404.0, 56.0) // wider than the 300px container → horizontal overflow
+  cb.set_flex_row()
+  cb.set_gap(12.0)
+  @nakake/gpui-bindings.button(cb, {
+    key: "btn-decrement",
+    label: "-1",
+    color: @nakake/gpui-bindings.Color::rgb(200, 80, 80),
+    on_click: btn_decrement,
+  })
+  cb.add_child()
+  @nakake/gpui-bindings.button(cb, {
+    key: "btn-reset",
+    label: "Reset",
+    color: @nakake/gpui-bindings.Color::rgb(92, 98, 110),
+    on_click: btn_reset,
+  })
+  cb.add_child()
+  @nakake/gpui-bindings.button(cb, {
+    key: "btn-increment",
+    label: "+1",
+    color: @nakake/gpui-bindings.Color::rgb(70, 160, 95),
+    on_click: btn_increment,
+  })
+  cb.add_child()
+  @nakake/gpui-bindings.button(cb, {
+    key: "btn-increment-10",
+    label: "+10",
+    color: @nakake/gpui-bindings.Color::rgb(70, 110, 230),
+    on_click: btn_increment_10,
+  })
+  cb.add_child()
+  cb.add_child() // attach the row to the scroll container
+}
+
+///|
+fn key_hints(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
+  cb.text("keys:  k +1    j -1    r reset", 130, 135, 148, 14.0)
 }
 
 ///|
@@ -265,57 +302,13 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   cb.set_gap(28.0)
   cb.set_padding(32.0)
 
-  // Title: a wrapper div carries the bold weight (G8 typography), inherited by
-  // the text child.
-  cb.div()
-  cb.set_font_weight(700)
-  cb.text("Counter", 236, 239, 245, 30.0)
+  title(cb)
   cb.add_child()
-  cb.add_child() // attach the title wrapper to the root
-
-  // Count display card: bordered, padded, rounded, with a soft shadow (G7/G9).
-  // Keyed so `update_text` can address its text child for the incremental
-  // in-place update (issue #10) without a full rebuild.
-  cb.div()
-  cb.set_key(COUNT_KEY)
-  cb.set_bg_color(@nakake/gpui-bindings.Color::rgb(38, 42, 52))
-  cb.set_padding(16.0)
-  cb.set_border(2.0, 120, 200, 255)
-  cb.set_rounded(12.0)
-  cb.set_shadow(0, 4, 8, 0, @nakake/gpui-bindings.Color::rgba(0, 0, 0, 96))
-  cb.text("Count: \{count[0]}", 120, 200, 255, 44.0)
+  counter_card(cb, ctx)
   cb.add_child()
-  cb.add_child() // attach the card to the root
-
-  // A row of buttons; each is a distinct click_id routed in on_click. The row
-  // sits inside a keyed horizontal-scroll container (G6): its retained
-  // ScrollHandle keeps the scroll position across the rebuild every click
-  // triggers. The 404px row (4×92 + 3×12 gap) overflows the 300px container, so
-  // the wheel scrolls it sideways (a vertical wheel maps to the x-axis when only
-  // x scrolls).
-  cb.div() // scroll container
-  cb.set_key("button-scroll")
-  cb.set_size(300.0, 60.0)
-  cb.set_overflow(
-    @nakake/gpui-bindings.OVERFLOW_SCROLL,
-    @nakake/gpui-bindings.OVERFLOW_VISIBLE,
-  )
-  cb.div() // row
-  cb.set_size(404.0, 56.0) // wider than the 300px container → horizontal overflow
-  cb.set_flex_row()
-  cb.set_gap(12.0)
-  make_button(cb, "btn-decrement", "-1", BTN_DECREMENT, 200, 80, 80)
+  button_row(cb)
   cb.add_child()
-  make_button(cb, "btn-reset", "Reset", BTN_RESET, 92, 98, 110)
-  cb.add_child()
-  make_button(cb, "btn-increment", "+1", BTN_INCREMENT, 70, 160, 95)
-  cb.add_child()
-  make_button(cb, "btn-increment-10", "+10", BTN_INCREMENT_10, 70, 110, 230)
-  cb.add_child()
-  cb.add_child() // attach the row to the scroll container
-  cb.add_child() // attach the scroll container to the root
-
-  cb.text("keys:  k +1    j -1    r reset", 130, 135, 148, 14.0)
+  key_hints(cb)
   cb.add_child()
 
   cb.set_root()
