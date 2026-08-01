@@ -80,7 +80,7 @@ git 依存の場合は `{ "git": { "url": "https://github.com/nakake/gpui-moonbi
 
 ### 2. 実行ファイルの moon.pkg で 3 パッケージを import する
 
-```moonbit
+```moonbit nocheck
 // exe の moon.pkg
 import {
   "nakake/gpui-bindings",       // 高水準 API（CommandBuffer / build_tree / run_window）
@@ -97,7 +97,8 @@ options("is-main": true)
 
 Rust staticlib は `app.dispatch` のマングルシンボルを未解決参照として持つため、dead-code elimination で消されないよう明示保持が必須です:
 
-```moonbit
+```moonbit nocheck
+///|
 fn main {
   let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
   ignore(_keep)
