@@ -118,7 +118,7 @@ write_moon_pkg() {
     line="${line//@RUST_LIB_DIR@/$RUST_LIB_DIR}"
     printf '%s\n' "${line//@NATIVE_LIBS@/$native_libs}"
   done < "$template")"
-  if [ ! -f "$destination" ] || ! cmp -s "$template" "$destination" || grep -q '@NATIVE_LIBS@' "$destination" ||
+  if [ ! -f "$destination" ] || grep -q '@NATIVE_LIBS@' "$destination" ||
      [ "$(cat "$destination")" != "$output" ]; then
     printf '%s\n' "$output" > "$destination"
     echo "==> wrote ${destination#"$MB"/} ($OS_PKG)"
@@ -184,6 +184,34 @@ echo "    Rust library dir: $RUST_LIB_DIR"
 # The MoonBit function whose mangled symbol Rust needs. Its package path suffix
 # + name determine the symbol; keep in sync if you rename the callback.
 PKG_FN_SUFFIX="3app8dispatch"   # …/app :: dispatch  (see notes for the scheme)
+
+# Expected C parameter list for the MoonBit callback, derived from abi.toml so
+# `[callback] params` stays the single source of truth (issue #76).
+CALLBACK_PARAMS="$(awk '
+  { sub(/[[:space:]]*#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+  /^\[[A-Za-z_][A-Za-z0-9_]*\]$/ { section=$0; next }
+  section == "[callback]" && /^params[[:space:]]*=/ {
+    sub(/^params[[:space:]]*=[[:space:]]*\[/, "")
+    sub(/\][[:space:]]*$/, "")
+    gsub(/["[:space:]]/, "")
+    n = split($0, types, ",")
+    if (n < 1) { print "ERROR: [callback] params is empty in abi.toml" > "/dev/stderr"; exit 1 }
+    out = ""
+    for (i = 1; i <= n; i++) {
+      if (types[i] != "i32") {
+        print "ERROR: unsupported [callback] param type in abi.toml: " types[i] > "/dev/stderr"
+        exit 1
+      }
+      out = out (i > 1 ? "," : "") "int32_t"
+    }
+    print out
+    exit
+  }
+' "$GSYS/abi.toml")"
+if [ -z "$CALLBACK_PARAMS" ]; then
+  echo "ERROR: could not derive [callback] params from $GSYS/abi.toml" >&2
+  exit 1
+fi
 
 echo "==> [0/5] Regenerate the C header, ABI constants, and C FFI bindings"
 awk '
@@ -272,11 +300,11 @@ if [ -n "$MAIN_C" ]; then
     | sed -E 's/int32_t[A-Za-z_][A-Za-z0-9_]*/int32_t/g' \
     | sort -u || true)"
   PROTOTYPE_COUNT="$(printf '%s\n' "$PROTOTYPES" | sed '/^$/d' | wc -l)"
-  if [ "$PROTOTYPE_COUNT" -ne 1 ] || [ "$PROTOTYPES" != "int32_t,int32_t,int32_t,int32_t,int32_t" ]; then
-    echo "ERROR: generated MoonBit callback must be int32_t ${SYM}(int32_t, int32_t, int32_t, int32_t, int32_t); found: ${PROTOTYPES:-none}" >&2
+  if [ "$PROTOTYPE_COUNT" -ne 1 ] || [ "$PROTOTYPES" != "$CALLBACK_PARAMS" ]; then
+    echo "ERROR: generated MoonBit callback must be int32_t ${SYM}(${CALLBACK_PARAMS//,/, }); found: ${PROTOTYPES:-none}" >&2
     exit 1
   fi
-  echo "    signature : int32_t(int32_t, int32_t, int32_t, int32_t, int32_t)"
+  echo "    signature : int32_t(${CALLBACK_PARAMS//,/, })"
 else
   echo "    signature : skipped (generated main.c is unavailable on this platform)"
 fi

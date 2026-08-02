@@ -36,6 +36,7 @@
 - `set_absolute(mode)` を `set_position(mode)` にリネーム。実態は position-mode setter（`POSITION_RELATIVE` / `POSITION_ABSOLUTE`）であり、「absolute にするだけ」の旧名は誤解を招いたため（#81）。
 - 色の API を `Color` 受けに寄せる方針を文書化。生 `r, g, b` トリプレット版（`set_bg` / `set_border` / `text`）は引き続き利用可能で、`Color` 版（`set_bg_color` / `set_border_color` / `set_text_color`）を推奨（#81）。
 - `on_text` の数値パースに i32 オーバーフローガードを追加。桁あふれする数字入力は wrap せず無視する（#81）。
+- コールバックの期待プロトタイプを `abi.toml` の `[callback] params` から導出するように `build.sh` / `build.ps1` を変更（#76）。従来は `int32_t,int32_t,int32_t,int32_t,int32_t` を両ドライバに文字列リテラルでハードコードしていたため、envelope のスロット数を変えると `abi.toml` に加えて 2 箇所を手で直す必要があった。opcode / status code と同様に `abi.toml` を単一情報源に揃えた。`i32` 以外の param 型は明示的にエラーにする。
 
 ### Deprecated
 
@@ -47,6 +48,7 @@
 
 ### Fixed
 
+- `build.sh` の `write_moon_pkg` の冪等性チェックが機能していなかった問題を修正（#77）。プレースホルダ未置換の**テンプレート**と置換済みの**生成結果**を `cmp` で比較していたため常に「差分あり」となり、`||` の短絡で本来の比較（生成内容 vs 既存ファイル）に到達していなかった。結果として `moon.pkg` が毎回書き換わり mtime が更新されていた（`build.sh` が exe を明示的に `rm -f` するため実害は無し）。`build.ps1` の `Write-MoonPkg` には同じ不具合が無く、両ドライバのロジック乖離の実例だった。
 - Windows CI の `moon test` が #93 の prebuild 導入後に失敗していた問題を修正: `build.py` が cc/ld 形式のリンクフラグ（`-L`/`-l`）を MSVC の `cl` に渡し、`link` パッケージのテスト exe が `CVT1100`（duplicate manifest）でリンク失敗していた。Windows では prebuild のフラグ伝播を暫定的に無効化（空の LinkConfig）した。MSVC 形式フラグは #103 で実装・検証済み（下記）。
 - prebuild の Windows 対応を実装（#103）: `build.py` が MSVC 形式のリンクフラグを出力するようになり、#102 の暫定ゲートを解除した。moon は `link_flags` を `link` ではなく `cl` に渡すため `/LIBPATH:` は「unknown option」として捨てられる。したがって検索パスは使わず、`gpui_sys.lib` / `gpui.lib` / windows-rs の import lib を**絶対パス**で渡し、Windows SDK のライブラリ（`kernel32.lib` 等）は素の名前のまま `LIB` 経由で解決させる。Rust 側は `RUSTFLAGS=-C target-feature=+crt-static` でビルドする（moon の native backend が無条件に `/MT` を付けるため）。あわせて Windows の `moon test` から `link` パッケージを除外した: moon は `link` パッケージ自身の blackbox test をビルドする際に LinkConfig を 2 回適用してしまい（`link` と `link_blackbox_test` が同じ `link/moon.pkg` に解決される）、`.lib` の重複で MSVC が `CVTRES: CVT1100 duplicate resource type:MANIFEST` → `LNK1123` で落ちる。ld / ld64 では無害なため Unix は全パッケージを実行する。
 - `build.ps1` が `cargo rustc -- --print native-static-libs` の出力から ANSI エスケープを除去していなかった問題を修正（#106）。最後のトークンが `/defaultlib:libcmt<ESC>[0m` の形で残るため後続の `/defaultlib:(libcmt|msvcrt)` フィルタがマッチせず、`moon.pkg` の `@NATIVE_LIBS@` に漏れて Windows CI で `cl : Command line warning D9002 : ignoring unknown option` が繰り返し出ていた（`cl` が捨てるため実害は無し）。`moonbit-bindings/build.py` の `extract_native_libs()` と同じ処理に揃えた。パターンは Windows PowerShell 5.1 でも動くよう `[char]27` で組んでいる（`` `e `` は PowerShell 6+ 専用）。windows-latest の CI で D9002 の消失と `native libs (static CRT):` に `/defaultlib:` が残らないことを確認済み。

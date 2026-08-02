@@ -106,6 +106,25 @@ for ($i = 0; $i -lt $abiLines.Count; $i++) {
   $generated.Add('///|')
   $generated.Add("pub const $name : Int = $($Matches[2])")
 }
+# Expected C parameter list for the MoonBit callback, derived from abi.toml so
+# `[callback] params` stays the single source of truth (issue #76).
+$callbackSection = ''
+$callbackParams = ''
+foreach ($abiLine in $abiLines) {
+  $trimmed = ($abiLine -replace '\s*#.*$', '').Trim()
+  if (-not $trimmed) { continue }
+  if ($trimmed -match '^\[([A-Za-z_][A-Za-z0-9_]*)\]$') { $callbackSection = $Matches[1]; continue }
+  if ($callbackSection -eq 'callback' -and $trimmed -match '^params\s*=\s*\[(.*)\]\s*$') {
+    $types = @($Matches[1] -split ',' | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
+    if ($types.Count -lt 1) { throw '[callback] params is empty in abi.toml' }
+    foreach ($t in $types) {
+      if ($t -ne 'i32') { throw "unsupported [callback] param type in abi.toml: $t" }
+    }
+    $callbackParams = (@('int32_t') * $types.Count) -join ','
+    break
+  }
+}
+if (-not $callbackParams) { throw 'could not derive [callback] params from abi.toml' }
 $abiConstants = Join-Path $MB 'abi_constants.mbt'
 # UTF-8 without BOM and LF newlines matches awk output byte-for-byte.
 [System.IO.File]::WriteAllText($abiConstants, (($generated -join "`n") + "`n"), $utf8NoBom)
@@ -180,12 +199,12 @@ if ($prototypeMatches.Count -eq 0) { throw "could not find an int32_t prototype 
 $signatures = @($prototypeMatches | ForEach-Object {
   (($_.Groups[1].Value -replace '\s+', '') -replace 'int32_t[A-Za-z_][A-Za-z0-9_]*', 'int32_t')
 } | Sort-Object -Unique)
-if ($signatures.Count -ne 1 -or $signatures[0] -ne 'int32_t,int32_t,int32_t,int32_t,int32_t') {
-  throw "generated MoonBit callback must have five int32_t parameters; found: $($signatures -join '; ')"
+if ($signatures.Count -ne 1 -or $signatures[0] -ne $callbackParams) {
+  throw "generated MoonBit callback must be int32_t($($callbackParams -replace ',', ', ')); found: $($signatures -join '; ')"
 }
 Set-Content -NoNewline -Path (Join-Path $GSys 'mb_symbol.txt') -Value "$sym`n"
 Write-Host "    symbol / link_name : $sym"
-Write-Host '    signature : int32_t(int32_t, int32_t, int32_t, int32_t, int32_t)'
+Write-Host "    signature : int32_t($($callbackParams -replace ',', ', '))"
 
 Write-Host '==> [3/5] Build gpui-sys (cargo)'
 # Moon's native backend unconditionally compiles and links with /MT. Build the
