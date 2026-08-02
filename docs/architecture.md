@@ -279,6 +279,8 @@ exe の `main` では `app.dispatch` を `let _keep : (Int, Int, Int, Int, Int) 
 
 issue #53 のテスト基盤（G24–G26）がこれを補強する: **G24** は gpui `test-support` のヘッドレス `TestAppContext` で実際のコマンドバッファをデコード・レンダリングし、`debug_bounds` で要素の正確なジオメトリをアサートする golden layout テスト（`headless_tests.rs`、harness は `headless.rs`）である。`render_node` はキー付き div とテキストノードを `debug_selector` で公開し、staticlib ビルドでは no-op にコンパイルされる。**G25** は in-crate のシード PRNG ファジング（`fuzz_tests.rs`）でデコーダの panic 非発生を固定し、`gpui-sys/fuzz/` には cargo-fuzz / libFuzzer（ASan）用のカバレッジ誘導ターゲット scaffold がある。**G26** は criterion ベンチ（`gpui-sys/benches/decode_bench.rs`）でデコードパスを計測する。これらは `test-support` feature（または dev-dependency）の下でのみコンパイルされ、出荷される staticlib には含まれない。
 
+MoonBit 側のテストは 2 層に分かれる（issue #80）。**whitebox**（`*_wbtest.mbt`）はパッケージ内部スコープで内部ヘルパと wire format の不変条件を固定する。**blackbox**（`gpui-bindings_test.mbt`）は `@gpui-bindings` 経由で公開 API だけを触り、消費者から見えるべきものが実際に `pub` であることを検証する（whitebox は内部スコープのため `pub` の付け忘れを検出できない）。**blackbox テスト実行ファイルは `tcc -run` で走り `gpui_sys` をリンクしない**ため、そこから FFI シンボルに到達するコードを呼ぶと `undefined symbol` でテスト実行ごと失敗する。`build_tree` / `update_text` / `run_window` / `post_event` / `input_text` / `input_set_text` / `debug_dump_text` / `abi_probe` と、`EVENT_TEXT` / `EVENT_ASYNC` の分岐でペイロードをコピーする `decode_event` がこれに該当し、MoonBit のテストからは検証できない。その層は `cmd/roundtrip` と CI の consumer smoke test（`tests/consumer`）が担う。FFI を跨ぐ判断ロジックをテストしたい場合は、`app.update_view_with`（issue #10 のインクリメンタル更新→フルリビルドのフォールバック判断）のように FFI 呼び出しを引数で受ける形に切り出す。
+
 ## 10. ファイル → 関心事マップ
 
 - ノードストア、C ABI エクスポート、レンダリング、イベントリスナー: `gpui-sys/src/lib.rs`
@@ -300,6 +302,7 @@ issue #53 のテスト基盤（G24–G26）がこれを補強する: **G24** は
 - デコーダファジング（G25）: `gpui-sys/src/fuzz_tests.rs`（in-crate シード PRNG）、`gpui-sys/fuzz/`（cargo-fuzz scaffold）
 - デコードベンチ（G26）: `gpui-sys/benches/decode_bench.rs`
 - 合成 widget（`checkbox` / `labeled_row`、G6）: `moonbit-bindings/widgets.mbt`
+- 公開 API のブラックボックステスト（issue #80）: `moonbit-bindings/gpui-bindings_test.mbt`
 - 消費者向けサンプル: `moonbit-bindings/examples/hello/hello.mbt`
 
 ## 11. MoonBit native 実行時制約

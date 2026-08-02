@@ -154,7 +154,7 @@ fn on_named_key(id : Int, _mods : Int) -> Unit {
 // same parser serves the text-input submit path (RFC 0003).
 
 ///|
-fn parse_digits(text : String) -> Option[Int] {
+fn parse_digits(text : String) -> Int? {
   if text.is_empty() {
     return None
   }
@@ -189,9 +189,11 @@ fn on_text(text : String) -> Unit {
 // mirrors. A pull failure (e.g. no committed model) leaves state untouched.
 
 ///|
-fn on_submit_input(view : Int, input_id : @nakake/gpui-bindings.InputId) -> Unit {
-  let text = match
-    @nakake/gpui-bindings.input_text(view, input_id.to_int()) {
+fn on_submit_input(
+  view : Int,
+  input_id : @nakake/gpui-bindings.InputId,
+) -> Unit {
+  let text = match @nakake/gpui-bindings.input_text(view, input_id.to_int()) {
     Ok(t) => t
     Err(_) => return
   }
@@ -235,16 +237,44 @@ pub fn dispatch(
 // correct.
 
 ///|
-fn update_count_view(view : Int) -> Result[Unit, Int] {
-  match
-    @nakake/gpui-bindings.update_text(
-      view,
-      COUNT_KEY,
-      "Count: \{count.get(store)}",
-    ) {
+/// カウント表示カードのテキスト。インクリメンタル経路（`update_text`）とフルリビルド
+/// 経路（`counter_card`）の両方がこれを使う。片方だけ書式を変えると、更新のたびに
+/// 表示が揺れる（`update_text` が書いた文字列を次の `build_tree` が別物で上書きする）
+/// ため、文字列は 1 箇所に閉じ込める。
+fn count_label(n : Int) -> String {
+  "Count: \{n}"
+}
+
+///|
+/// インクリメンタル更新 → フルリビルドのフォールバック判断（issue #10）。実際の FFI
+/// 呼び出しを引数で受け取るので、`moon test` からスタブを渡して分岐を検証できる
+/// （`dispatch` 本体は FFI シンボルを参照するため `moon test` では走らない）。
+/// 契約は 2 つ: `incremental` が成功したら `rebuild` を呼ばないこと、失敗したら
+/// `rebuild` の結果をそのまま返すこと。
+fn update_view_with(
+  view : Int,
+  incremental : (Int) -> Result[Unit, Int],
+  rebuild : (Int) -> Result[Unit, Int],
+) -> Result[Unit, Int] {
+  match incremental(view) {
     Ok(_) => Ok(())
-    Err(_) => build_tree(view)
+    Err(_) => rebuild(view)
   }
+}
+
+///|
+fn update_count_view(view : Int) -> Result[Unit, Int] {
+  update_view_with(
+    view,
+    fn(v) {
+      @nakake/gpui-bindings.update_text(
+        v,
+        COUNT_KEY,
+        count_label(count.get(store)),
+      )
+    },
+    fn(v) { build_tree(v) },
+  )
 }
 
 // --- Components (RFC 0001 §3.1) ---------------------------------------------
@@ -278,7 +308,7 @@ fn counter_card(
   cb.set_border_color(2.0, @nakake/gpui-bindings.Color::rgb(120, 200, 255))
   cb.set_rounded(12.0)
   cb.set_shadow(0, 4, 8, 0, @nakake/gpui-bindings.Color::rgba(0, 0, 0, 96))
-  cb.text("Count: \{count.get(ctx.store)}", 120, 200, 255, 44.0)
+  cb.text(count_label(count.get(ctx.store)), 120, 200, 255, 44.0)
   cb.add_child()
 }
 
