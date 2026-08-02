@@ -181,6 +181,16 @@ RUST_LIB_DIR="$CARGO_TARGET_ROOT/$RUST_TARGET/debug"
 echo "    Rust target: $RUST_TARGET"
 echo "    Rust library dir: $RUST_LIB_DIR"
 
+# The pre-commit hook is opt-in: `core.hooksPath` is a local git setting that a
+# clone does not inherit, so it is easy to never notice the hook exists (issue
+# #82). Nudge, do not set it — silently rewriting someone's git config from a
+# build script is worse than an unenforced hook.
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && \
+   [ -z "$(git -C "$ROOT" config --get core.hooksPath || true)" ]; then
+  echo "    HINT: pre-commit hook not enabled. To enable it, run:"
+  echo "          git config core.hooksPath moonbit-bindings/.githooks"
+fi
+
 # The MoonBit function whose mangled symbol Rust needs. Its package path suffix
 # + name determine the symbol; keep in sync if you rename the callback.
 PKG_FN_SUFFIX="3app8dispatch"   # …/app :: dispatch  (see notes for the scheme)

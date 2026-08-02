@@ -40,6 +40,7 @@
 - 色の API を `Color` 受けに寄せる方針を文書化。生 `r, g, b` トリプレット版（`set_bg` / `set_border` / `text`）は引き続き利用可能で、`Color` 版（`set_bg_color` / `set_border_color` / `set_text_color`）を推奨（#81）。
 - `on_text` の数値パースに i32 オーバーフローガードを追加。桁あふれする数字入力は wrap せず無視する（#81）。
 - コールバックの期待プロトタイプを `abi.toml` の `[callback] params` から導出するように `build.sh` / `build.ps1` を変更（#76）。従来は `int32_t,int32_t,int32_t,int32_t,int32_t` を両ドライバに文字列リテラルでハードコードしていたため、envelope のスロット数を変えると `abi.toml` に加えて 2 箇所を手で直す必要があった。opcode / status code と同様に `abi.toml` を単一情報源に揃えた。`i32` 以外の param 型は明示的にエラーにする。
+- pre-commit hook を実用可能にした（#82）。従来は `moon check` の 2 行のみで、しかも git が hook をリポジトリ root から実行するため `cd` が無く、有効化しても MoonBit プロジェクトを見つけられなかった（`.githooks/README.md` が「使うならフックを手で書き換えろ」と指示していた）。現在は root へ `cd` した上で、生成バインディング（`gpui-bindings-ffi.mbt` / `abi_constants.mbt`）に未ステージの差分がないか（`build.sh` は WARNING を出すだけで止めないため取りこぼしやすい）、`moon check`、`moon test` を検査する。Rust テスト・`abi.toml` の drift guard・言語横断リンク・3 OS のコールドビルドは CI に残し、その役割分担をフック内コメントと `.githooks/README.md` に明記した。有効化手順（`git config core.hooksPath moonbit-bindings/.githooks`）を root `README.md` に記載し、`build.sh` / `build.ps1` は `core.hooksPath` が未設定のとき有効化コマンドを案内する（ユーザーの git 設定を勝手に書き換えないため、設定はせず案内のみ）。
 
 ### Deprecated
 
