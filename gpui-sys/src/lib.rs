@@ -530,18 +530,20 @@ fn take_recorded_dispatches() -> Vec<RecordedDispatch> {
 /// dispatch call that provided the token.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_event_copy_text(token: i32, buf: *mut u8, len: i32) -> i32 {
-    if token < 0 || buf.is_null() || len < 0 {
-        return GPUI_STATUS_INVALID_HANDLE;
-    }
-    let guard = EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(payload) = guard.get(token as usize) else {
-        return GPUI_STATUS_INVALID_HANDLE;
-    };
-    let copy_len = (len as usize).min(payload.len());
-    unsafe {
-        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, copy_len);
-    }
-    copy_len as i32
+    ffi_export("gpui_event_copy_text", || {
+        if token < 0 || buf.is_null() || len < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        let guard = EVENT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(payload) = guard.get(token as usize) else {
+            return GPUI_STATUS_INVALID_HANDLE;
+        };
+        let copy_len = (len as usize).min(payload.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, copy_len);
+        }
+        copy_len as i32
+    })
 }
 
 /// Stack headroom required before descending one more level of a committed
@@ -583,20 +585,22 @@ fn collect_text_contents(node: &UiNode, out: &mut Vec<u8>) {
 /// to verify MoonBit→C→Rust text fidelity without a GUI.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_debug_dump_text(view: i32, buf: *mut u8, len: i32) -> i32 {
-    if view < 0 || buf.is_null() || len < 0 {
-        return GPUI_STATUS_INVALID_HANDLE;
-    }
-    let guard = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(Some(root)) = guard.get(view as usize) else {
-        return GPUI_STATUS_INVALID_HANDLE;
-    };
-    let mut payload = Vec::new();
-    collect_text_contents(root, &mut payload);
-    let copy_len = (len as usize).min(payload.len());
-    unsafe {
-        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, copy_len);
-    }
-    copy_len as i32
+    ffi_export("gpui_debug_dump_text", || {
+        if view < 0 || buf.is_null() || len < 0 {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        let guard = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(Some(root)) = guard.get(view as usize) else {
+            return GPUI_STATUS_INVALID_HANDLE;
+        };
+        let mut payload = Vec::new();
+        collect_text_contents(root, &mut payload);
+        let copy_len = (len as usize).min(payload.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, copy_len);
+        }
+        copy_len as i32
+    })
 }
 
 /// Cross-boundary ABI probe: echo `value` back unchanged.
@@ -5589,6 +5593,107 @@ mod tests {
                 assert_eq!(entry.payload, [i]);
             }
         });
+    }
+
+    /// Every `#[unsafe(no_mangle)] pub extern "C"` export must run its body
+    /// inside `ffi_export`, the `catch_unwind` wrapper that turns a panic into
+    /// `GPUI_STATUS_INTERNAL_PANIC`. This check is textual (we read this crate's
+    /// own source) because there is no attribute-level hook that could enforce
+    /// it at compile time. The failure it prevents is silent: an unwrapped
+    /// export only misbehaves when something inside it actually panics, at which
+    /// point the process aborts instead of returning a status.
+    #[::core::prelude::v1::test]
+    fn every_c_export_goes_through_ffi_export() {
+        let source = include_str!("lib.rs");
+        let lines: Vec<&str> = source.lines().collect();
+        let mut i = 0;
+        let mut exports_found = 0;
+        while i < lines.len() {
+            if lines[i].trim() == "#[unsafe(no_mangle)]" {
+                let mut j = i + 1;
+                let mut name: Option<&str> = None;
+                while j < lines.len() {
+                    let trimmed = lines[j].trim();
+                    if let Some(idx) = lines[j].find("pub extern \"C\" fn ") {
+                        let rest = &lines[j][idx + "pub extern \"C\" fn ".len()..];
+                        let name_end = rest
+                            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                            .unwrap_or(rest.len());
+                        name = Some(&rest[..name_end]);
+                    }
+                    if trimmed.ends_with('{') {
+                        break;
+                    }
+                    j += 1;
+                }
+                if j >= lines.len() {
+                    break;
+                }
+                let Some(name) = name else {
+                    let offending = &lines[j].trim();
+                    panic!(
+                        "could not find the export name near `{}`; \
+                         every #[unsafe(no_mangle)] export runs under ffi_export(\"<name>\", || ...) \
+                         and this export was missing one",
+                        offending
+                    );
+                };
+                exports_found += 1;
+                let mut k = j + 1;
+                while k < lines.len()
+                    && (lines[k].trim().is_empty() || lines[k].trim().starts_with("//"))
+                {
+                    k += 1;
+                }
+                let first = lines.get(k).map(|l| l.trim()).unwrap_or("");
+                // Two distinct failures, reported separately: no wrapper at all,
+                // and a wrapper labelled with someone else's name (a copy-paste
+                // of a neighbouring export, which would misattribute the panic
+                // in `report_panic` while still catching it).
+                assert!(
+                    first.starts_with("ffi_export("),
+                    "unwrapped C export `{name}`: its body must be wrapped in \
+                     ffi_export(\"{name}\", || {{ ... }}) so a panic returns \
+                     GPUI_STATUS_INTERNAL_PANIC instead of aborting the process"
+                );
+                assert!(
+                    first.starts_with(&format!("ffi_export(\"{name}\"")),
+                    "C export `{name}` is wrapped under the wrong name: `{first}`. \
+                     The label is what `report_panic` prints, so it must match \
+                     the exported function"
+                );
+                i = k + 1;
+            } else {
+                i += 1;
+            }
+        }
+        assert!(
+            exports_found >= 10,
+            "expected at least 10 #[unsafe(no_mangle)] exports, found {}; \
+             this floor keeps the check non-vacuous so a parsing change that \
+             silently matches nothing cannot make it pass",
+            exports_found
+        );
+    }
+
+    /// The other half of the contract the guard above enforces textually: that
+    /// `ffi_export` actually converts a panic into a status instead of letting
+    /// it cross the C boundary. Wrapping every export is only worth checking if
+    /// the wrapper does its job.
+    ///
+    /// The panic hook is swapped out for the duration: `catch_unwind` still runs
+    /// it, and the default one would print a scary backtrace for a panic this
+    /// test is deliberately causing.
+    #[::core::prelude::v1::test]
+    fn ffi_export_converts_panic_to_status() {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let status = ffi_export("test_panicking_export", || panic!("deliberate"));
+        let ok = ffi_export("test_ok_export", || GPUI_STATUS_OK);
+        std::panic::set_hook(previous);
+
+        assert_eq!(status, GPUI_STATUS_INTERNAL_PANIC);
+        assert_eq!(ok, GPUI_STATUS_OK, "the non-panicking path is untouched");
     }
 }
 
