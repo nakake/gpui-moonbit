@@ -29,6 +29,13 @@ gpui = "0.2"
 # `()` through `wake_tx`. gpui depends on the same crate; the direct
 # dependency pins the channel types in our public-adjacent FFI path.
 futures = "0.3"
+# Segmented-stack growth for the three functions that walk a committed tree
+# recursively (issue #74). Measured at ~70 KB of stack per nesting level in a
+# debug build, so a plain 2 MiB thread stack overflows around depth 24-32 —
+# and a stack overflow aborts the process instead of surfacing as a status
+# code. gpui already pulls this crate in; the direct dependency makes the
+# guarantee ours rather than incidental.
+stacker = "0.1"
 
 [build-dependencies]
 cbindgen = "0.28"

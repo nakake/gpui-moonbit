@@ -495,6 +495,7 @@ test "classify_status maps every GPUI_STATUS_* code" {
   assert_eq(classify_status(-12).code(), -12)
   assert_eq(classify_status(-13).code(), -13)
   assert_eq(classify_status(-14).code(), -14)
+  assert_eq(classify_status(-15).code(), -15)
   match classify_status(-1) {
     InvalidHandle => ()
     _ => fail("expected InvalidHandle")
@@ -523,6 +524,10 @@ test "classify_status maps every GPUI_STATUS_* code" {
     InvalidFloat => ()
     _ => fail("expected InvalidFloat")
   }
+  match classify_status(-15) {
+    DepthExceeded => ()
+    _ => fail("expected DepthExceeded")
+  }
   // Unmapped codes (including success 0) fall through to Unknown, kept verbatim.
   match classify_status(0) {
     Unknown(0) => ()
@@ -537,7 +542,7 @@ test "classify_status maps every GPUI_STATUS_* code" {
 ///|
 test "status_message is a non-empty one-liner per code" {
   let codes = [
-    -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, 0, -99,
+    -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, 0, -99,
   ]
   for c in codes {
     let msg = status_message(c)

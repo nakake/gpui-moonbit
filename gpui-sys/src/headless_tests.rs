@@ -381,3 +381,46 @@ fn op_set_size_negative_is_ignored(cx: &mut TestAppContext) {
     let b = layout_bound(cx, &buf, "box").expect("decode");
     assert_bounds_eq("box", b, 0.0, 0.0, 1920.0, 1080.0);
 }
+
+// ---------------------------------------------------------------------
+// Issue #74: recursion depth of the tree walkers.
+//
+// `render_node` measured at roughly 70 KB of stack per nesting level in a
+// debug build: before `stacker` was wired in, a chain of 32 divs aborted the
+// test process outright ("has overflowed its stack"), and 8 MiB of thread
+// stack only reached the low hundreds. A stack overflow is not catchable, so
+// the failure mode was process death rather than a status code.
+//
+// Two invariants are pinned here: a tree at exactly `MAX_TREE_DEPTH` still
+// renders (the growth actually works), and one level deeper is rejected at
+// decode time (the bound is enforced before anything walks the tree).
+// ---------------------------------------------------------------------
+
+/// Build a chain of `depth` nested divs with the outermost as root.
+fn nested_chain(depth: usize) -> Vec<u8> {
+    let mut buf = Buf::new();
+    for _ in 0..depth {
+        buf = buf.div();
+    }
+    for _ in 1..depth {
+        buf = buf.add_child();
+    }
+    buf.key("leaf").root().finish()
+}
+
+/// A tree nested to exactly `MAX_TREE_DEPTH` decodes, commits, and renders.
+/// Without `stacker` this aborts the process long before reaching 1024.
+#[gpui::test]
+fn tree_at_max_depth_renders(cx: &mut TestAppContext) {
+    let buf = nested_chain(crate::MAX_TREE_DEPTH as usize);
+    layout_bounds(cx, &buf, &[]).expect("a tree at MAX_TREE_DEPTH must render");
+}
+
+/// One level past the limit is rejected before commit, so no walker ever sees
+/// it — the status arrives instead of an abort.
+#[gpui::test]
+fn tree_past_max_depth_is_rejected(cx: &mut TestAppContext) {
+    let buf = nested_chain(crate::MAX_TREE_DEPTH as usize + 1);
+    let err = layout_bounds(cx, &buf, &[]).expect_err("past MAX_TREE_DEPTH must be rejected");
+    assert_eq!(err, crate::GPUI_STATUS_DEPTH_EXCEEDED);
+}

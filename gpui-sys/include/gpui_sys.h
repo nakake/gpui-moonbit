@@ -96,6 +96,16 @@
 #define gpui_GPUI_STATUS_INVALID_FLOAT -14
 
 /**
+ * The committed tree nests deeper than [`MAX_TREE_DEPTH`]. The three functions
+ * that walk a tree (`render_node`, `collect_text_contents`, `update_keyed_text`)
+ * are recursive; `stacker` grows the stack under them so a legitimate deep tree
+ * still renders, but an unbounded one would grow until the allocator gives up.
+ * Rejected before commit so the depth is capped once, at the boundary, rather
+ * than separately in each walker (issue #74).
+ */
+#define gpui_GPUI_STATUS_DEPTH_EXCEEDED -15
+
+/**
  * Maximum number of queued injection entries (RFC 0002 §6-1). A full queue
  * fails `gpui_post_event` with `GPUI_STATUS_QUEUE_FULL` instead of blocking.
  */

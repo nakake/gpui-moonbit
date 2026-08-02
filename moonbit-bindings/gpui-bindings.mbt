@@ -35,6 +35,7 @@ pub enum GpuiError {
   PayloadTooLarge // GPUI_STATUS_PAYLOAD_TOO_LARGE (-12)
   BusyComposing // GPUI_STATUS_BUSY_COMPOSING (-13)
   InvalidFloat // GPUI_STATUS_INVALID_FLOAT (-14)
+  DepthExceeded // GPUI_STATUS_DEPTH_EXCEEDED (-15)
   Unknown(Int) // any other code
 }
 
@@ -58,6 +59,7 @@ pub fn classify_status(code : Int) -> GpuiError {
     -12 => PayloadTooLarge
     -13 => BusyComposing
     -14 => InvalidFloat
+    -15 => DepthExceeded
     _ => Unknown(code)
   }
 }
@@ -84,6 +86,8 @@ pub fn status_message(code : Int) -> String {
       "text input is composing (IME preedit active): set_text refused"
     InvalidFloat =>
       "command buffer carried a non-finite f32 geometry operand (NaN or infinity): fix the value before submitting"
+    DepthExceeded =>
+      "command buffer nests deeper than the supported tree depth: flatten the tree before submitting"
     Unknown(c) => "unknown status code \{c}"
   }
 }
@@ -106,6 +110,7 @@ pub fn GpuiError::code(self : GpuiError) -> Int {
     PayloadTooLarge => -12
     BusyComposing => -13
     InvalidFloat => -14
+    DepthExceeded => -15
     Unknown(c) => c
   }
 }

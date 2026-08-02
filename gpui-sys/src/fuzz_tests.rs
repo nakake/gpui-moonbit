@@ -21,15 +21,16 @@ use crate::abi_constants::{
     OP_SET_WHITESPACE, OP_TEXT,
 };
 use crate::{
-    GPUI_STATUS_BAD_BUFFER_VERSION, GPUI_STATUS_DUPLICATE_KEY, GPUI_STATUS_INTERNAL_PANIC,
-    GPUI_STATUS_INVALID_FLOAT, GPUI_STATUS_INVALID_HANDLE, GPUI_STATUS_NO_ROOT,
-    GPUI_STATUS_NODE_ABSENT, GPUI_STATUS_OK, GPUI_STATUS_TRUNCATED_BUFFER,
-    GPUI_STATUS_UNKNOWN_OPCODE, GPUI_STATUS_WRONG_NODE_KIND, build_tree_from_buffer,
+    GPUI_STATUS_BAD_BUFFER_VERSION, GPUI_STATUS_DEPTH_EXCEEDED, GPUI_STATUS_DUPLICATE_KEY,
+    GPUI_STATUS_INTERNAL_PANIC, GPUI_STATUS_INVALID_FLOAT, GPUI_STATUS_INVALID_HANDLE,
+    GPUI_STATUS_NO_ROOT, GPUI_STATUS_NODE_ABSENT, GPUI_STATUS_OK, GPUI_STATUS_TRUNCATED_BUFFER,
+    GPUI_STATUS_UNKNOWN_OPCODE, GPUI_STATUS_WRONG_NODE_KIND, MAX_TREE_DEPTH,
+    build_tree_from_buffer,
 };
 use gpui::TestAppContext;
 
 /// The full set of statuses the decoder may legally return.
-const LEGAL_STATUSES: [i32; 11] = [
+const LEGAL_STATUSES: [i32; 12] = [
     GPUI_STATUS_OK,
     GPUI_STATUS_INVALID_HANDLE,
     GPUI_STATUS_WRONG_NODE_KIND,
@@ -43,6 +44,8 @@ const LEGAL_STATUSES: [i32; 11] = [
     // Random operand bytes hit the non-finite f32 exponent often (~1 in 256 per
     // f32), so this is a routine outcome here, not an exotic one (issue #75).
     GPUI_STATUS_INVALID_FLOAT,
+    // Reachable from any generator that nests past MAX_TREE_DEPTH (issue #74).
+    GPUI_STATUS_DEPTH_EXCEEDED,
 ];
 
 /// xorshift64* — tiny, fast, deterministic. Plenty of statistical quality for
@@ -238,7 +241,12 @@ fn fuzz_edge_cases_never_panic() {
     }
 
     // A deep chain: N nested divs, each the child of the previous, root set.
-    for depth in [1usize, 8, 64, 512] {
+    // Decoding itself is an iterative loop and handles any depth; the cap is
+    // applied at commit, so these cases pin the boundary from both sides
+    // (issue #74). One level over the limit must come back as a status — the
+    // failure it replaces is a stack overflow inside a walker, which aborts
+    // the process and cannot be caught.
+    let nested_chain = |depth: usize| {
         let mut buf = header.clone();
         for _ in 0..depth {
             buf.push(OP_DIV as u8);
@@ -247,10 +255,20 @@ fn fuzz_edge_cases_never_panic() {
             buf.push(OP_ADD_CHILD as u8);
         }
         buf.push(OP_SET_ROOT as u8);
+        buf
+    };
+    for depth in [1usize, 8, MAX_TREE_DEPTH as usize - 1, MAX_TREE_DEPTH as usize] {
         assert_eq!(
-            decode_never_panics(&buf),
+            decode_never_panics(&nested_chain(depth)),
             GPUI_STATUS_OK,
-            "nested chain of depth {depth} must decode"
+            "nested chain of depth {depth} is at or under MAX_TREE_DEPTH and must commit"
+        );
+    }
+    for depth in [MAX_TREE_DEPTH as usize + 1, 512, 4096] {
+        assert_eq!(
+            decode_never_panics(&nested_chain(depth)),
+            GPUI_STATUS_DEPTH_EXCEEDED,
+            "nested chain of depth {depth} exceeds MAX_TREE_DEPTH and must be rejected"
         );
     }
 }

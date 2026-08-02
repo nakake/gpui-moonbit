@@ -2379,6 +2379,7 @@ dependencies = [
  "futures",
  "gpui",
  "rand 0.9.5",
+ "stacker",
 ]
 
 [[package]]
