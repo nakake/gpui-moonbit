@@ -201,8 +201,10 @@ Push-Location $GSys
 # the previously built .lib (cargo cleans stale artifacts before invoking
 # rustc, and rustc exits after printing without producing output). Running
 # `cargo build` last guarantees gpui_sys.lib exists for the moon link step.
+# strip ANSI color escapes so they don't leak into moon.pkg's @NATIVE_LIBS@ (issue #106)
 $nativeLibs = (cmd /c "cargo rustc --target $rustHost --lib --crate-type staticlib -- --print native-static-libs 2>&1" |
                Select-String 'native-static-libs:' | Select-Object -First 1).Line `
+               -replace "$([char]27)\[[0-9;]*m", '' `
                -replace '.*native-static-libs:\s*', ''
 cmd /c "cargo build --target $rustHost 2>&1" | Out-Host
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
