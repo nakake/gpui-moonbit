@@ -4,7 +4,11 @@
 // glue it delegates to (`framework_dispatch`) is covered by the library's
 // `signal_wbtest.mbt`, and the full envelope → rebuild path by the build
 // driver's linked round-trip.
-
+//
+// The rebuild's fallback decision (issue #10: incremental `update_text` first,
+// full `build_tree` on failure) is the exception: `update_view_with` takes both
+// effects as arguments, so the tests below drive every branch with stubs and
+// never reach a FFI symbol.
 
 ///|
 test "app-level key handlers are registered in the registry" {
@@ -15,6 +19,7 @@ test "app-level key handlers are registered in the registry" {
   handlers.dispatch(Key(KEY_K, 0), 0)
   assert_eq(count.get(store), 101)
 }
+
 ///|
 test "registered click handlers mutate count" {
   count.set(store, 0)
@@ -126,4 +131,54 @@ test "submit parser rejects empty, non-digit, and overflowing input" {
   assert_eq(parse_digits("2147483647"), Some(2147483647))
   assert_eq(parse_digits("2147483648"), None) // i32::MAX + 1
   assert_eq(parse_digits("99999999999"), None)
+}
+
+// --- Rebuild fallback (issue #10) -------------------------------------------
+
+///|
+test "a successful incremental update does not rebuild the tree" {
+  let incremental_views = []
+  let rebuilds = []
+  let r = update_view_with(
+    7,
+    fn(v) {
+      incremental_views.push(v)
+      Ok(())
+    },
+    fn(v) {
+      rebuilds.push(v)
+      Ok(())
+    },
+  )
+  assert_eq(r, Ok(()))
+  assert_eq(incremental_views, [7])
+  assert_eq(rebuilds, []) // the whole point of the incremental path
+}
+
+///|
+test "a failed incremental update falls back to the full rebuild" {
+  let rebuilds = []
+  // KEY_NOT_FOUND is what `update_text` returns when the tree is not committed
+  // yet or the keyed text node is gone — the documented fallback trigger.
+  let r = update_view_with(3, fn(_v) { Err(-10) }, fn(v) {
+    rebuilds.push(v)
+    Ok(())
+  })
+  assert_eq(r, Ok(()))
+  assert_eq(rebuilds, [3]) // same view, not a hardcoded slot
+}
+
+///|
+test "the fallback surfaces the rebuild's own failure" {
+  let r = update_view_with(0, fn(_v) { Err(-10) }, fn(_v) { Err(-6) })
+  assert_eq(r, Err(-6)) // not the incremental path's -10
+}
+
+///|
+test "both rebuild paths render the same count label" {
+  // `update_text` writes `count_label` directly while `build_tree` renders it
+  // through `counter_card`; a drift between the two would make the display
+  // flip between formats on every rebuild.
+  assert_eq(count_label(0), "Count: 0")
+  assert_eq(count_label(-12), "Count: -12")
 }
