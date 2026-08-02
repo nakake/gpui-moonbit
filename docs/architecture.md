@@ -1,6 +1,6 @@
 # アーキテクチャ（現状）
 
-本プロジェクトが**現時点で**どのように組み上がっているかを、AI 向けに権威的に記述したドキュメント。これは実験的な、ネイティブ専用の Rust/GPUI ↔ MoonBit 統合であり、安定した汎用 UI API ではない。事実は具体的（ファイルパス、シンボル、シグネチャ）に記す。コードに合わせてこのファイルも更新すること。
+本プロジェクトが**現時点で**どのように組み上がっているかを、AI 向けに権威的に記述したドキュメント。これは実験的な、ネイティブ専用の Rust/GPUI ↔ MoonBit 統合であり、安定した汎用 UI API ではない。事実は具体的（ファイルパス、シンボル、シグネチャ）に記す。コードに合わせてこのファイルも更新すること。現行実装の詳細を書く権威はここであり、[`roadmap.md`](roadmap.md) は計画と進捗のみを扱う。
 
 関連ドキュメント: [`architecture.html`](architecture.html)（本ドキュメントの図解版。構成図＋解説、ブラウザで開く）、[`README.md`](../README.md)（ビルド・実行）、[`moonbit-bindings/README.mbt.md`](../moonbit-bindings/README.mbt.md)、[`moonbit-native-notes.md`](moonbit-native-notes.md)（低レイヤの過去の観測記録）、[`troubleshooting.md`](troubleshooting.md)（過去のバグ）、[`framework-gaps.md`](framework-gaps.md)（フレームワーク化に向けたギャップ分析）。
 
