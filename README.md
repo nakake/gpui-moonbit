@@ -89,11 +89,11 @@ PowerShell を MSVC x64 環境で開く（または build driver に検出させ
 
 1. `gpui-sys/abi.toml` から ABI 定数を生成し、`gen-header`（cbindgen のみ依存の小クレート、gpui はビルドしない）で C ヘッダーを再生成してから、そのヘッダーから MoonBit FFI 宣言を生成する。ヘッダーが bindgen より前に再生成されるため、新しい Rust の C export を追加してもビルドはデッドロックしない（issue #71）。
 2. `moon check` を必須ゲートとして実行し、MoonBit を一度 build する。この段階では callback/static library 未解決による想定内の cold-link failure だけを許容する。
-3. `app.dispatch` の実マングルシンボルを抽出し、生成 C がある環境では callback が `int32_t` を返し、4 個の `int32_t` 引数を取ることも検証する。
+3. `app.dispatch` の実マングルシンボルを抽出し、生成 C がある環境では callback が `int32_t` を返し、`abi.toml` の `[callback] params` から導出した個数の `int32_t` 引数を取ることも検証する。
 4. `mb_symbol.txt` を読む `gpui-sys` を Rust で build し、Cargo の `native-static-libs` 出力から OS 固有 link flags を生成して MoonBit を強制再リンクする。
 5. callback の最終リンクを検証する。macOS/Linux は最終バイナリ上で定義を検査し、Windows は COFF の事情から MoonBit object の定義、Rust archive の未解決参照、最終リンク成功を検査する。
 
-callback のパッケージ/関数は `app.dispatch`、5 個の `i32` 引数という固定契約です。5 スロットは **バージョニング済みイベントエンベロープ** `(abi_version, event_kind, view, data_a, data_b)` を運びます。slot 0 は常に `ABI_VERSION` で、古い Rust バイナリをランタイムに拒否します。slot 2 は view id で、再構築対象のビューをルーティングします。`EVENT_TEXT` は Rust 所有のイベントキューから `gpui_event_copy_text(token, buf, len)` で UTF-8 ペイロードをコピーします。現在の実マングル表記は抽出により追従しますが、`app` package または `dispatch` を改名する場合は、両 build driver の `PKG_FN_SUFFIX` / `$PkgFnSuffix` と ABI 方針も更新する必要があります。
+callback のパッケージ/関数は `app.dispatch`、5 個の `i32` 引数という固定契約です。5 スロットは **バージョニング済みイベントエンベロープ** `(abi_version, event_kind, view, data_a, data_b)` を運びます。slot 0 は常に `ABI_VERSION` で、古い Rust バイナリをランタイムに拒否します。slot 2 は view id で、再構築対象のビューをルーティングします。`EVENT_TEXT` は Rust 所有のイベントキューから `gpui_event_copy_text(token, buf, len)` で UTF-8 ペイロードをコピーします。現在の実マングル表記は抽出により追従しますが、`app` package または `dispatch` を改名する場合は、両 build driver の `PKG_FN_SUFFIX` / `$PkgFnSuffix` と ABI 方針も更新する必要があります。一方、**引数の個数**は `abi.toml` の `[callback] params` が単一情報源で、build driver・`gpui-sys/build.rs` はいずれもそこから導出するため、スロット数を変えても build driver 側の手直しは不要です（#76）。
 
 ## FFI と実行モデル
 
