@@ -95,6 +95,12 @@ pub const GPUI_STATUS_PAYLOAD_TOO_LARGE: i32 = -12;
 /// composition the user sees; retry after the composition commits (RFC 0003
 /// §3.5).
 pub const GPUI_STATUS_BUSY_COMPOSING: i32 = -13;
+/// A command buffer carried a non-finite `f32` operand (NaN or ±infinity) for a
+/// geometry field. Rejected at decode time so the value never reaches taffy:
+/// measured behavior is that `f32::INFINITY` lays out to infinite bounds and an
+/// infinite gap makes a sibling's width `NaN`, which then propagates silently
+/// through paint and hit-testing (issue #75).
+pub const GPUI_STATUS_INVALID_FLOAT: i32 = -14;
 
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
@@ -795,6 +801,15 @@ fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
 
 const BUFFER_MAGIC: &[u8; 4] = b"GPUI";
 
+/// Upper bound on the magnitude of any `f32` geometry operand, in pixels.
+///
+/// Chosen empirically (issue #75): taffy accumulates sizes/gaps/padding without
+/// saturating, so values near `f32::MAX` overflow to `inf` during layout and
+/// behave exactly like an infinite input. A megapixel is ~500× the largest
+/// realistic display dimension, so clamping here cannot affect a sane tree while
+/// keeping every intermediate sum comfortably finite.
+const MAX_LAYOUT_PX: f32 = 1.0e6;
+
 /// A cursor over the command buffer with little-endian readers. Every reader
 /// returns `None` on truncation so the parser reports `TRUNCATED_BUFFER`
 /// instead of panicking.
@@ -826,6 +841,28 @@ impl<'a> BufferReader<'a> {
 
     fn read_f32(&mut self) -> Option<f32> {
         self.read_u32().map(f32::from_bits)
+    }
+
+    /// Read an `f32` operand that ends up as geometry.
+    ///
+    /// Two guards, both measured rather than assumed (issue #75):
+    ///
+    /// * Non-finite values are rejected with `GPUI_STATUS_INVALID_FLOAT`. They
+    ///   do not panic taffy — they lay out to infinite bounds, and an infinite
+    ///   gap yields a `NaN` sibling width — so nothing catches them downstream.
+    /// * Finite values are clamped to ±[`MAX_LAYOUT_PX`]. `f32::MAX` measured
+    ///   identically to `f32::INFINITY`, because taffy's accumulation overflows
+    ///   long before the type does; an `is_finite` check alone would not close
+    ///   the hole.
+    ///
+    /// Rejection is per-buffer: the caller returns the status and the tree is
+    /// not committed, matching how truncation and unknown opcodes behave.
+    fn read_layout_f32(&mut self) -> Result<f32, i32> {
+        match self.read_f32() {
+            None => Err(GPUI_STATUS_TRUNCATED_BUFFER),
+            Some(v) if !v.is_finite() => Err(GPUI_STATUS_INVALID_FLOAT),
+            Some(v) => Ok(v.clamp(-MAX_LAYOUT_PX, MAX_LAYOUT_PX)),
+        }
     }
 
     /// Borrow `len` bytes without copying; advances the cursor.
@@ -948,14 +985,17 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                 }
             }
             OP_TEXT => {
-                let (Some(content), Some(r), Some(g), Some(b), Some(size)) = (
+                let (Some(content), Some(r), Some(g), Some(b)) = (
                     reader.read_string(),
                     reader.read_u8(),
                     reader.read_u8(),
                     reader.read_u8(),
-                    reader.read_f32(),
                 ) else {
                     return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                let size = match reader.read_layout_f32() {
+                    Ok(v) => v,
+                    Err(status) => return status,
                 };
                 let id = push_node(
                     &mut nodes,
@@ -993,8 +1033,9 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                 }
             }
             OP_SET_SIZE => {
-                let (Some(w), Some(h)) = (reader.read_f32(), reader.read_f32()) else {
-                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                let (w, h) = match (reader.read_layout_f32(), reader.read_layout_f32()) {
+                    (Ok(w), Ok(h)) => (w, h),
+                    (Err(status), _) | (Ok(_), Err(status)) => return status,
                 };
                 with_top_div(&stack, &mut nodes, |node| match node {
                     UiNode::Div { width, height, .. } => {
@@ -1040,8 +1081,9 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                 _ => unreachable!("with_top_div guarantees a div"),
             }),
             OP_SET_GAP => {
-                let Some(gap) = reader.read_f32() else {
-                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                let gap = match reader.read_layout_f32() {
+                    Ok(v) => v,
+                    Err(status) => return status,
                 };
                 with_top_div(&stack, &mut nodes, |node| match node {
                     UiNode::Div { gap: value, .. } => {
@@ -1052,8 +1094,9 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                 })
             }
             OP_SET_ROUNDED => {
-                let Some(radius) = reader.read_f32() else {
-                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                let radius = match reader.read_layout_f32() {
+                    Ok(v) => v,
+                    Err(status) => return status,
                 };
                 with_top_div(&stack, &mut nodes, |node| match node {
                     UiNode::Div { rounded, .. } => {
@@ -1088,8 +1131,9 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                 })
             }
             OP_SET_PADDING => {
-                let Some(padding) = reader.read_f32() else {
-                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                let padding = match reader.read_layout_f32() {
+                    Ok(v) => v,
+                    Err(status) => return status,
                 };
                 with_top_div(&stack, &mut nodes, |node| match node {
                     UiNode::Div { padding: value, .. } => {
@@ -1100,12 +1144,13 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                 })
             }
             OP_SET_BORDER => {
-                let (Some(width), Some(r), Some(g), Some(b)) = (
-                    reader.read_f32(),
-                    reader.read_u8(),
-                    reader.read_u8(),
-                    reader.read_u8(),
-                ) else {
+                let width = match reader.read_layout_f32() {
+                    Ok(v) => v,
+                    Err(status) => return status,
+                };
+                let (Some(r), Some(g), Some(b)) =
+                    (reader.read_u8(), reader.read_u8(), reader.read_u8())
+                else {
                     return GPUI_STATUS_TRUNCATED_BUFFER;
                 };
                 with_top_div(&stack, &mut nodes, |node| match node {

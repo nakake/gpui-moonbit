@@ -87,6 +87,15 @@
 #define gpui_GPUI_STATUS_BUSY_COMPOSING -13
 
 /**
+ * A command buffer carried a non-finite `f32` operand (NaN or ±infinity) for a
+ * geometry field. Rejected at decode time so the value never reaches taffy:
+ * measured behavior is that `f32::INFINITY` lays out to infinite bounds and an
+ * infinite gap makes a sibling's width `NaN`, which then propagates silently
+ * through paint and hit-testing (issue #75).
+ */
+#define gpui_GPUI_STATUS_INVALID_FLOAT -14
+
+/**
  * Maximum number of queued injection entries (RFC 0002 §6-1). A full queue
  * fails `gpui_post_event` with `GPUI_STATUS_QUEUE_FULL` instead of blocking.
  */

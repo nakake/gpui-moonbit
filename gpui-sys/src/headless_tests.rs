@@ -16,8 +16,8 @@
 use crate::headless::{assert_bounds_eq, layout_bound, layout_bounds};
 use crate::abi_constants::{ALIGN_START, BUFFER_VERSION, JUSTIFY_DEFAULT, OP_ADD_CHILD, OP_DIV,
     OP_SET_ALIGN, OP_SET_BORDER, OP_SET_FLEX, OP_SET_GAP, OP_SET_KEY, OP_SET_PADDING,
-    OP_SET_ROOT, OP_SET_SIZE, OP_TEXT};
-use crate::GPUI_STATUS_BAD_BUFFER_VERSION;
+    OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SIZE, OP_TEXT};
+use crate::{GPUI_STATUS_BAD_BUFFER_VERSION, GPUI_STATUS_INVALID_FLOAT};
 use gpui::TestAppContext;
 
 /// Minimal command-buffer builder (little-endian, matching the wire layout
@@ -184,4 +184,200 @@ fn decoder_rejection_surfaces_status(cx: &mut TestAppContext) {
     buf[0] = b'G';
     let b = layout_bound(cx, &buf, "box").expect("uncorrupted buffer must decode");
     assert_bounds_eq("box", b, 0.0, 0.0, 10.0, 10.0);
+}
+
+// ---------------------------------------------------------------------
+// Issue #75: non-finite and extreme f32 layout operands.
+//
+// `BufferReader::read_layout_f32` (lib.rs) rejects non-finite values (NaN,
+// ±infinity) with `GPUI_STATUS_INVALID_FLOAT` and clamps finite values to
+// ±`MAX_LAYOUT_PX`, six opcodes deep: `OP_TEXT` (font size), `OP_SET_SIZE`
+// (width, height), `OP_SET_GAP`, `OP_SET_ROUNDED`, `OP_SET_PADDING`, and
+// `OP_SET_BORDER` (width only; the border color bytes are untouched).
+// ---------------------------------------------------------------------
+
+/// Every non-finite value tried against each opcode's f32 operand(s).
+const NON_FINITE_PROBES: [(&str, f32); 3] = [
+    ("+inf", f32::INFINITY),
+    ("-inf", f32::NEG_INFINITY),
+    ("NaN", f32::NAN),
+];
+
+/// `OP_TEXT`'s font-size operand rejects non-finite values.
+#[gpui::test]
+fn op_text_rejects_non_finite_size(cx: &mut TestAppContext) {
+    for (label, v) in NON_FINITE_PROBES {
+        let buf = Buf::new()
+            .op(OP_TEXT)
+            .u32(5)
+            .bytes(b"Hello")
+            .u8(255)
+            .u8(255)
+            .u8(255)
+            .f32(v)
+            .root()
+            .finish();
+        let err = layout_bound(cx, &buf, "text:Hello")
+            .expect_err(&format!("OP_TEXT size={label} must be rejected"));
+        assert_eq!(err, GPUI_STATUS_INVALID_FLOAT, "OP_TEXT size={label}");
+    }
+}
+
+/// `OP_SET_SIZE`'s width/height operands reject non-finite values (both set
+/// to the probed value).
+#[gpui::test]
+fn op_set_size_rejects_non_finite(cx: &mut TestAppContext) {
+    for (label, v) in NON_FINITE_PROBES {
+        let buf = Buf::new().div().key("box").size(v, v).root().finish();
+        let err = layout_bound(cx, &buf, "box")
+            .expect_err(&format!("OP_SET_SIZE w=h={label} must be rejected"));
+        assert_eq!(err, GPUI_STATUS_INVALID_FLOAT, "OP_SET_SIZE w=h={label}");
+    }
+}
+
+/// `OP_SET_GAP`'s gap operand rejects non-finite values.
+#[gpui::test]
+fn op_set_gap_rejects_non_finite(cx: &mut TestAppContext) {
+    for (label, v) in NON_FINITE_PROBES {
+        let buf = Buf::new()
+            .div()
+            .key("box")
+            .op(OP_SET_FLEX)
+            .u8(0) // row
+            .op(OP_SET_GAP)
+            .f32(v)
+            .root()
+            .finish();
+        let err = layout_bound(cx, &buf, "box")
+            .expect_err(&format!("OP_SET_GAP={label} must be rejected"));
+        assert_eq!(err, GPUI_STATUS_INVALID_FLOAT, "OP_SET_GAP={label}");
+    }
+}
+
+/// `OP_SET_ROUNDED`'s radius operand rejects non-finite values.
+#[gpui::test]
+fn op_set_rounded_rejects_non_finite(cx: &mut TestAppContext) {
+    for (label, v) in NON_FINITE_PROBES {
+        let buf = Buf::new()
+            .div()
+            .key("box")
+            .size(100.0, 50.0)
+            .op(OP_SET_ROUNDED)
+            .f32(v)
+            .root()
+            .finish();
+        let err = layout_bound(cx, &buf, "box")
+            .expect_err(&format!("OP_SET_ROUNDED radius={label} must be rejected"));
+        assert_eq!(err, GPUI_STATUS_INVALID_FLOAT, "OP_SET_ROUNDED radius={label}");
+    }
+}
+
+/// `OP_SET_PADDING`'s padding operand rejects non-finite values.
+#[gpui::test]
+fn op_set_padding_rejects_non_finite(cx: &mut TestAppContext) {
+    for (label, v) in NON_FINITE_PROBES {
+        let buf = Buf::new()
+            .div()
+            .key("box")
+            .size(100.0, 50.0)
+            .op(OP_SET_PADDING)
+            .f32(v)
+            .root()
+            .finish();
+        let err = layout_bound(cx, &buf, "box")
+            .expect_err(&format!("OP_SET_PADDING padding={label} must be rejected"));
+        assert_eq!(err, GPUI_STATUS_INVALID_FLOAT, "OP_SET_PADDING padding={label}");
+    }
+}
+
+/// `OP_SET_BORDER`'s width operand rejects non-finite values; the color
+/// bytes are fixed at (0, 0, 0) and unrelated to the check.
+#[gpui::test]
+fn op_set_border_rejects_non_finite(cx: &mut TestAppContext) {
+    for (label, v) in NON_FINITE_PROBES {
+        let buf = Buf::new()
+            .div()
+            .key("box")
+            .size(100.0, 50.0)
+            .op(OP_SET_BORDER)
+            .f32(v)
+            .u8(0)
+            .u8(0)
+            .u8(0)
+            .root()
+            .finish();
+        let err = layout_bound(cx, &buf, "box")
+            .expect_err(&format!("OP_SET_BORDER width={label} must be rejected"));
+        assert_eq!(err, GPUI_STATUS_INVALID_FLOAT, "OP_SET_BORDER width={label}");
+    }
+}
+
+/// `f32::MAX` fed into `OP_SET_SIZE` must clamp to a *finite* layout instead
+/// of overflowing to `inf` (which is what happened before `read_layout_f32`
+/// clamped geometry operands to ±`MAX_LAYOUT_PX`). The finiteness of the
+/// bounds below is the regression net; the exact numbers were captured from
+/// the first verified run.
+#[gpui::test]
+fn op_set_size_clamps_extreme_to_finite(cx: &mut TestAppContext) {
+    let buf = Buf::new()
+        .div()
+        .key("box")
+        .size(f32::MAX, f32::MAX)
+        .root()
+        .finish();
+    let b = layout_bound(cx, &buf, "box").expect("clamped size must decode");
+    let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+    assert!(w.is_finite(), "width must be finite, got {w}");
+    assert!(h.is_finite(), "height must be finite, got {h}");
+    // Width clamps to MAX_LAYOUT_PX as requested; height is further capped to
+    // the 1080px window (taffy still constrains the root's cross-axis extent
+    // to its container even past the clamp). Captured from the first
+    // verified run.
+    assert_bounds_eq("box", b, 0.0, 0.0, 1_000_000.0, 1080.0);
+}
+
+/// `f32::MAX` fed into `OP_SET_GAP` must clamp to a finite gap instead of
+/// making the second child's position `NaN` (which is what happened before
+/// clamping: `inf` gap arithmetic in taffy produces `NaN` widths). Measures
+/// the row's second child (`key("b")`), not the row itself: the row fills
+/// the window regardless of the gap, so its own bounds say nothing about it.
+#[gpui::test]
+fn op_set_gap_clamps_extreme_to_finite(cx: &mut TestAppContext) {
+    let buf = Buf::new()
+        .div()
+        .key("row")
+        .op(OP_SET_FLEX)
+        .u8(0) // row
+        .op(OP_SET_GAP)
+        .f32(f32::MAX)
+        .div()
+        .key("a")
+        .size(30.0, 20.0)
+        .add_child()
+        .div()
+        .key("b")
+        .size(40.0, 25.0)
+        .add_child()
+        .root()
+        .finish();
+    let b = layout_bound(cx, &buf, "b").expect("clamped gap must decode");
+    let (x, w) = (f32::from(b.origin.x), f32::from(b.size.width));
+    assert!(x.is_finite(), "b.origin.x must be finite, got {x}");
+    assert!(w.is_finite(), "b.size.width must be finite, got {w}");
+    // `b`'s origin.x clamps to MAX_LAYOUT_PX (the gap pushed it there); its
+    // width shrinks to 0 because a 1e6px gap in a 1920px-wide row leaves no
+    // room for the child. Both are finite, unlike the pre-clamp NaN width.
+    // Captured from the first verified run.
+    assert_bounds_eq("b", b, 1_000_000.0, 0.0, 0.0, 25.0);
+}
+
+/// A negative `OP_SET_SIZE` isn't rejected by `read_layout_f32` (only
+/// non-finite values are); the pre-existing `> 0.0` size guard elsewhere in
+/// gpui simply ignores it, so the div falls back to its parent's size (here,
+/// the 1920×1080 window, since it's the root).
+#[gpui::test]
+fn op_set_size_negative_is_ignored(cx: &mut TestAppContext) {
+    let buf = Buf::new().div().key("box").size(-1.0, -1.0).root().finish();
+    let b = layout_bound(cx, &buf, "box").expect("decode");
+    assert_bounds_eq("box", b, 0.0, 0.0, 1920.0, 1080.0);
 }

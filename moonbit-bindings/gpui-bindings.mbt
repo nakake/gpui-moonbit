@@ -34,6 +34,7 @@ pub enum GpuiError {
   QueueFull // GPUI_STATUS_QUEUE_FULL (-11)
   PayloadTooLarge // GPUI_STATUS_PAYLOAD_TOO_LARGE (-12)
   BusyComposing // GPUI_STATUS_BUSY_COMPOSING (-13)
+  InvalidFloat // GPUI_STATUS_INVALID_FLOAT (-14)
   Unknown(Int) // any other code
 }
 
@@ -56,6 +57,7 @@ pub fn classify_status(code : Int) -> GpuiError {
     -11 => QueueFull
     -12 => PayloadTooLarge
     -13 => BusyComposing
+    -14 => InvalidFloat
     _ => Unknown(code)
   }
 }
@@ -80,6 +82,8 @@ pub fn status_message(code : Int) -> String {
       "async injection payload exceeds the per-entry size limit"
     BusyComposing =>
       "text input is composing (IME preedit active): set_text refused"
+    InvalidFloat =>
+      "command buffer carried a non-finite f32 geometry operand (NaN or infinity): fix the value before submitting"
     Unknown(c) => "unknown status code \{c}"
   }
 }
@@ -101,6 +105,7 @@ pub fn GpuiError::code(self : GpuiError) -> Int {
     QueueFull => -11
     PayloadTooLarge => -12
     BusyComposing => -13
+    InvalidFloat => -14
     Unknown(c) => c
   }
 }

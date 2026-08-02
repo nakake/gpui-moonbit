@@ -22,13 +22,14 @@ use crate::abi_constants::{
 };
 use crate::{
     GPUI_STATUS_BAD_BUFFER_VERSION, GPUI_STATUS_DUPLICATE_KEY, GPUI_STATUS_INTERNAL_PANIC,
-    GPUI_STATUS_INVALID_HANDLE, GPUI_STATUS_NO_ROOT, GPUI_STATUS_NODE_ABSENT, GPUI_STATUS_OK,
-    GPUI_STATUS_TRUNCATED_BUFFER, GPUI_STATUS_UNKNOWN_OPCODE, GPUI_STATUS_WRONG_NODE_KIND,
-    build_tree_from_buffer,
+    GPUI_STATUS_INVALID_FLOAT, GPUI_STATUS_INVALID_HANDLE, GPUI_STATUS_NO_ROOT,
+    GPUI_STATUS_NODE_ABSENT, GPUI_STATUS_OK, GPUI_STATUS_TRUNCATED_BUFFER,
+    GPUI_STATUS_UNKNOWN_OPCODE, GPUI_STATUS_WRONG_NODE_KIND, build_tree_from_buffer,
 };
+use gpui::TestAppContext;
 
 /// The full set of statuses the decoder may legally return.
-const LEGAL_STATUSES: [i32; 10] = [
+const LEGAL_STATUSES: [i32; 11] = [
     GPUI_STATUS_OK,
     GPUI_STATUS_INVALID_HANDLE,
     GPUI_STATUS_WRONG_NODE_KIND,
@@ -39,6 +40,9 @@ const LEGAL_STATUSES: [i32; 10] = [
     GPUI_STATUS_UNKNOWN_OPCODE,
     GPUI_STATUS_NO_ROOT,
     GPUI_STATUS_DUPLICATE_KEY,
+    // Random operand bytes hit the non-finite f32 exponent often (~1 in 256 per
+    // f32), so this is a routine outcome here, not an exotic one (issue #75).
+    GPUI_STATUS_INVALID_FLOAT,
 ];
 
 /// xorshift64* — tiny, fast, deterministic. Plenty of statistical quality for
@@ -249,4 +253,136 @@ fn fuzz_edge_cases_never_panic() {
             "nested chain of depth {depth} must decode"
         );
     }
+}
+
+/// Style opcodes that apply to the div on top of the stack. Structural opcodes
+/// (`OP_DIV`, `OP_TEXT`, `OP_ADD_CHILD`, `OP_SET_ROOT`) are driven explicitly by
+/// [`renderable_buffer`], and `OP_SET_KEY` is left out so random key bytes can
+/// never collide into `DUPLICATE_KEY`.
+const STYLE_OPCODES: [i32; 29] = [
+    OP_SET_SIZE,
+    OP_SET_BG,
+    OP_SET_FLEX,
+    OP_SET_CENTER,
+    OP_SET_GAP,
+    OP_SET_ROUNDED,
+    OP_SET_ON_CLICK,
+    OP_SET_PADDING,
+    OP_SET_BORDER,
+    OP_SET_BG_COLOR,
+    OP_SET_MARGIN,
+    OP_SET_MIN_SIZE,
+    OP_SET_MAX_SIZE,
+    OP_SET_FLEX_ITEM,
+    OP_SET_ALIGN,
+    OP_SET_OVERFLOW,
+    OP_SET_OPACITY,
+    OP_SET_SHADOW,
+    OP_SET_CURSOR,
+    OP_SET_POSITION,
+    OP_SET_INSET,
+    OP_SET_PADDING_SIDES,
+    OP_SET_TEXT_SIZE,
+    OP_SET_TEXT_COLOR,
+    OP_SET_FONT_WEIGHT,
+    OP_SET_LINE_HEIGHT,
+    OP_SET_TEXT_ALIGN,
+    OP_SET_WHITESPACE,
+    OP_SET_FONT_FAMILY,
+];
+
+/// Append 0–5 random style opcodes to whatever div is on top of the stack.
+fn emit_random_styles(rng: &mut Rng, buf: &mut Vec<u8>) {
+    for _ in 0..rng.below(6) {
+        let opcode = STYLE_OPCODES[rng.below(STYLE_OPCODES.len() as u32) as usize];
+        buf.push(opcode as u8);
+        emit_operands(rng, buf, opcode);
+    }
+}
+
+/// Build a buffer whose *framing* is always valid, so the tree commits and the
+/// render path actually runs; only the operand **values** are random.
+///
+/// This is deliberately not [`plausible_buffer`]. That generator picks opcodes
+/// uniformly, including structural ones, so its programs almost never satisfy
+/// "a live node designated as root": measured, 1 buffer in 500 committed. It is
+/// the right shape for hammering the decoder's error arms and the wrong shape
+/// for reaching layout at all.
+///
+/// The stack discipline here is the one documented on `build_tree_from_buffer`:
+/// `OP_DIV` pushes, `OP_ADD_CHILD` pops the child and re-pushes the parent,
+/// `OP_SET_ROOT` pops the root. Text children use ASCII payloads — `read_string`
+/// is lossy rather than rejecting, but a random byte soup would exercise
+/// replacement-character handling instead of text layout.
+fn renderable_buffer(rng: &mut Rng) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(b"GPUI");
+    buf.extend_from_slice(&(BUFFER_VERSION as u32).to_le_bytes());
+
+    buf.push(OP_DIV as u8);
+    emit_random_styles(rng, &mut buf);
+
+    for _ in 0..rng.below(5) {
+        if rng.below(4) == 0 {
+            // Text leaf: len u32 | utf8[len] | r u8 | g u8 | b u8 | size f32.
+            let len = rng.below(12);
+            buf.push(OP_TEXT as u8);
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend((0..len).map(|_| b'a' + (rng.below(26) as u8)));
+            buf.extend_from_slice(&rng.bytes(3));
+            buf.extend_from_slice(&rng.bytes(4));
+        } else {
+            buf.push(OP_DIV as u8);
+            emit_random_styles(rng, &mut buf);
+        }
+        buf.push(OP_ADD_CHILD as u8);
+    }
+
+    buf.push(OP_SET_ROOT as u8);
+    buf
+}
+
+/// Carry generated buffers all the way through `render_node` and taffy instead
+/// of stopping at the decoder (issue #75).
+///
+/// The three tests above only prove the *decoder* is total. Everything the
+/// decoder accepts then flows into style mapping and layout, which is where
+/// operand values (rather than operand framing) start to matter — that is the
+/// gap that let non-finite `f32` reach taffy unnoticed. A decoded buffer that
+/// lays out to infinite or `NaN` geometry is not a decoder bug, and no
+/// decoder-level assertion can see it.
+///
+/// Fewer iterations than the decoder fuzzers: each one builds and tears down a
+/// headless window, so this trades raw volume for depth of path coverage.
+/// Deterministic all the same — its own fixed seed, no threads, no time.
+///
+/// The floor on `rendered` is the point of the test, not a formality: with the
+/// uniform generator this same loop reached layout once in 500 tries while
+/// still passing a `> 0` check, i.e. it would have reported coverage it did not
+/// have. Rejections that remain are almost all `INVALID_FLOAT` — random operand
+/// bytes land on the non-finite exponent roughly 1 time in 256 per `f32`.
+///
+/// Note there is no explicit `TEST_VIEWS_MUTEX` guard here: `layout_bounds`
+/// takes that lock itself for each call, and the lock is not reentrant.
+#[gpui::test]
+fn fuzz_renderable_buffers_render_never_panic(cx: &mut TestAppContext) {
+    const ROUNDS: usize = 300;
+    let mut rng = Rng::new(0x5EED_0004);
+    let mut rendered = 0usize;
+    for _ in 0..ROUNDS {
+        let data = renderable_buffer(&mut rng);
+        match crate::headless::layout_bounds(cx, &data, &[]) {
+            Ok(_) => rendered += 1,
+            Err(status) => assert!(
+                LEGAL_STATUSES.contains(&status),
+                "render harness returned out-of-range status {status} for {}-byte buffer",
+                data.len()
+            ),
+        }
+    }
+    assert!(
+        rendered * 2 > ROUNDS,
+        "only {rendered}/{ROUNDS} generated buffers reached layout; the generator \
+         stopped producing committable trees, so this test is no longer covering render"
+    );
 }
