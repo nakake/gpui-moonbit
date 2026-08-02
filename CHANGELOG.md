@@ -48,6 +48,8 @@
 
 ### Fixed
 
+- C export 全 10 本のうち `ffi_export`（`catch_unwind` ラッパ）を通っていなかった 2 本（`gpui_event_copy_text` / `gpui_debug_dump_text`）をラップした（#73）。現状この 2 本に unwind する経路は見当たらず、`extern "C"` からの unwind は現代の Rust では abort であって UB ではないため、これは健全性の修正ではなく**契約の一貫性**の修正である。「panic は FFI 境界を越えず `GPUI_STATUS_INTERNAL_PANIC` になる」という契約が全 export に等しく適用されていなかったため、将来この 2 本に panic しうるコードが入ったときだけ静かにプロセス abort に化ける状態だった。
+  - 再発防止として、`#[unsafe(no_mangle)]` の付いた export が `ffi_export` を通っているか、かつラベル文字列が関数名と一致しているかを自身のソースを走査して検証するテストを追加（属性レベルで強制する手段が無いためテキスト検査。export を 1 本でも取りこぼすと空回りするので、検出本数の下限も assert する）。`ffi_export` が panic をステータスに変換すること自体のテストも追加した。
 - コミット済みツリーを歩く再帰 3 関数（`render_node` / `collect_text_contents` / `update_keyed_text`）のスタックオーバーフローを塞いだ（#74）。`stacker` でスタックを伸長し、あわせて木のネスト深さに上限（`MAX_TREE_DEPTH` = 64）を設けて、超過分は新ステータス `GPUI_STATUS_DEPTH_EXCEEDED`（`-15`）でコミット前に拒否する。深さの検査は既存の重複キー検査と同じ 1 回の反復走査に相乗りさせている。
   - **実測**（debug ビルド、ヘッドレス render）: 1 段あたり約 70 KB のスタックを消費し、**素の再帰では 2 MiB のスレッドスタックが深さ 24〜32 で溢れる**。issue が想定していた「10 万段」ではなく数十段でプロセスが死んでいた。`stacker` を入れると 256〜384 まで伸びるが、そこから先の壁は gpui / taffy 自身の再帰（レイアウトと要素ツリーの drop）でこちらからは動かせない。上限 64 はその壁の十分下で、かつ Windows のメインスレッド既定 1 MiB でも余裕がある値として選んだ（現実の UI は 10 段前後）。
   - スタックオーバーフローは `catch_unwind` で捕捉できず `GPUI_STATUS_INTERNAL_PANIC` に変換されないため、これはプロセス死をステータスコードに置き換える変更にあたる。
