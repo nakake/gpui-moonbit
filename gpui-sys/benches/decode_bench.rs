@@ -19,6 +19,12 @@
 //!
 //! A bare `cargo bench` skips this target (`required-features` unmet) instead
 //! of failing the link; `cargo bench --no-run` compiles it without executing.
+//!
+//! When quoting these numbers in docs (CHANGELOG.md, docs/framework-gaps.md):
+//! `incremental/*` measures the decode/FFI path only, not a full frame. Always
+//! pair a ratio like "full_rebuild vs update_text" with the total frame cost
+//! (`render/headless_layout_24rows`) so it isn't mistaken for an end-to-end
+//! speedup (see issue #79).
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use gpui::{TestAppContext, TestDispatcher};
