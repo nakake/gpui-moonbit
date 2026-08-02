@@ -100,6 +100,8 @@ OP_SET_TAB_STOP     u8 | mode i32                 (0 = Tab ナビゲーション
 OP_TEXT_INPUT       u8 | input_id i32 | len u32 | utf8[len]   (placeholder; leaf ノード)
 ```
 
+f32 のジオメトリオペランド（`OP_TEXT` の font size、`OP_SET_SIZE`/`OP_SET_GAP`/`OP_SET_ROUNDED`/`OP_SET_PADDING`/`OP_SET_BORDER`）はデコード時に `is_finite` を検証し、非有限値は `GPUI_STATUS_INVALID_FLOAT`（`-14`）で拒否する。有限値もさらに ±1e6 px にクランプする（issue #75）。
+
 enum オペランド（`align_items` / `justify_content` / `overflow` / `cursor` / `position` / `text_align` / `whitespace` の各 id）は `abi.toml` の同名セクション（`[align_items]`・`[justify_content]`・`[overflow]`・`[cursor]`・`[position]`・`[text_align]`・`[whitespace]`）から両言語へ生成され、opcode と同じ drift guard で保護される。`0`（`*_DEFAULT` / `OVERFLOW_VISIBLE` 等）は「未設定」を意味し、`render_node` は未知の id を無視する。`transform` は意図的に存在しない（gpui 0.2.2 に Style レベルの transform がないため）。gpui 0.2.2 の制約による近似マップ（`TEXT_ALIGN_JUSTIFY` → `Left`、`WHITESPACE_PRE`/`PRE_WRAP` → `Nowrap`/`Normal`）は `render_node` の doc comment と `framework-gaps.md` G8 に記録されている。
 
 opcode の追加は後方互換（issue #42）: 古い Rust バイナリは未知 opcode を `UNKNOWN_OPCODE` で拒否するだけで誤デコードしないため、`BUFFER_VERSION` は既存 opcode の意味が変わったときだけ bump する。
@@ -122,6 +124,7 @@ opcode・`BUFFER_VERSION`・enum 定数（`[align_items]` 等の各セクショ�
 | `GPUI_STATUS_QUEUE_FULL`（`-11`） | 非同期注入キューが満杯（back-pressure）。producer は後で再試行・集約・破棄を判断する（RFC 0002 §3.2） |
 | `GPUI_STATUS_PAYLOAD_TOO_LARGE`（`-12`） | 注入ペイロードが 1 エントリの上限（`INJECT_PAYLOAD_MAX_BYTES`）を超過 |
 | `GPUI_STATUS_BUSY_COMPOSING`（`-13`） | `gpui_input_set_text` が IME 合成中（marked range あり）に呼ばれた。合成を壊さないため拒否し、確定後に再試行する（RFC 0003 §3.5） |
+| `GPUI_STATUS_INVALID_FLOAT`（`-14`） | コマンドバッファのジオメトリ用 f32 オペランド（`OP_TEXT` の font size、`OP_SET_SIZE`/`OP_SET_GAP`/`OP_SET_ROUNDED`/`OP_SET_PADDING`/`OP_SET_BORDER`）が非有限（NaN / ±無限大）だったためデコード時に拒否した。有限値も ±1e6 px にクランプする: taffy 内部の加算が `f32::MAX` よりずっと手前でオーバーフローして無限大になるため、`is_finite` チェックだけでは無限大ジオメトリを防げない。修正前は panic せず、無限大の bounds や NaN 幅として静かに伝播していた（issue #75） |
 
 全 C export はこれらのステータスを返す（`gpui_event_copy_text` / `gpui_debug_dump_text` は成功時に書き込んだバイト数を返す）。高レベル MoonBit ラッパー（`build_tree` / `run_window` / `update_text` / `debug_dump_text`）は `Result[_, Int]` を返し、`Err(status)` で負の status code を伝播する。`classify_status` / `status_message` / `GpuiError`（issue #54, G20）が生のコードを構造化エラーへ分類し、`expect_ok` が回復不能な失敗を診断メッセージ付きで abort する。`framework_dispatch` は再構築コールバックの失敗を無視して dirty に基づき `1` を返す（Rust 側は旧ツリーを保持済みのため、`cx.notify()` で旧ツリーが再描画される。アプリは `update_text` 失敗時に `build_tree` へフォールバックする）。イベントはビュー単位でルーティングされる: dispatch の slot 2 は view id（`VIEWS` のインデックス、`FfiView.view` 由来）を運び、`build_tree(view)` / `update_text(view, …)` がそのビューのツリーを更新する（issue #41/#49）。
 
