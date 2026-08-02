@@ -71,6 +71,27 @@ $rustTargetDir = Join-Path (Join-Path $cargoTargetRoot $rustHost) 'debug'
 Write-Host "    Rust target: $rustHost"
 Write-Host "    Rust library dir: $rustTargetDir"
 
+# The pre-commit hook is opt-in: `core.hooksPath` is a local git setting that a
+# clone does not inherit, so it is easy to never notice the hook exists (issue
+# #82). Nudge, do not set it — silently rewriting someone's git config from a
+# build script is worse than an unenforced hook. `git config --get` exits 1 when
+# the key is unset, which PowerShell 7.4+ turns into a terminating error under
+# $ErrorActionPreference = 'Stop', so the probe is wrapped and LASTEXITCODE is
+# reset for the steps that read it.
+if (Get-Command git -ErrorAction SilentlyContinue) {
+  $hooksPath = ''
+  try {
+    $hooksPath = (& git -C $Root config --get core.hooksPath 2>$null | Select-Object -First 1)
+  } catch {
+    $hooksPath = ''
+  }
+  $global:LASTEXITCODE = 0
+  if (-not $hooksPath) {
+    Write-Host '    HINT: pre-commit hook not enabled. To enable it, run:'
+    Write-Host '          git config core.hooksPath moonbit-bindings/.githooks'
+  }
+}
+
 function Write-MoonPkg([string]$template, [string]$destination, [string]$libs) {
   $tmpl = Get-Content $template -Raw
   $out  = $tmpl.Replace('@NATIVE_LIBS@', $libs)

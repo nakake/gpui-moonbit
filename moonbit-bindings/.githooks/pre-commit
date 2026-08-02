@@ -1,3 +1,30 @@
 #!/bin/sh
+#
+# Pre-commit safety net for the MoonBit side. Cheap checks only — a hook slow
+# enough to be annoying is a hook people bypass by reflex. The Rust test suite,
+# the abi.toml drift guard, the cross-language link, and the 3-OS cold build
+# stay in CI (.github/workflows/ci.yml); this hook does not substitute for them.
+#
+# Enable:      git config core.hooksPath moonbit-bindings/.githooks
+# Bypass once: git commit --no-verify
+#
+# NOTE: these checks read the working tree, not the staged content. A partially
+# staged commit can pass here and still fail CI.
+set -e
 
+cd "$(git rev-parse --show-toplevel)"
+
+# 1. Generated bindings must not be left behind. build.sh regenerates them from
+#    gpui-sys/abi.toml and only prints a WARNING when they move, so an
+#    uncommitted regeneration is easy to miss.
+if ! git diff --quiet -- moonbit-bindings/gpui-bindings-ffi.mbt moonbit-bindings/abi_constants.mbt; then
+  echo "pre-commit: generated bindings have unstaged changes:" >&2
+  git diff --name-only -- moonbit-bindings/gpui-bindings-ffi.mbt moonbit-bindings/abi_constants.mbt >&2
+  echo "  stage them (git add) or restore them (git checkout --) before committing." >&2
+  exit 1
+fi
+
+# 2. MoonBit typecheck and tests.
+cd moonbit-bindings
 moon check
+moon test

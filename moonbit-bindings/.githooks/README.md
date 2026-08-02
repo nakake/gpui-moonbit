@@ -1,26 +1,41 @@
 # Git Hooks
 
-## Pre-commit Hook
+`moonbit-bindings/.githooks/pre-commit` はコミット時の安全網です。以下の検査を行います。
 
-`pre-commit` は `moon check` だけを実行する最小のフックです。`moon test`、Rust build、FFI 再生成、ABI/link 検証は行いません。
+- **生成バインディングの取りこぼし** — `gpui-sys/abi.toml` から `build.sh` が再生成する
+  `gpui-bindings-ffi.mbt` / `abi_constants.mbt` に未ステージの差分があると失敗します。
+  再生成時に build driver は WARNING を出すだけなので、うっかりコミットし忘れるのを防ぎます。
+- **`moon check`** — MoonBit の型検査
+- **`moon test`** — MoonBit のテスト
 
-## 現在の制約
-
-このリポジトリの Git root は `moonbit-bindings/` の1階層上です。Git は pre-commit hook をリポジトリ root から実行しますが、現在のフックは単に `moon check` を呼ぶため、そのまま有効化すると MoonBit project を見つけられません。
-
-利用する場合は、フックを次のようにしてから設定してください。
-
-```sh
-#!/bin/sh
-
-cd moonbit-bindings && moon check
-```
+## 有効化
 
 リポジトリ root で:
 
 ```bash
-chmod +x moonbit-bindings/.githooks/pre-commit
 git config core.hooksPath moonbit-bindings/.githooks
 ```
 
-これはローカルの Git 設定です。root の build driver が行うクロス言語の生成・ビルド・リンク検証を置き換えるものではありません。
+これはローカルの git 設定です。クローンには引き継がれないため、リポジトリを取得したら各自で設定してください。
+
+## 1回だけ迂回する
+
+```bash
+git commit --no-verify
+```
+
+## コスト
+
+`moon test` は初回や Rust 側変更後には `cargo build`（gpui-sys）を伴うため、数分かかることがあります。
+2 回目以降はインクリメンタルで速くなります。
+
+## CI に委ねていること・このフックでないこと
+
+Rust テスト、`abi.toml` の drift guard、言語横断のリンク検証、3 OS のコールドビルドは
+CI（`.github/workflows/ci.yml`）で検証しています。このフックは root の build driver
+（`build.sh` / `build.ps1`）が行うクロス言語の生成・ビルド・リンク検証の代替ではありません。
+
+## 制約
+
+この検査は working tree に対して走るため、部分ステージのコミット（一部だけ `git add` した状態）は
+ここを通過しても CI で落ちうることに注意してください。
