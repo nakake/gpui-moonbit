@@ -35,19 +35,66 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install MoonBit toolchain (Unix)
-        if: runner.os != 'Windows'
+      # The installers always fetch `latest` and cli.moonbitlang.com exposes no
+      # version endpoint, but the release asset's ETag changes on every release.
+      # Keying the toolchain cache on it means a new MoonBit release misses the
+      # cache and reinstalls, so CI keeps tracking the latest toolchain rather
+      # than freezing on whatever we happened to cache first. That matters here:
+      # build.sh derives the MoonBit callback's mangled symbol from the
+      # toolchain's actual output, so a mangling change upstream must reach CI.
+      - name: Resolve latest MoonBit release
+        id: moonbit
+        shell: bash
         run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
-          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)     asset=moonbit-linux-x86_64.tar.gz ;;
+            Linux-ARM64)   asset=moonbit-linux-aarch64.tar.gz ;;
+            macOS-ARM64)   asset=moonbit-darwin-aarch64.tar.gz ;;
+            macOS-X64)     asset=moonbit-darwin-x86_64.tar.gz ;;
+            Windows-X64)   asset=moonbit-windows-x86_64.zip ;;
+            *)
+              echo "ERROR: no MoonBit asset mapped for ${{ runner.os }}-${{ runner.arch }}" >&2
+              exit 1
+              ;;
+          esac
+          etag="$(curl -fsSI "https://cli.moonbitlang.com/binaries/latest/$asset" \
+            | tr -d '\r' | awk 'tolower($1) == "etag:" { print $2 }' | tr -d '"')"
+          if [ -z "$etag" ]; then
+            echo "ERROR: could not resolve the MoonBit release ETag for $asset" >&2
+            exit 1
+          fi
+          echo "    $asset -> $etag"
+          echo "release=$etag" >> "$GITHUB_OUTPUT"
+
+      - name: Cache MoonBit toolchain
+        id: moon-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.moon
+          key: moon-${{ runner.os }}-${{ runner.arch }}-${{ steps.moonbit.outputs.release }}
+
+      - name: Install MoonBit toolchain (Unix)
+        if: runner.os != 'Windows' && steps.moon-cache.outputs.cache-hit != 'true'
+        run: curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
 
       - name: Install MoonBit toolchain (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.moon-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
           irm https://cli.moonbitlang.com/install/powershell.ps1 | iex
-          echo "$env:USERPROFILE\.moon\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # Separate from the install steps: PATH has to be set on the cache-hit
+      # path too, where no installer runs.
+      - name: Add MoonBit to PATH (Unix)
+        if: runner.os != 'Windows'
+        run: echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Add MoonBit to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "$env:USERPROFILE\.moon\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
