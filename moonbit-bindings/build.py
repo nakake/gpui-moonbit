@@ -327,8 +327,28 @@ def main():
             if d not in seen:
                 seen.add(d)
                 lib_dirs.append(d)
-        search_paths = ["/LIBPATH:" + msvc_path(d) for d in lib_dirs]
-        log(f"LIBPATH dirs: {'; '.join(lib_dirs)}")
+        log(f"lib dirs: {'; '.join(lib_dirs)}")
+
+        # moon hands link_flags to `cl`, not to `link` (verified on CI: every
+        # /LIBPATH: token came back as "cl : Command line warning D9002 :
+        # ignoring unknown option"). cl only forwards *file* arguments to the
+        # linker, so search paths are useless here — resolve each project lib
+        # to an absolute path instead. Names we cannot resolve are Windows SDK
+        # libs (kernel32.lib etc.); link finds those through LIB.
+        def resolve_lib(name):
+            for d in lib_dirs:
+                candidate = os.path.join(d, name)
+                if os.path.isfile(candidate):
+                    return msvc_path(candidate)
+            return name
+
+        windows_flags = []
+        for token in ["gpui_sys.lib"] + normalized:
+            flag = resolve_lib(token) if token.lower().endswith(".lib") else token
+            # cargo repeats the common SDK imports (advapi32/kernel32/...);
+            # emitting them once keeps the command line short.
+            if flag not in windows_flags:
+                windows_flags.append(flag)
     else:
         search_paths = [f"-L{rust_lib_dir}"]
 
@@ -364,7 +384,7 @@ def main():
 
     # Final flag string: search paths -> gpui_sys -> normalized native libs
     if os_pkg == "windows":
-        all_flags = search_paths + ["gpui_sys.lib"] + normalized
+        all_flags = windows_flags
     else:
         all_flags = search_paths + ["-lgpui_sys"] + normalized
     link_flags = " ".join(all_flags)

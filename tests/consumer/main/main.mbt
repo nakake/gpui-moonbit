@@ -1,0 +1,41 @@
+// Minimal consumer smoke test (issue #103).
+//
+// This module depends on nakake/gpui-bindings by path and imports the
+// link-only package, so building it exercises the whole prebuild path:
+// build.py runs, cargo builds the Rust staticlib, and the LinkConfig it
+// emits has to be good enough for the platform linker.
+//
+// It must actually *call* into the staticlib — a program that only imports
+// the bindings would link even with broken flags, because nothing pulls an
+// object out of the archive.
+//
+// Headless, so no window is opened: input_text against an unrealized view
+// returns GPUI_STATUS_INVALID_HANDLE (-1) instead of a string.
+
+fn main {
+  // Retain app.dispatch so the staticlib's mb_dispatch reference resolves.
+  let keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
+  ignore(keep)
+
+  // Serialize a small tree — pure MoonBit, no FFI yet.
+  let cb = @nakake/gpui-bindings.CommandBuffer::new()
+  cb.div()
+  cb.text("consumer smoke", 255, 255, 255, 16.0)
+  cb.add_child()
+  cb.set_root()
+  let wire = cb.to_bytes()
+  if wire.length() == 0 {
+    abort("CommandBuffer produced an empty wire buffer")
+  }
+
+  // Cross the FFI boundary: this is what forces the linker to resolve
+  // gpui_sys and every native library the prebuild reported.
+  match @nakake/gpui-bindings.input_text(0, 0) {
+    Ok(text) => abort("input_text unexpectedly succeeded headless: '\{text}'")
+    Err(status) =>
+      if status != -1 {
+        abort("input_text returned \{status}, want -1 (INVALID_HANDLE)")
+      }
+  }
+  println("PASS: prebuild consumption verified (\{wire.length()} bytes serialized)")
+}
