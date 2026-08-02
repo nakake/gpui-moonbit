@@ -101,6 +101,13 @@ pub const GPUI_STATUS_BUSY_COMPOSING: i32 = -13;
 /// infinite gap makes a sibling's width `NaN`, which then propagates silently
 /// through paint and hit-testing (issue #75).
 pub const GPUI_STATUS_INVALID_FLOAT: i32 = -14;
+/// The committed tree nests deeper than [`MAX_TREE_DEPTH`]. The three functions
+/// that walk a tree (`render_node`, `collect_text_contents`, `update_keyed_text`)
+/// are recursive; `stacker` grows the stack under them so a legitimate deep tree
+/// still renders, but an unbounded one would grow until the allocator gives up.
+/// Rejected before commit so the depth is capped once, at the boundary, rather
+/// than separately in each walker (issue #74).
+pub const GPUI_STATUS_DEPTH_EXCEEDED: i32 = -15;
 
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
@@ -537,9 +544,22 @@ pub extern "C" fn gpui_event_copy_text(token: i32, buf: *mut u8, len: i32) -> i3
     copy_len as i32
 }
 
+/// Stack headroom required before descending one more level of a committed
+/// tree, and the size of the segment allocated once that headroom is gone.
+///
+/// The red zone is far larger than the few kilobytes typical for this helper
+/// because the frames are far larger: `render_node` measured at roughly 70 KB
+/// of stack per nesting level in a debug build, so a 2 MiB thread overflows
+/// between depth 24 and 32 and an 8 MiB one between 112 and 128 (issue #74).
+/// A stack overflow aborts the process — `catch_unwind` cannot convert it into
+/// `GPUI_STATUS_INTERNAL_PANIC` — so growing here is the difference between a
+/// diagnosable error and a dead app.
+const STACK_RED_ZONE: usize = 512 * 1024;
+const STACK_GROW_BY: usize = 4 * 1024 * 1024;
+
 /// Collect text node contents in DFS pre-order from a committed tree.
 fn collect_text_contents(node: &UiNode, out: &mut Vec<u8>) {
-    match node {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_BY, || match node {
         UiNode::Div { children, .. } => {
             for child in children {
                 collect_text_contents(child, out);
@@ -553,7 +573,7 @@ fn collect_text_contents(node: &UiNode, out: &mut Vec<u8>) {
         // The editable content lives in the per-view TextInputModel, not the
         // committed tree; read it via gpui_input_copy_text instead.
         UiNode::TextInput { .. } => {}
-    }
+    })
 }
 
 /// Debug read-back: dump every text node's content from the committed tree for
@@ -809,6 +829,26 @@ const BUFFER_MAGIC: &[u8; 4] = b"GPUI";
 /// realistic display dimension, so clamping here cannot affect a sane tree while
 /// keeping every intermediate sum comfortably finite.
 const MAX_LAYOUT_PX: f32 = 1.0e6;
+
+/// Maximum nesting depth of a committed tree, counting the root as level 1.
+///
+/// Picked from measurement, not from taste (issue #74). Rendering a nested
+/// chain in a debug build on a 2 MiB thread stack overflows:
+///
+/// * between depth 24 and 32 with plain recursion, and
+/// * between depth 256 and 384 once [`STACK_RED_ZONE`] growth is in place.
+///
+/// The second cliff is not ours: `stacker` covers the three walkers in this
+/// crate, but gpui and taffy recurse over the element tree on their own during
+/// layout, and the nested elements drop recursively too. That ceiling can move
+/// with a gpui upgrade and cannot be raised from here.
+///
+/// 64 sits under that remaining cliff with room for a main thread smaller than
+/// the test harness's — Windows defaults to 1 MiB, half of what the measurement
+/// above used — while still being several times deeper than any real UI (the
+/// Counter demo nests under ten). A tree deeper than this is a bug in the
+/// caller, and a status code says so where a stack overflow would only abort.
+const MAX_TREE_DEPTH: u32 = 64;
 
 /// A cursor over the command buffer with little-endian readers. Every reader
 /// returns `None` on truncation so the parser reports `TRUNCATED_BUFFER`
@@ -1576,10 +1616,19 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
         return GPUI_STATUS_NODE_ABSENT;
     }
     {
+        // One iterative pass validates both invariants that span the whole
+        // tree: unique keys, and a bounded nesting depth. Depth is carried on
+        // the walk stack rather than derived from the decoder's stack, because
+        // the two are not the same number — a subtree can be built shallow and
+        // then nested under a fresh parent, so only the committed shape says
+        // how deep the walkers will actually recurse (issue #74).
         let mut seen = std::collections::HashSet::new();
         let root_ref = nodes[root_index].as_ref().expect("root present");
-        let mut walk: Vec<&UiNode> = vec![root_ref];
-        while let Some(node) = walk.pop() {
+        let mut walk: Vec<(&UiNode, u32)> = vec![(root_ref, 1)];
+        while let Some((node, depth)) = walk.pop() {
+            if depth > MAX_TREE_DEPTH {
+                return GPUI_STATUS_DEPTH_EXCEEDED;
+            }
             let UiNode::Div { key, children, .. } = node else {
                 continue;
             };
@@ -1588,7 +1637,7 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                     return GPUI_STATUS_DUPLICATE_KEY;
                 }
             }
-            walk.extend(children.iter());
+            walk.extend(children.iter().map(|child| (child, depth + 1)));
         }
     }
     let root_node = nodes[root_index].take().expect("root presence was validated");
@@ -1611,24 +1660,26 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
 /// that resolves to a text node, yields no update (the caller falls back to a
 /// full rebuild).
 fn update_keyed_text(node: &mut UiNode, key: &str, text: &str) -> bool {
-    let UiNode::Div {
-        key: node_key,
-        children,
-        ..
-    } = node
-    else {
-        return false;
-    };
-    if node_key.as_deref() == Some(key) {
-        if let Some(UiNode::Text { content, .. }) = children.first_mut() {
-            *content = text.to_string();
-            return true;
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_BY, || {
+        let UiNode::Div {
+            key: node_key,
+            children,
+            ..
+        } = node
+        else {
+            return false;
+        };
+        if node_key.as_deref() == Some(key) {
+            if let Some(UiNode::Text { content, .. }) = children.first_mut() {
+                *content = text.to_string();
+                return true;
+            }
+            return false;
         }
-        return false;
-    }
-    children
-        .iter_mut()
-        .any(|child| update_keyed_text(child, key, text))
+        children
+            .iter_mut()
+            .any(|child| update_keyed_text(child, key, text))
+    })
 }
 
 /// Update the text of a keyed node in the committed tree for `view` in place,
@@ -2801,7 +2852,39 @@ fn scroll_handle_for(
 /// does the same for focusable divs that have neither a key nor a click id:
 /// the focus builders need element state, which needs an id, so one is
 /// synthesized per render (and the focus handle resets on each rebuild).
+///
+/// Recursion happens through this wrapper so every level of descent gets its
+/// stack headroom checked (issue #74): these frames are the ~70 KB ones that
+/// make a plain thread stack overflow in the low tens of levels, and an
+/// overflow aborts rather than returning a status. `MAX_TREE_DEPTH` bounds the
+/// committed tree independently, so the growth here is what keeps a legitimate
+/// deep-but-under-the-limit tree renderable rather than a safety net for
+/// unbounded input.
 fn render_node(
+    node: &UiNode,
+    cx: &mut Context<FfiView>,
+    fill_available_space: bool,
+    scroll_handles: &Rc<RefCell<HashMap<String, ScrollHandle>>>,
+    inputs: &Rc<RefCell<HashMap<i32, Entity<TextInputModel>>>>,
+    view_id: i32,
+    keyless_scroll_id: &Cell<usize>,
+    keyless_focus_id: &Cell<usize>,
+) -> Option<AnyElement> {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_BY, || {
+        render_node_inner(
+            node,
+            cx,
+            fill_available_space,
+            scroll_handles,
+            inputs,
+            view_id,
+            keyless_scroll_id,
+            keyless_focus_id,
+        )
+    })
+}
+
+fn render_node_inner(
     node: &UiNode,
     cx: &mut Context<FfiView>,
     fill_available_space: bool,
