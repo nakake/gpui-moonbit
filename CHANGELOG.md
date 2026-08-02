@@ -27,7 +27,8 @@
 - キーボードナビゲーション: `OP_SET_FOCUSABLE` / `OP_SET_TAB_INDEX` / `OP_SET_TAB_STOP`（35–37）と Tab / Shift+Tab トラバース。a11y / IME の境界を `docs/a11y-ime.md` に文書化（#52、G18 / G19）。
 - 計測で正当化したインクリメンタル更新: keyed in-place `gpui_update_text` FFI。24 行ツリーで full rebuild 比 約440x（11.4µs → 25.9ns）。汎用 vdom diff は意図的に未実装（#10）。
 - `set_border_color(width, color)`: 枠線を alpha 付き `Color` で設定する API。`set_border(width, r, g, b)` と wire format は同一（#81）。
-- prebuild パイプライン（#93、G2）: `moonbit-bindings/build.py` を `--moonbit-unstable-prebuild` で登録。path/git 依存で本モジュールを消費したコンシューマの `moon build` 時に Rust staticlib をビルドし、LinkConfig でリンクフラグを伝播する。`link/` パッケージを新設し、コンシューマ exe が import することで伝播を受ける設計（テスト exe への意図しない伝播を回避）。Linux x86_64 で検証済み。macOS/Windows は未検証。
+- prebuild パイプライン（#93、G2）: `moonbit-bindings/build.py` を `--moonbit-unstable-prebuild` で登録。path/git 依存で本モジュールを消費したコンシューマの `moon build` 時に Rust staticlib をビルドし、LinkConfig でリンクフラグを伝播する。`link/` パッケージを新設し、コンシューマ exe が import することで伝播を受ける設計（テスト exe への意図しない伝播を回避）。Linux x86_64 / macOS arm64 / Windows MSVC x64 の 3 つで検証済み（CI の consumer smoke test、#103）。
+- 最小コンシューマモジュール `tests/consumer`（#103）: `moonbit-bindings` に path 依存し、`link` パッケージを import して FFI を実際に呼ぶ。prebuild の LinkConfig が壊れているとリンクに失敗するため、prebuild 消費経路の回帰テストとして機能する。CI で ubuntu / macOS / Windows の 3 ランナーすべてで、`moon test` より前にビルド・実行する。
 - 非同期イベント注入（RFC 0002、#84）: 公開 C ABI `gpui_post_event(view, ptr, len)` で任意スレッドから有界キュー（1024 エントリ / 1 エントリ 1 MiB 上限）へペイロードを push。メインスレッドの drain pump が各エントリを新種別 `EVENT_ASYNC`（`5`、`ABI_VERSION` 据え置き）として配送し、`changed==1` で view を notify。新ステータス `GPUI_STATUS_QUEUE_FULL`（`-11`）/ `GPUI_STATUS_PAYLOAD_TOO_LARGE`（`-12`）。MoonBit 側は `post_event` / `copy_async_payload` ラッパー、`GpuiError::QueueFull` / `PayloadTooLarge`、`Event::Async` デコード（RFC 0001 の `Event` enum / `HandlerRegistry::on_async` に統合）、消費者例 `examples/stream` を追加。
 
 ### Changed
@@ -46,7 +47,8 @@
 
 ### Fixed
 
-- Windows CI の `moon test` が #93 の prebuild 導入後に失敗していた問題を修正: `build.py` が cc/ld 形式のリンクフラグ（`-L`/`-l`）を MSVC の `cl` に渡し、`link` パッケージのテスト exe が `CVT1100`（duplicate manifest）でリンク失敗していた。Windows では prebuild のフラグ伝播を無効化（空の LinkConfig）し、MSVC 形式フラグの実装・検証は後続 issue とする。
+- Windows CI の `moon test` が #93 の prebuild 導入後に失敗していた問題を修正: `build.py` が cc/ld 形式のリンクフラグ（`-L`/`-l`）を MSVC の `cl` に渡し、`link` パッケージのテスト exe が `CVT1100`（duplicate manifest）でリンク失敗していた。Windows では prebuild のフラグ伝播を暫定的に無効化（空の LinkConfig）した。MSVC 形式フラグは #103 で実装・検証済み（下記）。
+- prebuild の Windows 対応を実装（#103）: `build.py` が MSVC 形式のリンクフラグを出力するようになり、#102 の暫定ゲートを解除した。moon は `link_flags` を `link` ではなく `cl` に渡すため `/LIBPATH:` は「unknown option」として捨てられる。したがって検索パスは使わず、`gpui_sys.lib` / `gpui.lib` / windows-rs の import lib を**絶対パス**で渡し、Windows SDK のライブラリ（`kernel32.lib` 等）は素の名前のまま `LIB` 経由で解決させる。Rust 側は `RUSTFLAGS=-C target-feature=+crt-static` でビルドする（moon の native backend が無条件に `/MT` を付けるため）。あわせて Windows の `moon test` から `link` パッケージを除外した: moon は `link` パッケージ自身の blackbox test をビルドする際に LinkConfig を 2 回適用してしまい（`link` と `link_blackbox_test` が同じ `link/moon.pkg` に解決される）、`.lib` の重複で MSVC が `CVTRES: CVT1100 duplicate resource type:MANIFEST` → `LNK1123` で落ちる。ld / ld64 では無害なため Unix は全パッケージを実行する。
 - テキストの空白パディング workaround を撤廃し、paint-time ¼px オフセット（`TextGlyphInset`）に置換。コンテンツ汚染を解消（#16、G10）。
 - `on_text` が 10 桁以上の数字入力で i32 境界を wrap して負値になり得た問題を、オーバーフローガードで修正（#81）。
 - 新規 FFI 関数追加時のビルドデッドロックを修正（#71）: bindgen が消費する `gpui-sys/include/gpui_sys.h` を、`moon check` ゲートより前に `gen-header`（cbindgen のみ依存の小クレート）で再生成するように `build.sh` / `build.ps1` の順序を変更。新しい `#[unsafe(no_mangle)] pub extern "C"` を追加してもドライバ 1 回でビルドが通る。`moon check` 失敗時にはヘッダー再生成のヒントを表示。`build.ps1` 側は Windows 未検証。

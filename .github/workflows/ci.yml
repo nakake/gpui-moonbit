@@ -78,9 +78,53 @@ jobs:
           GPUI_SYS_ALLOW_TEST_DISPATCH_STUB: "1"
         run: cargo bench --no-run --features test-dispatch-stub,test-support
 
-      - name: MoonBit tests
+      # Verifies the prebuild path (#103): a separate module that path-depends
+      # on moonbit-bindings and imports the link-only package, so build.py's
+      # LinkConfig is the ONLY thing that makes the final link resolve. Runs
+      # before `moon test` so a link regression is reported here, where the
+      # failure points at the right thing.
+      - name: Consumer smoke test (Unix)
+        if: runner.os != 'Windows'
+        working-directory: tests/consumer
+        run: |
+          moon build
+          ./_build/native/debug/build/main/main.exe
+
+      - name: Consumer smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: tests/consumer
+        run: |
+          moon build
+          if ($LASTEXITCODE -ne 0) { throw 'moon build failed' }
+          & .\_build\native\debug\build\main\main.exe
+          if ($LASTEXITCODE -ne 0) { throw 'consumer smoke test failed' }
+
+      - name: MoonBit tests (Unix)
+        if: runner.os != 'Windows'
         working-directory: moonbit-bindings
         run: moon test
+
+      # The `link` package is excluded on Windows. moon applies its prebuild
+      # LinkConfig twice when building that package's own blackbox test (once
+      # for `link`, once for `link_blackbox_test` — both resolve to the same
+      # link/moon.pkg), so every .lib lands on the command line twice. That is
+      # harmless for ld, but MSVC fails with `CVTRES: CVT1100 duplicate
+      # resource type:MANIFEST` → LNK1123. The package holds no tests (it
+      # exists only as the LinkConfig target) and consumers never build its
+      # blackbox test, so nothing is lost. The real Windows link coverage is
+      # the consumer smoke test above.
+      - name: MoonBit tests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: moonbit-bindings
+        run: >-
+          moon test
+          -p nakake/gpui-bindings
+          -p nakake/gpui-bindings/app
+          -p nakake/gpui-bindings/cmd/main
+          -p nakake/gpui-bindings/cmd/roundtrip
+          -p nakake/gpui-bindings/examples/hello
+          -p nakake/gpui-bindings/examples/stream
 
       - name: Rebuild after Rust-only change (Unix)
         if: runner.os != 'Windows'

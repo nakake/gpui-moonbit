@@ -25,11 +25,13 @@ Protocol reference (moon 0.1.20260721, crates/moonutil/src/build_script.rs):
 Limitations:
   - Linux x86_64: verified.
   - macOS arm64/x86_64: best-effort, unverified (no test environment).
-  - Windows MSVC x64: unverified (link flag syntax differs).
+  - Windows MSVC x64: MSVC-style flags (/LIBPATH:, gpui_sys.lib)
+    implemented; being verified on windows-latest CI.
   - `rerun_if` does not work in current moon; cargo build runs on every
     `moon build` invocation (incremental, so warm builds are fast).
 """
 
+import glob
 import json
 import os
 import platform
@@ -96,12 +98,17 @@ def normalize_native_libs(native_libs_str, os_pkg):
       - macOS: drop -lm (math lives in libSystem).
       - Linux: rewrite XCB/XKB to versioned SONAME form (-l:libfoo.so.N).
       - Linux: ensure -l:libxcb-xkb.so.1 is present.
+      - Windows: drop /defaultlib:(libcmt|msvcrt) (moon links /MT always).
     """
     tokens = native_libs_str.split()
     normalized = []
 
     for lib in tokens:
         if lib == "-lc":
+            continue
+        if os_pkg == "windows" and re.match(
+            r"^/defaultlib:(libcmt|msvcrt)$", lib, re.IGNORECASE
+        ):
             continue
         if os_pkg == "macos" and lib == "-lm":
             continue
@@ -130,6 +137,67 @@ def run(cmd, **kwargs):
     return subprocess.run(cmd, **kwargs)
 
 
+def msvc_path(path):
+    """Format a Windows path for a link flag.
+
+    moon parses link_flags with shlex, which eats backslashes as escapes
+    (observed in PR #102 CI logs). link.exe accepts forward-slash paths, so
+    normalize to '/'. Wrap in double quotes when the path contains whitespace
+    so shlex does not split it.
+    """
+    p = os.path.abspath(path).replace("\\", "/")
+    if any(c.isspace() for c in p):
+        return '"' + p + '"'
+    return p
+
+
+def cargo_build(gpui_sys, rust_target):
+    """Build gpui-sys with `cargo build`. Logs and exits on failure."""
+    log("building gpui-sys...")
+    result = run(
+        ["cargo", "build", "--target", rust_target],
+        cwd=gpui_sys,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log("ERROR: cargo build failed:")
+        sys.stderr.write(result.stderr)
+        sys.exit(1)
+
+
+def extract_native_libs(gpui_sys, rust_target):
+    """Capture cargo's native-static-libs list. Logs and exits on failure."""
+    log("extracting native-static-libs...")
+    result = run(
+        [
+            "cargo", "rustc", "--target", rust_target,
+            "--lib", "--crate-type", "staticlib",
+            "--", "--print", "native-static-libs",
+        ],
+        cwd=gpui_sys,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log("ERROR: cargo rustc --print native-static-libs failed:")
+        sys.stderr.write(result.stderr)
+        sys.exit(1)
+
+    # rustc prints native-static-libs to stderr
+    native_libs_line = ""
+    for line in result.stderr.splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", line)  # strip ANSI
+        if "native-static-libs:" in line:
+            native_libs_line = line.split("native-static-libs:", 1)[1].strip()
+            break
+    if not native_libs_line:
+        log("ERROR: could not find native-static-libs in cargo output")
+        sys.exit(1)
+    log(f"raw native libs: {native_libs_line}")
+    return native_libs_line
+
+
 def main():
     # --- Read BuildScriptEnvironment from stdin ---
     env_input = json.load(sys.stdin)
@@ -143,18 +211,7 @@ def main():
     elif system == "Darwin":
         os_pkg = "macos"
     elif system == "Windows":
-        # Windows prebuild consumption is not implemented yet: the flags below
-        # are cc/ld style (-L / -l), which MSVC's cl misparses — on CI this
-        # broke `moon test`'s link.blackbox_test with CVT1100 (duplicate
-        # manifest). Until MSVC-style flags (/LIBPATH:, gpui_sys.lib) are
-        # implemented and verified, emit no LinkConfig: in-repo builds keep
-        # using build.ps1, and Windows consumers use the template-repo
-        # fallback documented in README (§prebuild).
-        log("Windows: prebuild link-flag propagation not yet supported; "
-            "emitting empty LinkConfig (use build.ps1 / the template-repo "
-            "fallback).")
-        print(json.dumps({"link_configs": []}))
-        return
+        os_pkg = "windows"
     else:
         log(f"ERROR: unsupported OS: {system}")
         sys.exit(1)
@@ -197,50 +254,16 @@ def main():
         sys.exit(1)
     log(f"rust target: {rust_target}")
 
-    # --- Build gpui-sys ---
-    log("building gpui-sys...")
-    result = run(
-        ["cargo", "build", "--target", rust_target],
-        cwd=gpui_sys,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        log("ERROR: cargo build failed:")
-        sys.stderr.write(result.stderr)
-        sys.exit(1)
-
-    # --- Extract native-static-libs ---
-    log("extracting native-static-libs...")
-    result = run(
-        [
-            "cargo", "rustc", "--target", rust_target,
-            "--lib", "--crate-type", "staticlib",
-            "--", "--print", "native-static-libs",
-        ],
-        cwd=gpui_sys,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        log("ERROR: cargo rustc --print native-static-libs failed:")
-        sys.stderr.write(result.stderr)
-        sys.exit(1)
-
-    # rustc prints native-static-libs to stderr
-    native_libs_line = ""
-    for line in result.stderr.splitlines():
-        line = re.sub(r"\x1b\[[0-9;]*m", "", line)  # strip ANSI
-        if "native-static-libs:" in line:
-            native_libs_line = line.split("native-static-libs:", 1)[1].strip()
-            break
-    if not native_libs_line:
-        log("ERROR: could not find native-static-libs in cargo output")
-        sys.exit(1)
-    log(f"raw native libs: {native_libs_line}")
-
-    # --- Normalize per-OS ---
-    normalized = normalize_native_libs(native_libs_line, os_pkg)
+    # --- Force the static CRT on Windows ---
+    if os_pkg == "windows":
+        # moon's native backend always compiles and links with /MT (it appends
+        # /MT after user flags, so /MD can never win); build the Rust static
+        # lib with the same static CRT to avoid a CRT mismatch at link time.
+        flag = "-C target-feature=+crt-static"
+        existing = os.environ.get("RUSTFLAGS", "")
+        if "target-feature=+crt-static" not in existing:
+            os.environ["RUSTFLAGS"] = (existing + " " + flag).strip() if existing else flag
+        log(f"RUSTFLAGS={os.environ['RUSTFLAGS']}")
 
     # --- Determine the Rust library directory ---
     result = run(
@@ -255,41 +278,115 @@ def main():
     rust_lib_dir = os.path.join(target_dir, rust_target, "debug")
     log(f"rust lib dir: {rust_lib_dir}")
 
-    # --- Assemble link flags (order matters: -L before -l) ---
-    search_paths = [f"-L{rust_lib_dir}"]
+    # --- Build gpui-sys / extract native-static-libs ---
+    # On Windows the print step runs FIRST: `cargo rustc -- --print` may
+    # invalidate a previously built .lib (cargo cleans stale artifacts and
+    # rustc exits after printing without producing output), so running
+    # `cargo build` last guarantees gpui_sys.lib exists for moon's link step.
+    if os_pkg == "windows":
+        native_libs_line = extract_native_libs(gpui_sys, rust_target)
+        cargo_build(gpui_sys, rust_target)
+        gpui_sys_lib = os.path.join(rust_lib_dir, "gpui_sys.lib")
+        if not os.path.exists(gpui_sys_lib):
+            log(f"ERROR: {gpui_sys_lib} not found after cargo build")
+            sys.exit(1)
+    else:
+        cargo_build(gpui_sys, rust_target)
+        native_libs_line = extract_native_libs(gpui_sys, rust_target)
 
-    # .linux-libs fallback (repo-level, gitignored)
-    linux_libs = os.path.normpath(os.path.join(module_root, "..", ".linux-libs"))
-    if os_pkg == "linux" and os.path.isdir(linux_libs):
-        search_paths.append(f"-L{linux_libs}")
-        log(f"using .linux-libs fallback: {linux_libs}")
+    # --- Normalize per-OS ---
+    normalized = normalize_native_libs(native_libs_line, os_pkg)
 
-    # System lib dir (for environments where ld doesn't inherit cc's defaults)
-    if os_pkg == "linux":
-        result = run(
-            ["cc", "-print-file-name=libc.so"],
-            capture_output=True, text=True, check=True,
-        )
-        libc_path = result.stdout.strip()
-        if libc_path and libc_path != "libc.so":
-            sys_lib_dir = os.path.dirname(os.path.abspath(libc_path))
-            if os.path.isdir(sys_lib_dir):
-                search_paths.append(f"-L{sys_lib_dir}")
-                log(f"system lib dir: {sys_lib_dir}")
-    elif os_pkg == "macos":
-        result = run(
-            ["xcrun", "--show-sdk-path"],
-            capture_output=True, text=True, check=True,
-        )
-        sdk_lib_dir = os.path.join(result.stdout.strip(), "usr", "lib")
-        if os.path.isdir(sdk_lib_dir):
-            search_paths.append(f"-L{sdk_lib_dir}")
-            log(f"SDK lib dir: {sdk_lib_dir}")
-        # IOSurface is not always reported by cargo's native-static-libs
-        normalized.extend(["-framework", "IOSurface"])
+    # --- Assemble link flags (order matters: search paths before libs) ---
+    if os_pkg == "windows":
+        # gpui's build.rs emits an extra static lib (gpui.lib) under
+        # target/<host>/debug/build on Windows; add every dir holding a .lib.
+        extra_dirs = []
+        build_tree = os.path.join(rust_lib_dir, "build")
+        if os.path.isdir(build_tree):
+            for root, _dirs, files in os.walk(build_tree):
+                if any(name.endswith(".lib") for name in files):
+                    extra_dirs.append(root)
+
+        # windows-rs ships its import libs inside the cargo registry checkout;
+        # the linker needs those dirs on the search path too.
+        win_lib_dirs = []
+        user_profile = os.environ.get("USERPROFILE")
+        if user_profile:
+            registry_src = os.path.join(user_profile, ".cargo", "registry", "src")
+            for d in sorted(glob.glob(
+                os.path.join(registry_src, "*", "windows_x86_64_msvc-*", "lib")
+            )):
+                if os.path.isdir(d):
+                    win_lib_dirs.append(d)
+
+        # Dedupe preserving order.
+        seen = set()
+        lib_dirs = []
+        for d in [rust_lib_dir] + extra_dirs + win_lib_dirs:
+            if d not in seen:
+                seen.add(d)
+                lib_dirs.append(d)
+        log(f"lib dirs: {'; '.join(lib_dirs)}")
+
+        # moon hands link_flags to `cl`, not to `link` (verified on CI: every
+        # /LIBPATH: token came back as "cl : Command line warning D9002 :
+        # ignoring unknown option"). cl only forwards *file* arguments to the
+        # linker, so search paths are useless here — resolve each project lib
+        # to an absolute path instead. Names we cannot resolve are Windows SDK
+        # libs (kernel32.lib etc.); link finds those through LIB.
+        def resolve_lib(name):
+            for d in lib_dirs:
+                candidate = os.path.join(d, name)
+                if os.path.isfile(candidate):
+                    return msvc_path(candidate)
+            return name
+
+        windows_flags = []
+        for token in ["gpui_sys.lib"] + normalized:
+            flag = resolve_lib(token) if token.lower().endswith(".lib") else token
+            # cargo repeats the common SDK imports (advapi32/kernel32/...);
+            # emitting them once keeps the command line short.
+            if flag not in windows_flags:
+                windows_flags.append(flag)
+    else:
+        search_paths = [f"-L{rust_lib_dir}"]
+
+        # .linux-libs fallback (repo-level, gitignored)
+        linux_libs = os.path.normpath(os.path.join(module_root, "..", ".linux-libs"))
+        if os_pkg == "linux" and os.path.isdir(linux_libs):
+            search_paths.append(f"-L{linux_libs}")
+            log(f"using .linux-libs fallback: {linux_libs}")
+
+        # System lib dir (for environments where ld doesn't inherit cc's defaults)
+        if os_pkg == "linux":
+            result = run(
+                ["cc", "-print-file-name=libc.so"],
+                capture_output=True, text=True, check=True,
+            )
+            libc_path = result.stdout.strip()
+            if libc_path and libc_path != "libc.so":
+                sys_lib_dir = os.path.dirname(os.path.abspath(libc_path))
+                if os.path.isdir(sys_lib_dir):
+                    search_paths.append(f"-L{sys_lib_dir}")
+                    log(f"system lib dir: {sys_lib_dir}")
+        elif os_pkg == "macos":
+            result = run(
+                ["xcrun", "--show-sdk-path"],
+                capture_output=True, text=True, check=True,
+            )
+            sdk_lib_dir = os.path.join(result.stdout.strip(), "usr", "lib")
+            if os.path.isdir(sdk_lib_dir):
+                search_paths.append(f"-L{sdk_lib_dir}")
+                log(f"SDK lib dir: {sdk_lib_dir}")
+            # IOSurface is not always reported by cargo's native-static-libs
+            normalized.extend(["-framework", "IOSurface"])
 
     # Final flag string: search paths -> gpui_sys -> normalized native libs
-    all_flags = search_paths + ["-lgpui_sys"] + normalized
+    if os_pkg == "windows":
+        all_flags = windows_flags
+    else:
+        all_flags = search_paths + ["-lgpui_sys"] + normalized
     link_flags = " ".join(all_flags)
     log(f"link_flags: {link_flags}")
 

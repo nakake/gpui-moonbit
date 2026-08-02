@@ -1,0 +1,9 @@
+{
+  "is-main": true,
+  "import": [
+    "nakake/gpui-bindings",
+    "nakake/gpui-bindings/app",
+    "nakake/gpui-bindings/link"
+  ],
+  "warn-list": "-29"
+}
