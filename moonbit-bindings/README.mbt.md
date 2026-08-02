@@ -58,7 +58,7 @@ MoonBit 側の型検査だけなら、このディレクトリで `moon check`�
 
 ## 依存として消費する（prebuild 方式、#93）
 
-本モジュールは `--moonbit-unstable-prebuild`（実験的機能）により、**path / git 依存として消費できます**。コンシューマの `moon build` 時に、同梱の `build.py` が Rust staticlib をビルドし、リンクフラグを自動伝播します。**Linux x86_64 で検証済み。macOS は未検証**です。**Windows では prebuild のリンクフラグ伝播は未対応**（`build.py` は空の LinkConfig を返します）: リポジトリ内ビルドは従来どおり `build.ps1` を使い、コンシューマはテンプレートリポジトリ方式のフォールバックを使ってください。
+本モジュールは `--moonbit-unstable-prebuild`（実験的機能）により、**path / git 依存として消費できます**。コンシューマの `moon build` 時に、同梱の `build.py` が Rust staticlib をビルドし、リンクフラグを自動伝播します。**Linux x86_64 / macOS arm64 / Windows MSVC x64 の 3 つで CI 検証済み**です（`tests/consumer` の最小コンシューマを 3 ランナーすべてでビルド・実行、#103）。なお、このリポジトリ内でデモアプリをフルビルドする場合は従来どおり `build.sh` / `build.ps1` を使います。
 
 ### 1. 依存を追加する
 
