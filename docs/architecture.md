@@ -99,8 +99,12 @@ OP_SET_FOCUSABLE    u8 | mode i32                 (0 以外 = focusable)
 OP_SET_TAB_INDEX    u8 | index i32                (tab 順序; focusable + tab stop を暗黙に含む)
 OP_SET_TAB_STOP     u8 | mode i32                 (0 = Tab ナビゲーションから外す)
 OP_TEXT_INPUT       u8 | input_id i32 | len u32 | utf8[len]   (placeholder; leaf ノード)
+OP_TEXT_RUN         u8 | start u32 | len u32 | flags u8 | r u8 g u8 b u8 a u8 | weight i32 | br u8 bg u8 bb u8 ba u8
+                                                  (rich text の run 1 本; issue #91)
 OP_SET_SCROLL_ID    u8 | scroll_id i32            (スクロール位置フィードバックの購読 id; issue #89)
 ```
+
+`OP_TEXT_RUN`（issue #91）はスタックトップのテキストノードに styled run を 1 本追記する。`start`/`len` はそのノードの content への **UTF-8 バイト**オフセットで、デコード時に検証される（範囲内・`char` 境界・start 昇順・非重複。違反は `GPUI_STATUS_INVALID_TEXT_RUN`（`-16`）で**バッファごと**拒否 — gpui の run 機構（`StyledText::compute_runs` / `with_runs`）は不正な range で panic するため、寛容にデコードすると paint 時 abort と引き換えになる）。`flags` は `[run_style]` セクション由来の `RUN_STYLE_*` ビット和で、未知ビットも同じ理由で拒否する。立っていないフィールドのスロットもゼロ埋めで必ず存在する（固定 22 バイトレコード）。描画は run なしなら従来の `div().child(content)` 経路のまま、run ありなら `StyledText::with_highlights`（遅延解決）に乗り、ベーススタイルは従来どおり祖先 div の `Style.text` 継承から来る。MoonBit 側は `CommandBuffer::rich_text(segments, r, g, b, size)` がセグメント文字列の連結とバイトオフセット計算を隠蔽する（手動オフセットの `text_run` も公開）。
 
 f32 のジオメトリオペランド（`OP_TEXT` の font size、`OP_SET_SIZE`/`OP_SET_GAP`/`OP_SET_ROUNDED`/`OP_SET_PADDING`/`OP_SET_BORDER`）はデコード時に `is_finite` を検証し、非有限値は `GPUI_STATUS_INVALID_FLOAT`（`-14`）で拒否する。有限値もさらに ±1e6 px にクランプする（issue #75）。
 

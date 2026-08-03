@@ -35,8 +35,9 @@ use abi_constants::{
     OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SCROLL_ID, OP_SET_SHADOW, OP_SET_SIZE, OP_SET_TAB_INDEX,
     OP_SET_TAB_STOP,
     OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE, OP_SET_WHITESPACE, OP_TEXT,
-    OP_TEXT_INPUT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE,
-    POSITION_RELATIVE,
+    OP_TEXT_INPUT, OP_TEXT_RUN, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE,
+    POSITION_ABSOLUTE, POSITION_RELATIVE, RUN_STYLE_BACKGROUND, RUN_STYLE_COLOR,
+    RUN_STYLE_ITALIC, RUN_STYLE_STRIKETHROUGH, RUN_STYLE_UNDERLINE, RUN_STYLE_WEIGHT,
     TEXT_ALIGN_CENTER, TEXT_ALIGN_DEFAULT, TEXT_ALIGN_JUSTIFY, TEXT_ALIGN_LEFT,
     TEXT_ALIGN_RIGHT, WHITESPACE_DEFAULT, WHITESPACE_NORMAL, WHITESPACE_NOWRAP, WHITESPACE_PRE,
     WHITESPACE_PRE_WRAP,
@@ -109,6 +110,14 @@ pub const GPUI_STATUS_INVALID_FLOAT: i32 = -14;
 /// Rejected before commit so the depth is capped once, at the boundary, rather
 /// than separately in each walker (issue #74).
 pub const GPUI_STATUS_DEPTH_EXCEEDED: i32 = -15;
+/// An `OP_TEXT_RUN` record is semantically invalid for the text node it
+/// targets: out of bounds, not on a `char` boundary, overlapping/unsorted
+/// against the previous run, or carrying unknown style flag bits. Rejection is
+/// per-buffer (the tree is not committed) because gpui's run machinery panics
+/// on ranges like these — `StyledText::compute_runs` subtracts range starts
+/// and `with_runs` asserts the runs tile the text — so a lenient decoder would
+/// trade a diagnosable status for a paint-time abort (issue #91).
+pub const GPUI_STATUS_INVALID_TEXT_RUN: i32 = -16;
 
 
 // Rust -> MoonBit callback. MoonBit native does not emit a stable C export
@@ -635,6 +644,22 @@ struct Shadow {
     color: (u8, u8, u8, u8),
 }
 
+/// One styled run decoded from `OP_TEXT_RUN` (issue #91). `start`/`len` are
+/// UTF-8 byte offsets into the owning text node's content, validated at decode
+/// time (in bounds, on `char` boundaries, sorted, non-overlapping) so gpui's
+/// panicking run machinery can never see a bad range. Style fields are applied
+/// only when their `RUN_STYLE_*` bit is set in `flags`; the rest of the run
+/// inherits the text node's base style.
+#[derive(Clone, PartialEq, Debug)]
+struct TextRunSpec {
+    start: usize,
+    len: usize,
+    flags: i32,
+    color: (u8, u8, u8, u8),
+    weight: i32,
+    background: (u8, u8, u8, u8),
+}
+
 #[derive(Clone)]
 enum UiNode {
     Div {
@@ -723,6 +748,10 @@ enum UiNode {
         content: String,
         color: (u8, u8, u8),
         size: f32,
+        /// Styled runs (`OP_TEXT_RUN`, issue #91), in start order. Empty for
+        /// the common single-style case, which renders through the plain
+        /// `div().child(content)` path unchanged.
+        runs: Vec<TextRunSpec>,
     },
     /// Editable text input (RFC 0003, issue #88). A leaf: the committed tree
     /// carries only the widget's identity and placeholder — the editable
@@ -794,6 +823,11 @@ fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
 //   header:  "GPUI" (4 bytes) | BUFFER_VERSION (u32)
 //   OP_DIV            u8
 //   OP_TEXT           u8 | len u32 | utf8[len] | r u8 | g u8 | b u8 | size f32
+//   OP_TEXT_RUN       u8 | start u32 | len u32 | flags u8 | r u8 g u8 b u8 a u8 | weight i32 | br u8 bg u8 bb u8 ba u8
+//                     (issue #91: appends one styled run to the text node on
+//                     top of the stack; start/len are UTF-8 byte offsets into
+//                     its content, flags are RUN_STYLE_* bits, unset fields
+//                     still occupy their zero-filled slot)
 //   OP_SET_SIZE       u8 | w f32 | h f32
 //   OP_SET_BG         u8 | r u8 | g u8 | b u8
 //   OP_SET_FLEX       u8 | col u8
@@ -1062,6 +1096,7 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                         content,
                         color: (r, g, b),
                         size,
+                        runs: Vec::new(),
                     },
                 );
                 if id < 0 {
@@ -1070,6 +1105,79 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                     stack.push(id);
                     GPUI_STATUS_OK
                 }
+            }
+            OP_TEXT_RUN => {
+                let (Some(start), Some(len), Some(flags)) =
+                    (reader.read_u32(), reader.read_u32(), reader.read_u8())
+                else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                let (Some(r), Some(g), Some(b), Some(a)) = (
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                let Some(weight) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                let (Some(br), Some(bg), Some(bb), Some(ba)) = (
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                    reader.read_u8(),
+                ) else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                // Reject unknown flag bits the way an unknown opcode is
+                // rejected: an old binary must not half-apply a run whose
+                // meaning it does not fully know.
+                const KNOWN_RUN_FLAGS: i32 = RUN_STYLE_COLOR
+                    | RUN_STYLE_WEIGHT
+                    | RUN_STYLE_ITALIC
+                    | RUN_STYLE_UNDERLINE
+                    | RUN_STYLE_STRIKETHROUGH
+                    | RUN_STYLE_BACKGROUND;
+                if flags as i32 & !KNOWN_RUN_FLAGS != 0 {
+                    return GPUI_STATUS_INVALID_TEXT_RUN;
+                }
+                let Some(&handle) = stack.last() else {
+                    return GPUI_STATUS_INVALID_HANDLE;
+                };
+                let node = match nodes.get_mut(handle as usize) {
+                    None => return GPUI_STATUS_INVALID_HANDLE,
+                    Some(None) => return GPUI_STATUS_NODE_ABSENT,
+                    Some(Some(node)) => node,
+                };
+                let UiNode::Text { content, runs, .. } = node else {
+                    return GPUI_STATUS_WRONG_NODE_KIND;
+                };
+                // Semantic validation happens here, against the owning text
+                // node, so gpui's panicking run machinery (`compute_runs` /
+                // `with_runs`) can never see a bad range. Sorted and
+                // non-overlapping falls out of "start >= previous end".
+                let (start, len) = (start as usize, len as usize);
+                let Some(end) = start.checked_add(len) else {
+                    return GPUI_STATUS_INVALID_TEXT_RUN;
+                };
+                if end > content.len()
+                    || !content.is_char_boundary(start)
+                    || !content.is_char_boundary(end)
+                    || runs.last().is_some_and(|prev| start < prev.start + prev.len)
+                {
+                    return GPUI_STATUS_INVALID_TEXT_RUN;
+                }
+                runs.push(TextRunSpec {
+                    start,
+                    len,
+                    flags: flags as i32,
+                    color: (r, g, b, a),
+                    weight,
+                    background: (br, bg, bb, ba),
+                });
+                GPUI_STATUS_OK
             }
             OP_TEXT_INPUT => {
                 let (Some(input_id), Some(placeholder)) =
@@ -3435,18 +3543,37 @@ fn render_node_inner(
             content,
             color: (r, g, b),
             size,
+            runs,
         } => {
             // The content string flows through unmodified (issue #16). The
             // first-glyph subpixel fix lives in `TextGlyphInset`, a
             // paint-time-only shim — see its doc comment and
             // `docs/troubleshooting.md` §2.
-            let text = div()
+            let mut text = div()
                 .text_color(rgb(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32)))
                 .text_size(px(*size))
                 // G24 headless harness: expose this text element's laid-out
                 // bounds under `text:<content>` (no-op without `test-support`).
-                .debug_selector(|| format!("text:{content}"))
-                .child(content.clone());
+                .debug_selector(|| format!("text:{content}"));
+            if runs.is_empty() {
+                // Single-style text: the pre-#91 path, unchanged.
+                text = text.child(content.clone());
+            } else {
+                // Rich text (issue #91): per-run overrides ride
+                // `StyledText::with_highlights`, whose delayed variant
+                // resolves the base style from `window.text_style()` at
+                // layout — i.e. the same inherited div style the plain path
+                // sees, so a run only overrides what its flags name. Ranges
+                // were validated at decode time (see `OP_TEXT_RUN`), which is
+                // what keeps gpui's panicking run machinery safe here.
+                let styled = StyledText::new(SharedString::from(content.clone()))
+                    .with_highlights(runs.iter().map(|run| {
+                        (run.start..run.start + run.len, highlight_for_run(run))
+                    }));
+                #[cfg(any(test, feature = "test-support"))]
+                text_layout_stash(content, styled.layout().clone());
+                text = text.child(styled);
+            }
             let inset = TextGlyphInset {
                 child: text.into_any_element(),
             };
@@ -3631,6 +3758,74 @@ impl IntoElement for ScrollFeedback {
     fn into_element(self) -> Self::Element {
         self
     }
+}
+
+/// Map one decoded run onto gpui's [`HighlightStyle`] (issue #91). Only the
+/// fields named by the run's `RUN_STYLE_*` flags are set; everything else
+/// stays `None`, which `StyledText::compute_runs` resolves as "inherit the
+/// base text style". Weight shares the decode-side 100–900 clamp contract
+/// with `OP_SET_FONT_WEIGHT`; underline/strikethrough take gpui's 1px default
+/// thickness and inherit the run's text color (`color: None`).
+fn highlight_for_run(run: &TextRunSpec) -> HighlightStyle {
+    let mut style = HighlightStyle::default();
+    if run.flags & RUN_STYLE_COLOR != 0 {
+        let (r, g, b, a) = run.color;
+        style.color = Some(
+            rgba(((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32)).into(),
+        );
+    }
+    if run.flags & RUN_STYLE_WEIGHT != 0 {
+        style.font_weight = Some(FontWeight(run.weight.clamp(100, 900) as f32));
+    }
+    if run.flags & RUN_STYLE_ITALIC != 0 {
+        style.font_style = Some(FontStyle::Italic);
+    }
+    if run.flags & RUN_STYLE_UNDERLINE != 0 {
+        style.underline = Some(UnderlineStyle {
+            thickness: px(1.),
+            color: None,
+            wavy: false,
+        });
+    }
+    if run.flags & RUN_STYLE_STRIKETHROUGH != 0 {
+        style.strikethrough = Some(StrikethroughStyle {
+            thickness: px(1.),
+            color: None,
+        });
+    }
+    if run.flags & RUN_STYLE_BACKGROUND != 0 {
+        let (r, g, b, a) = run.background;
+        style.background_color = Some(
+            rgba(((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32)).into(),
+        );
+    }
+    style
+}
+
+/// Test-only stash of rich-text [`TextLayout`] handles, keyed by content
+/// (issue #91). `TextLayout` is an `Rc` around the layout gpui fills in during
+/// draw, so a clone taken at render time lets a headless test map run
+/// boundaries to pixel positions (`position_for_index`) after the draw — the
+/// `debug_bounds` hook only exposes whole-element geometry, not intra-text
+/// positions. Thread-local because `TextLayout` is not `Send`; tests render
+/// and read on the same thread. Compiled out of the shipped staticlib.
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEXT_LAYOUTS: RefCell<HashMap<String, TextLayout>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn text_layout_stash(content: &str, layout: TextLayout) {
+    TEXT_LAYOUTS.with(|stash| {
+        stash.borrow_mut().insert(content.to_string(), layout);
+    });
+}
+
+/// Fetch the stashed layout handle for a rich-text node rendered on this
+/// thread. `None` when no rich-text node with this content has rendered.
+#[cfg(any(test, feature = "test-support"))]
+pub fn text_layout_for(content: &str) -> Option<TextLayout> {
+    TEXT_LAYOUTS.with(|stash| stash.borrow().get(content).cloned())
 }
 
 /// Paint-time-only wrapper that shifts a text element's prepaint origin by a
@@ -4110,6 +4305,7 @@ mod tests {
                         content,
                         color: (4, 5, 6),
                         size,
+                        ..
                     } if content == "A\0あ" && *size == 14.0
                 ));
             });
@@ -4249,6 +4445,7 @@ mod tests {
                         content,
                         color: (1, 2, 3),
                         size,
+                        ..
                     }) if content == "\u{FFFD}\u{FFFD}" && *size == 10.0
                 ));
             });
@@ -4729,6 +4926,13 @@ mod tests {
             ("OP_SET_TAB_INDEX", OP_SET_TAB_INDEX),
             ("OP_SET_TAB_STOP", OP_SET_TAB_STOP),
             ("OP_TEXT_INPUT", OP_TEXT_INPUT),
+            ("OP_TEXT_RUN", OP_TEXT_RUN),
+            ("RUN_STYLE_COLOR", RUN_STYLE_COLOR),
+            ("RUN_STYLE_WEIGHT", RUN_STYLE_WEIGHT),
+            ("RUN_STYLE_ITALIC", RUN_STYLE_ITALIC),
+            ("RUN_STYLE_UNDERLINE", RUN_STYLE_UNDERLINE),
+            ("RUN_STYLE_STRIKETHROUGH", RUN_STYLE_STRIKETHROUGH),
+            ("RUN_STYLE_BACKGROUND", RUN_STYLE_BACKGROUND),
             ("TEXT_ALIGN_DEFAULT", TEXT_ALIGN_DEFAULT),
             ("TEXT_ALIGN_LEFT", TEXT_ALIGN_LEFT),
             ("TEXT_ALIGN_CENTER", TEXT_ALIGN_CENTER),
@@ -5918,6 +6122,81 @@ mod tests {
         });
     }
 
+    // --- OP_TEXT_RUN decode + validation (issue #91) ------------------------
+
+    impl Buf {
+        /// One `OP_TEXT_RUN` record with every operand slot spelled out.
+        #[allow(clippy::too_many_arguments)]
+        fn text_run(
+            &mut self,
+            start: u32,
+            len: u32,
+            flags: i32,
+            color: (u8, u8, u8, u8),
+            weight: i32,
+            background: (u8, u8, u8, u8),
+        ) -> &mut Self {
+            self.op(OP_TEXT_RUN)
+                .u32(start)
+                .u32(len)
+                .u8(flags as u8)
+                .u8(color.0)
+                .u8(color.1)
+                .u8(color.2)
+                .u8(color.3)
+                .i32(weight)
+                .u8(background.0)
+                .u8(background.1)
+                .u8(background.2)
+                .u8(background.3)
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_run_decodes_onto_text_node_in_order() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.text("abcdef", 0, 0, 0, 12.0)
+                .text_run(
+                    0,
+                    2,
+                    RUN_STYLE_COLOR | RUN_STYLE_WEIGHT,
+                    (1, 2, 3, 4),
+                    700,
+                    (0, 0, 0, 0),
+                )
+                .text_run(3, 2, RUN_STYLE_ITALIC, (0, 0, 0, 0), 0, (0, 0, 0, 0))
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                let Some(UiNode::Text { runs, .. }) = &views[0] else {
+                    panic!("text root expected");
+                };
+                assert_eq!(
+                    runs,
+                    &vec![
+                        TextRunSpec {
+                            start: 0,
+                            len: 2,
+                            flags: RUN_STYLE_COLOR | RUN_STYLE_WEIGHT,
+                            color: (1, 2, 3, 4),
+                            weight: 700,
+                            background: (0, 0, 0, 0),
+                        },
+                        TextRunSpec {
+                            start: 3,
+                            len: 2,
+                            flags: RUN_STYLE_ITALIC,
+                            color: (0, 0, 0, 0),
+                            weight: 0,
+                            background: (0, 0, 0, 0),
+                        },
+                    ]
+                );
+            });
+        });
+    }
+
     #[::core::prelude::v1::test]
     fn scroll_id_on_text_is_wrong_node_kind() {
         with_test(|| {
@@ -5928,10 +6207,83 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn text_run_accepts_multibyte_char_boundaries() {
+        with_test(|| {
+            let mut b = Buf::new();
+            // "あいう" = 9 UTF-8 bytes; run over "い" (bytes 3..6).
+            b.text("あいう", 0, 0, 0, 12.0)
+                .text_run(3, 3, RUN_STYLE_WEIGHT, (0, 0, 0, 0), 700, (0, 0, 0, 0))
+                .set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_run_on_div_is_wrong_node_kind() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div()
+                .text_run(0, 0, 0, (0, 0, 0, 0), 0, (0, 0, 0, 0));
+            assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
+        });
+    }
+
+    #[::core::prelude::v1::test]
     fn scroll_id_truncated_operand_is_rejected() {
         with_test(|| {
             let mut b = Buf::new();
             b.div().op(OP_SET_SCROLL_ID).u8(1); // 1 of 4 operand bytes
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_run_rejects_out_of_bounds() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.text("ab", 0, 0, 0, 12.0)
+                .text_run(1, 5, 0, (0, 0, 0, 0), 0, (0, 0, 0, 0));
+            assert_eq!(b.build(0), GPUI_STATUS_INVALID_TEXT_RUN);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_run_rejects_non_char_boundary() {
+        with_test(|| {
+            let mut b = Buf::new();
+            // byte 1 is inside "あ"'s 3-byte encoding.
+            b.text("あ", 0, 0, 0, 12.0)
+                .text_run(1, 1, 0, (0, 0, 0, 0), 0, (0, 0, 0, 0));
+            assert_eq!(b.build(0), GPUI_STATUS_INVALID_TEXT_RUN);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_run_rejects_overlapping_or_unsorted_runs() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.text("abcdef", 0, 0, 0, 12.0)
+                .text_run(0, 3, 0, (0, 0, 0, 0), 0, (0, 0, 0, 0))
+                .text_run(2, 2, 0, (0, 0, 0, 0), 0, (0, 0, 0, 0));
+            assert_eq!(b.build(0), GPUI_STATUS_INVALID_TEXT_RUN);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_run_rejects_unknown_flag_bits() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.text("ab", 0, 0, 0, 12.0)
+                .text_run(0, 1, 0x40, (0, 0, 0, 0), 0, (0, 0, 0, 0));
+            assert_eq!(b.build(0), GPUI_STATUS_INVALID_TEXT_RUN);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_run_truncated_operands_are_rejected() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.text("ab", 0, 0, 0, 12.0).op(OP_TEXT_RUN).u32(0); // record cut short
             assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
         });
     }

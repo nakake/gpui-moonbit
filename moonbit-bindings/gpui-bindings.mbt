@@ -194,6 +194,35 @@ pub fn Color::transparent() -> Color {
   Color::rgba(0, 0, 0, 0)
 }
 
+///|
+/// 1 つの run に適用するスタイル上書きです。`None` / `false` のフィールドは
+/// ベーステキストのスタイルを継承します。どのフィールドを上書きするかの判定は
+/// flags ビットで Rust 側に渡されます。
+pub(all) struct RunStyle {
+  color : Color?
+  weight : Int?
+  italic : Bool
+  underline : Bool
+  strikethrough : Bool
+  background : Color?
+}
+
+///|
+/// `RunStyle` を省略可能な引数で生成します。全部の引数を省くと「何も上書きしない」
+/// 空のスタイルになります。`color` / `background` は `Color`（0–255、クランプ）を、
+/// `weight` は 100–900 の整数を渡してください。`italic` / `underline` /
+/// `strikethrough` はラベル付きブール（既定 `false`）です。
+pub fn RunStyle::new(
+  color? : Color,
+  weight? : Int,
+  italic? : Bool = false,
+  underline? : Bool = false,
+  strikethrough? : Bool = false,
+  background? : Color,
+) -> RunStyle {
+  { color, weight, italic, underline, strikethrough, background }
+}
+
 // MoonBit's native `String` is UTF-16, so encode it to UTF-8 for the byte-based
 // Rust FFI. The explicit byte length means no NUL terminator is needed.
 
@@ -257,6 +286,97 @@ pub fn CommandBuffer::text(
   self.buf.write_byte(clamp_color_component(g).to_byte())
   self.buf.write_byte(clamp_color_component(b).to_byte())
   self.buf.write_float_le(size)
+}
+
+///|
+/// 直前にプッシュしたテキストノードに run を 1 つ追記します（issue #91）。
+/// `start` / `len` は直前の `OP_TEXT` の content への **UTF-8 バイト**オフセット /
+/// バイト長です。run は start 昇順・互いに非重複・文字境界揃えでなければならず、
+/// 違反したバッファは Rust デコーダが**バッファごと**拒否します。`style` で上書き
+/// したいフィールドだけを指定し、立っていないフィールドはベーステキストのスタイルを
+/// 継承します（flags ビットで表現）。オフセット計算を自前でやりたくない場合は
+/// `rich_text` を使ってください。
+pub fn CommandBuffer::text_run(
+  self : CommandBuffer,
+  start : Int,
+  len : Int,
+  style : RunStyle,
+) -> Unit {
+  self.op(OP_TEXT_RUN)
+  self.buf.write_uint_le(start.reinterpret_as_uint())
+  self.buf.write_uint_le(len.reinterpret_as_uint())
+  let mut flags : Int = 0
+  if style.color is Some(_) {
+    flags = flags | RUN_STYLE_COLOR
+  }
+  if style.weight is Some(_) {
+    flags = flags | RUN_STYLE_WEIGHT
+  }
+  if style.italic {
+    flags = flags | RUN_STYLE_ITALIC
+  }
+  if style.underline {
+    flags = flags | RUN_STYLE_UNDERLINE
+  }
+  if style.strikethrough {
+    flags = flags | RUN_STYLE_STRIKETHROUGH
+  }
+  if style.background is Some(_) {
+    flags = flags | RUN_STYLE_BACKGROUND
+  }
+  self.buf.write_byte(flags.to_byte())
+  match style.color {
+    Some(c) => {
+      self.buf.write_byte(clamp_color_component(c.red).to_byte())
+      self.buf.write_byte(clamp_color_component(c.green).to_byte())
+      self.buf.write_byte(clamp_color_component(c.blue).to_byte())
+      self.buf.write_byte(clamp_color_component(c.alpha).to_byte())
+    }
+    None => self.buf.write_uint_le(0)
+  }
+  match style.weight {
+    Some(weight) => self.buf.write_int_le(weight)
+    None => self.buf.write_int_le(0)
+  }
+  match style.background {
+    Some(c) => {
+      self.buf.write_byte(clamp_color_component(c.red).to_byte())
+      self.buf.write_byte(clamp_color_component(c.green).to_byte())
+      self.buf.write_byte(clamp_color_component(c.blue).to_byte())
+      self.buf.write_byte(clamp_color_component(c.alpha).to_byte())
+    }
+    None => self.buf.write_uint_le(0)
+  }
+}
+
+///|
+/// 複数セグメントを 1 つのテキストノードとして描画します（issue #91）。
+/// 全セグメントの文字列を連結して `text(full, r, g, b, size)` を呼び、続けて
+/// `Some` のスタイルを持つセグメントに対してだけ `text_run` を発行します。
+/// 呼び出し側はバイトオフセットを意識する必要はありません（UTF-8 バイト位置は
+/// ここで自動計算されます）。`None` のセグメントはベーススタイルのまま表示されます。
+pub fn CommandBuffer::rich_text(
+  self : CommandBuffer,
+  segments : Array[(String, RunStyle?)],
+  r : Int,
+  g : Int,
+  b : Int,
+  size : Float,
+) -> Unit {
+  let mut full = ""
+  for seg in segments {
+    full = full + seg.0
+  }
+  self.text(full, r, g, b, size)
+  let mut offset = 0
+  for seg in segments {
+    let byte_len = to_utf8_bytes(seg.0).length()
+    match seg.1 {
+      Some(style) => self.text_run(offset, byte_len, style)
+      None => ()
+    }
+    offset = offset + byte_len
+  }
 }
 
 ///|

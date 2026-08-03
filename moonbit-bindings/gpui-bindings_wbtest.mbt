@@ -592,3 +592,148 @@ test "read_f32_le decodes the six f32 fields of a scroll state" {
 // verified by the Rust-side suite (gpui-sys/scroll_feedback_tests.rs) and
 // belongs in the linked round-trip binary (cmd/roundtrip) alongside the other
 // FFI smoke tests.
+
+// --- text_run / rich_text wire format (issue #91) ---------------------------
+//
+// OP_TEXT_RUN is ABI-frozen at 39; the record is a fixed 22 bytes:
+// opcode u8 | start u32 LE | len u32 LE | flags u8 | r,g,b,a u8x4 |
+// weight i32 LE | br,bg,bb,ba u8x4. Unset fields still occupy their slot
+// (zero-filled), so the total run size never varies with the style flags.
+
+///|
+test "text_run wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.text("abc", 0, 0, 0, 1.0)
+  cb.text_run(0, 1, RunStyle::new(color=Color::rgba(1, 2, 3, 4), weight=700))
+  cb.set_root()
+  let b = cb.to_bytes()
+  // OP_TEXT: opcode@8, len@9-12, "abc"@13-15, rgb@16-18, f32@19-22.
+  assert_eq(b[8].to_int(), OP_TEXT)
+  assert_eq(read_u32_le(b, 9), 3)
+  assert_eq(b[13], b'a')
+  assert_eq(b[14], b'b')
+  assert_eq(b[15], b'c')
+  // OP_TEXT_RUN starts at byte 23: opcode | start u32 | len u32 | flags u8.
+  assert_eq(b[23].to_int(), OP_TEXT_RUN)
+  assert_eq(read_u32_le(b, 24), 0)
+  assert_eq(read_u32_le(b, 28), 1)
+  assert_eq(b[32].to_int(), RUN_STYLE_COLOR | RUN_STYLE_WEIGHT)
+  // color slot r,g,b,a.
+  assert_eq(b[33], b'\x01')
+  assert_eq(b[34], b'\x02')
+  assert_eq(b[35], b'\x03')
+  assert_eq(b[36], b'\x04')
+  // weight i32 LE = 700 -> BC 02 00 00.
+  assert_eq(b[37], b'\xBC')
+  assert_eq(b[38], b'\x02')
+  assert_eq(b[39], b'\x00')
+  assert_eq(b[40], b'\x00')
+  // background slot is zero-filled even though not set.
+  assert_eq(b[41], b'\x00')
+  assert_eq(b[42], b'\x00')
+  assert_eq(b[43], b'\x00')
+  assert_eq(b[44], b'\x00')
+  assert_eq(b[45].to_int(), OP_SET_ROOT)
+  assert_eq(b.length(), 46)
+}
+
+///|
+test "text_run flag-only styles and background" {
+  let cb = CommandBuffer::new()
+  cb.text("a", 0, 0, 0, 1.0)
+  cb.text_run(
+    0,
+    1,
+    RunStyle::new(
+      italic=true,
+      underline=true,
+      strikethrough=true,
+      background=Color::rgba(9, 8, 7, 6),
+    ),
+  )
+  let b = cb.to_bytes()
+  // OP_TEXT: opcode@8, len@9-12, "a"@13, rgb@14-16, f32@17-20.
+  assert_eq(b[8].to_int(), OP_TEXT)
+  assert_eq(read_u32_le(b, 9), 1)
+  // OP_TEXT_RUN starts at byte 21.
+  assert_eq(b[21].to_int(), OP_TEXT_RUN)
+  assert_eq(read_u32_le(b, 22), 0)
+  assert_eq(read_u32_le(b, 26), 1)
+  let flags = RUN_STYLE_ITALIC |
+    RUN_STYLE_UNDERLINE |
+    RUN_STYLE_STRIKETHROUGH |
+    RUN_STYLE_BACKGROUND
+  assert_eq(b[30].to_int(), flags)
+  // color slot is zero-filled (color not set).
+  assert_eq(b[31], b'\x00')
+  assert_eq(b[32], b'\x00')
+  assert_eq(b[33], b'\x00')
+  assert_eq(b[34], b'\x00')
+  // weight is zero-filled (weight not set).
+  assert_eq(b[35], b'\x00')
+  assert_eq(b[36], b'\x00')
+  assert_eq(b[37], b'\x00')
+  assert_eq(b[38], b'\x00')
+  // background slot carries the set color.
+  assert_eq(b[39], b'\x09')
+  assert_eq(b[40], b'\x08')
+  assert_eq(b[41], b'\x07')
+  assert_eq(b[42], b'\x06')
+  assert_eq(b.length(), 43)
+}
+
+///|
+test "rich_text computes UTF-8 byte offsets" {
+  let cb = CommandBuffer::new()
+  cb.rich_text(
+    [("あ", None), ("いう", Some(RunStyle::new(weight=700))), ("x", None)],
+    0,
+    0,
+    0,
+    1.0,
+  )
+  cb.set_root()
+  let b = cb.to_bytes()
+  // Concatenated "あいうx" is 10 UTF-8 bytes (3+3+3+1).
+  assert_eq(b[8].to_int(), OP_TEXT)
+  assert_eq(read_u32_le(b, 9), 10)
+  // OP_TEXT_RUN is emitted once, at byte 30 (8 + 1+4+10+3+4).
+  assert_eq(b[30].to_int(), OP_TEXT_RUN)
+  // start = 3 ("あ"), len = 6 ("いう").
+  assert_eq(read_u32_le(b, 31), 3)
+  assert_eq(read_u32_le(b, 35), 6)
+  assert_eq(b[39].to_int(), RUN_STYLE_WEIGHT)
+  // color slot zero-filled, weight = 700.
+  assert_eq(b[40], b'\x00')
+  assert_eq(b[41], b'\x00')
+  assert_eq(b[42], b'\x00')
+  assert_eq(b[43], b'\x00')
+  assert_eq(b[44], b'\xBC')
+  assert_eq(b[45], b'\x02')
+  assert_eq(b[46], b'\x00')
+  assert_eq(b[47], b'\x00')
+  // background slot zero-filled.
+  assert_eq(b[48], b'\x00')
+  assert_eq(b[49], b'\x00')
+  assert_eq(b[50], b'\x00')
+  assert_eq(b[51], b'\x00')
+  // A single 22-byte run ends at byte 51; OP_SET_ROOT follows at 52.
+  assert_eq(b[52].to_int(), OP_SET_ROOT)
+  assert_eq(b.length(), 53)
+}
+
+///|
+test "rich_text with no styled segments emits no runs" {
+  let cb = CommandBuffer::new()
+  cb.rich_text([("ab", None), ("cd", None)], 0, 0, 0, 1.0)
+  cb.set_root()
+  let cb2 = CommandBuffer::new()
+  cb2.text("abcd", 0, 0, 0, 1.0)
+  cb2.set_root()
+  let a = cb.to_bytes()
+  let b = cb2.to_bytes()
+  assert_eq(a.length(), b.length())
+  for i in 0..<a.length() {
+    assert_eq(a[i], b[i])
+  }
+}

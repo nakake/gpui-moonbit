@@ -71,7 +71,7 @@ OP_SET_FOCUSABLE = 35
 OP_SET_TAB_INDEX = 36
 OP_SET_TAB_STOP = 37
 OP_TEXT_INPUT = 38
-# 39 is reserved for OP_TEXT_RUN (issue #91, developed in parallel).
+OP_TEXT_RUN = 39
 OP_SET_SCROLL_ID = 40
 
 # G7 style enum values. These are operand values (not opcodes); they share the
@@ -130,6 +130,18 @@ WHITESPACE_NORMAL = 1
 WHITESPACE_NOWRAP = 2
 WHITESPACE_PRE = 3
 WHITESPACE_PRE_WRAP = 4
+
+# OP_TEXT_RUN style-presence bitflags (issue #91). Fields absent from the flags
+# byte keep the run on the base text style, so a run record always carries every
+# operand slot and the flags decide which ones apply.
+
+[run_style]
+RUN_STYLE_COLOR = 1
+RUN_STYLE_WEIGHT = 2
+RUN_STYLE_ITALIC = 4
+RUN_STYLE_UNDERLINE = 8
+RUN_STYLE_STRIKETHROUGH = 16
+RUN_STYLE_BACKGROUND = 32
 
 [buffer]
 BUFFER_VERSION = 1

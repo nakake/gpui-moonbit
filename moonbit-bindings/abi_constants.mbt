@@ -196,6 +196,9 @@ pub const OP_SET_TAB_STOP : Int = 37
 pub const OP_TEXT_INPUT : Int = 38
 
 ///|
+pub const OP_TEXT_RUN : Int = 39
+
+///|
 pub const OP_SET_SCROLL_ID : Int = 40
 
 ///|
@@ -311,6 +314,24 @@ pub const WHITESPACE_PRE : Int = 3
 
 ///|
 pub const WHITESPACE_PRE_WRAP : Int = 4
+
+///|
+pub const RUN_STYLE_COLOR : Int = 1
+
+///|
+pub const RUN_STYLE_WEIGHT : Int = 2
+
+///|
+pub const RUN_STYLE_ITALIC : Int = 4
+
+///|
+pub const RUN_STYLE_UNDERLINE : Int = 8
+
+///|
+pub const RUN_STYLE_STRIKETHROUGH : Int = 16
+
+///|
+pub const RUN_STYLE_BACKGROUND : Int = 32
 
 ///|
 pub const BUFFER_VERSION : Int = 1
