@@ -52,3 +52,13 @@ test "reads do not dirty the store" {
   ignore(s.get(cell))
   assert_eq(s.has_dirty(), false)
 }
+
+// NOTE: the `decode_event(EVENT_SCROLL -> Scroll)` and stale-version mappings
+// are not written as `moon test` cases here because `decode_event` transitively
+// calls the Rust FFI copy (`gpui_event_copy_text` in the EVENT_TEXT branch), a
+// symbol the root package's test executable does not link (link/link.mbt).
+// The same holds for the `gpui_scroll_copy_state`-driven `scroll_state`. These
+// uint16 cross-boundary mappings are instead verified by the Rust-side suite
+// (gpui-sys/scroll_feedback_tests.rs) and should live in the linked round-trip
+// binary (cmd/roundtrip) when it is exercised, per the repo's existing pattern
+// for FFI smoke tests.

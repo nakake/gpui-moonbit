@@ -6,18 +6,27 @@
 // Normal completion = pass (exit 0); abort = non-zero exit.
 
 // Direct FFI declarations (not in root package → moon test unaffected).
+///|
 #borrow(ptr)
 extern "C" fn gpui_build_tree_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "gpui_build_tree"
 
+///|
 #borrow(buf)
-extern "C" fn gpui_debug_dump_text_ffi(view : Int, buf : Bytes, len : Int) -> Int = "gpui_debug_dump_text"
+extern "C" fn gpui_debug_dump_text_ffi(
+  view : Int,
+  buf : Bytes,
+  len : Int,
+) -> Int = "gpui_debug_dump_text"
 
 // Cross-boundary ABI probe (issue #54, G23): echo i32 boundary values through
 // Rust and back. MoonBit native `Int` must be ABI-compatible with Rust `i32`
 // for the whole bridge; a width/sign mismatch corrupts silently, so we fail
 // the build here instead.
+
+///|
 extern "C" fn gpui_abi_probe_ffi(value : Int) -> Int = "gpui_abi_probe"
 
+///|
 fn main {
   // Retain app.dispatch so the Rust staticlib's mb_dispatch reference resolves.
   let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
@@ -190,9 +199,44 @@ fn main {
     0,
   )
   if changed_submit != 0 {
-    abort("dispatch(submit) returned \{changed_submit}, want 0 (pull fails headless)")
+    abort(
+      "dispatch(submit) returned \{changed_submit}, want 0 (pull fails headless)",
+    )
   }
-  println("PASS: input smoke verified (pull ABI links, submit routes, headless -1)")
+  println(
+    "PASS: input smoke verified (pull ABI links, submit routes, headless -1)",
+  )
+
+  // Scroll-feedback smoke (issue #89): the pull export must link and behave
+  // across the boundary. Nothing has painted headlessly, so the mirror is
+  // empty: an unknown pair must propagate GPUI_STATUS_KEY_NOT_FOUND (-10) and
+  // an invalid view GPUI_STATUS_INVALID_HANDLE (-1), not crash. EVENT_SCROLL
+  // decodes and routes; with no handler registered dispatch returns 0.
+  match @nakake/gpui-bindings.scroll_state(0, 12345) {
+    Ok(_) => abort("scroll_state unexpectedly succeeded headless")
+    Err(s) =>
+      if s != -10 {
+        abort("scroll_state returned \{s}, want -10 (KEY_NOT_FOUND)")
+      }
+  }
+  match @nakake/gpui-bindings.scroll_state(-1, 1) {
+    Ok(_) => abort("scroll_state(-1) unexpectedly succeeded")
+    Err(s) =>
+      if s != -1 {
+        abort("scroll_state(-1) returned \{s}, want -1 (INVALID_HANDLE)")
+      }
+  }
+  let changed_scroll = @nakake/gpui-bindings/app.dispatch(
+    @nakake/gpui-bindings.ABI_VERSION,
+    @nakake/gpui-bindings.EVENT_SCROLL,
+    0,
+    12345, // no handler registered for this scroll_id
+    0,
+  )
+  if changed_scroll != 0 {
+    abort("dispatch(scroll) returned \{changed_scroll}, want 0 (no handler)")
+  }
+  println("PASS: scroll smoke verified (pull ABI links, headless -10/-1)")
 
   println("PASS: round-trip verified (\{n} bytes)")
 }

@@ -52,6 +52,26 @@ pub type InputChangedHandler = (Int) -> Unit
 pub type InputSubmitHandler = (Int) -> Unit
 
 ///|
+/// スクロール変化ハンドラ（issue #89）。envelope の view id を受け取ります。
+/// 現在の位置は必要に応じて `scroll_state(view, scroll_id)` で pull します（通知専用）。
+pub type ScrollHandler = (Int) -> Unit
+
+///|
+/// スクロール位置フィードバックの購読に使う型付き id です（issue #89）。中身は
+/// `HandlerRegistry::new_scroll_id` が発行する整数ですが、型で区別することで
+/// `HandlerId` / `InputId` や envelope の生の `scroll_id` と混同することを防ぎます。
+/// `CommandBuffer::set_scroll_id` には `to_int()` で渡します。
+pub(all) struct ScrollId {
+  raw : Int
+}
+
+///|
+/// スクロール id を `CommandBuffer::set_scroll_id` に渡せる生の整数へ変換します。
+pub fn ScrollId::to_int(self : ScrollId) -> Int {
+  self.raw
+}
+
+///|
 /// クリックハンドラの型付き id です。中身は `HandlerRegistry` が発行する整数ですが、
 /// 型で区別することで生の `click_id`（envelope の `data_a`）や他の整数と混同する
 /// ことを防ぎます。`set_on_click` には `to_int()` で渡します。
@@ -88,6 +108,7 @@ pub(all) struct HandlerRegistry {
   click : Map[Int, ClickHandler]
   input_changed : Map[Int, InputChangedHandler]
   input_submit : Map[Int, InputSubmitHandler]
+  scroll : Map[Int, ScrollHandler]
   key : Array[(Int, KeyHandler)]
   named_key : Array[(Int, NamedKeyHandler)]
   text : Array[(Int, TextHandler)]
@@ -103,6 +124,7 @@ pub fn HandlerRegistry::new() -> HandlerRegistry {
     click: Map([]),
     input_changed: Map([]),
     input_submit: Map([]),
+    scroll: Map([]),
     key: [],
     named_key: [],
     text: [],
@@ -154,6 +176,28 @@ pub fn HandlerRegistry::on_submit(
   h : InputSubmitHandler,
 ) -> Unit {
   self.input_submit[input_id.raw] = h
+}
+
+///|
+/// スクロール位置フィードバックの購読 id を発行します（issue #89）。click / input id と
+/// 同じ共有カウンタから単調に発行されますが、レジストリへのハンドラ登録は伴いません。
+/// 発行した id は `CommandBuffer::set_scroll_id` でワイヤに書き込み、`on_scroll` で
+/// その id へのハンドラを登録します。
+pub fn HandlerRegistry::new_scroll_id(self : HandlerRegistry) -> ScrollId {
+  let id = self.next_id
+  self.next_id = id + 1
+  { raw: id }
+}
+
+///|
+/// `scroll_id` のスクロール div に対する変化ハンドラ（issue #89、`EVENT_SCROLL`）を
+/// 登録します。id ごとの単一配送で、同じ id への再登録は前のハンドラを置き換えます。
+pub fn HandlerRegistry::on_scroll(
+  self : HandlerRegistry,
+  scroll_id : ScrollId,
+  h : ScrollHandler,
+) -> Unit {
+  self.scroll[scroll_id.raw] = h
 }
 
 ///|
@@ -219,6 +263,11 @@ pub fn HandlerRegistry::dispatch(
       }
     InputSubmit(input_id) =>
       match self.input_submit.get(input_id) {
+        Some(h) => h(view)
+        None => ()
+      }
+    Scroll(scroll_id) =>
+      match self.scroll.get(scroll_id) {
         Some(h) => h(view)
         None => ()
       }

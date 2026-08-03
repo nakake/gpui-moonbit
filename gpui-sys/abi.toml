@@ -8,6 +8,7 @@ EVENT_NAMED_KEY = 4
 EVENT_ASYNC = 5
 EVENT_INPUT_CHANGED = 6
 EVENT_INPUT_SUBMIT = 7
+EVENT_SCROLL = 8
 
 [modifiers]
 MOD_CTRL = 1
@@ -70,6 +71,8 @@ OP_SET_FOCUSABLE = 35
 OP_SET_TAB_INDEX = 36
 OP_SET_TAB_STOP = 37
 OP_TEXT_INPUT = 38
+# 39 is reserved for OP_TEXT_RUN (issue #91, developed in parallel).
+OP_SET_SCROLL_ID = 40
 
 # G7 style enum values. These are operand values (not opcodes); they share the
 # same constant-generation + cross-boundary drift guard as the opcodes above so

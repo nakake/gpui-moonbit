@@ -132,3 +132,39 @@ test "ids are shared across handler kinds" {
   let e = r.new_input_id().to_int()
   assert_eq([a, b, c, d, e], [1, 2, 3, 4, 5])
 }
+
+///|
+test "new_scroll_id issues distinct ids sharing the handler counter" {
+  let r = HandlerRegistry::new()
+  let click = r.on_click(fn(_) {  }).to_int()
+  let a = r.new_scroll_id().to_int()
+  let b = r.new_scroll_id().to_int()
+  // Ids come off one shared counter: click took 1, the scroll ids take 2 and 3.
+  assert_eq([click, a, b], [1, 2, 3])
+  if a == b {
+    fail("scroll ids must be distinct")
+  }
+}
+
+///|
+test "scroll handlers dispatch by scroll_id only" {
+  let r = HandlerRegistry::new()
+  let log : Array[Int] = []
+  let a = r.new_scroll_id()
+  let b = r.new_scroll_id()
+  r.on_scroll(a, fn(view) { log.push(100 + view) })
+  r.on_scroll(b, fn(view) { log.push(200 + view) })
+  r.dispatch(Scroll(a.to_int()), 7)
+  r.dispatch(Scroll(b.to_int()), 3)
+  assert_eq(log, [107, 203])
+}
+
+///|
+test "unknown scroll id is a no-op" {
+  let r = HandlerRegistry::new()
+  let log : Array[Int] = []
+  let a = r.new_scroll_id()
+  r.on_scroll(a, fn(_) { log.push(1) })
+  r.dispatch(Scroll(999), 0)
+  assert_eq(log, [])
+}

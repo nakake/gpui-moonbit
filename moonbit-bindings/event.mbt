@@ -26,6 +26,7 @@ pub(all) enum Event {
   Async(Bytes) // 注入イベント（RFC 0002）。ペイロードは opaque bytes で解釈は消費側の契約
   InputChanged(Int) // テキスト入力の変化通知（RFC 0003）。input_id を運ぶ。ペイロードなし（pull 型）
   InputSubmit(Int) // テキスト入力の確定（RFC 0003、フォーカス中の Enter）。input_id を運ぶ
+  Scroll(Int) // スクロール位置の変化通知（issue #89）。scroll_id を運ぶ。ペイロードなし（pull 型、scroll_state で読む）
   Unknown
 }
 
@@ -74,6 +75,10 @@ pub fn decode_event(
     InputChanged(data_a)
   } else if kind == EVENT_INPUT_SUBMIT {
     InputSubmit(data_a)
+  } else if kind == EVENT_SCROLL {
+    // issue #89: data_a = scroll_id, data_b = 0. No payload rides the envelope;
+    // the current position is pulled with `scroll_state(view, scroll_id)`.
+    Scroll(data_a)
   } else {
     Unknown
   }
