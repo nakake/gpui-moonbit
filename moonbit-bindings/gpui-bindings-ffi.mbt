@@ -65,3 +65,12 @@ extern "C" fn gpui_input_set_text_ffi(
   ptr : Bytes,
   len : Int,
 ) -> Int = "gpui_input_set_text"
+
+///|
+#borrow(buf)
+extern "C" fn gpui_scroll_copy_state_ffi(
+  view : Int,
+  scroll_id : Int,
+  buf : Bytes,
+  len : Int,
+) -> Int = "gpui_scroll_copy_state"

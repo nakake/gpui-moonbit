@@ -22,7 +22,7 @@ use abi_constants::{
     BUFFER_VERSION, CURSOR_ARROW, CURSOR_COL_RESIZE, CURSOR_CROSSHAIR, CURSOR_EW_RESIZE,
     CURSOR_GRAB, CURSOR_GRABBING, CURSOR_NONE, CURSOR_NOT_ALLOWED, CURSOR_NS_RESIZE,
     CURSOR_POINTER, CURSOR_ROW_RESIZE, CURSOR_TEXT, EVENT_ASYNC, EVENT_CLICK,
-    EVENT_INPUT_CHANGED, EVENT_INPUT_SUBMIT, EVENT_KEY, EVENT_NAMED_KEY, EVENT_TEXT,
+    EVENT_INPUT_CHANGED, EVENT_INPUT_SUBMIT, EVENT_KEY, EVENT_NAMED_KEY, EVENT_SCROLL, EVENT_TEXT,
     JUSTIFY_CENTER, JUSTIFY_DEFAULT, JUSTIFY_END,
     JUSTIFY_SPACE_AROUND, JUSTIFY_SPACE_BETWEEN, JUSTIFY_START, KEY_BACKSPACE, KEY_DELETE,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGEUP, KEY_PAGEDOWN,
@@ -32,7 +32,8 @@ use abi_constants::{
     OP_SET_FONT_FAMILY, OP_SET_FONT_WEIGHT, OP_SET_GAP, OP_SET_INSET, OP_SET_KEY,
     OP_SET_LINE_HEIGHT, OP_SET_MARGIN, OP_SET_MAX_SIZE, OP_SET_MIN_SIZE, OP_SET_ON_CLICK,
     OP_SET_OPACITY, OP_SET_OVERFLOW, OP_SET_PADDING, OP_SET_PADDING_SIDES, OP_SET_POSITION,
-    OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SHADOW, OP_SET_SIZE, OP_SET_TAB_INDEX, OP_SET_TAB_STOP,
+    OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SCROLL_ID, OP_SET_SHADOW, OP_SET_SIZE, OP_SET_TAB_INDEX,
+    OP_SET_TAB_STOP,
     OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE, OP_SET_WHITESPACE, OP_TEXT,
     OP_TEXT_INPUT, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, OVERFLOW_VISIBLE, POSITION_ABSOLUTE,
     POSITION_RELATIVE,
@@ -129,8 +130,12 @@ pub const GPUI_STATUS_DEPTH_EXCEEDED: i32 = -15;
 //   EVENT_CLICK: data_a = click_id, data_b = 0
 //   EVENT_KEY:   data_a = codepoint (single-char key), data_b = modifier bits
 //   EVENT_TEXT:  data_a = token (index into EVENT_QUEUE), data_b = byte length
+//   EVENT_SCROLL: data_a = scroll_id (OP_SET_SCROLL_ID), data_b = 0
 // For EVENT_TEXT the UTF-8 payload lives in a Rust-owned queue; MoonBit copies
 // it synchronously via `gpui_event_copy_text` before returning from dispatch.
+// EVENT_SCROLL is notify-only (RFC 0003's notify-then-pull contract): the
+// offset itself is read via `gpui_scroll_copy_state`, so a coalesced or missed
+// event can never leave MoonBit acting on stale numbers.
 //
 // Generates: `unsafe extern "C" { #[link_name = "_M0FP…3app8dispatch"] fn mb_dispatch(version: i32, kind: i32, view: i32, data_a: i32, data_b: i32) -> i32; }`
 include!(concat!(env!("OUT_DIR"), "/mb_extern.rs"));
@@ -704,6 +709,14 @@ enum UiNode {
         /// `render_node` uses it as the GPUI `ElementId`; duplicate keys within
         /// a committed tree are rejected at `commit_tree`.
         key: Option<String>,
+        // --- Scroll position feedback (issue #89) ------------------------
+        /// Feedback subscription id (`OP_SET_SCROLL_ID`). When set on a
+        /// scrollable div, every settled offset change dispatches
+        /// `EVENT_SCROLL` with this id and the current state is readable via
+        /// the `gpui_scroll_copy_state` pull ABI. Position retention still
+        /// requires `key` — without one the handle is fresh each rebuild, so
+        /// the reported offset resets with it.
+        scroll_id: Option<i32>,
         children: Vec<UiNode>,
     },
     Text {
@@ -814,6 +827,7 @@ fn push_node(nodes: &mut Vec<Option<UiNode>>, node: UiNode) -> i32 {
 //   OP_SET_FOCUSABLE  u8 | mode i32                         (0 = not focusable, nonzero = focusable)
 //   OP_SET_TAB_INDEX  u8 | index i32                        (tab order; also marks focusable + tab stop)
 //   OP_SET_TAB_STOP   u8 | mode i32                         (0 = skip in Tab nav, nonzero = tab stop)
+//   OP_SET_SCROLL_ID  u8 | scroll_id i32                    (scroll feedback subscription, issue #89)
 //   OP_ADD_CHILD      u8            (pops child, then parent; re-pushes parent)
 //   OP_SET_ROOT       u8            (pops the root)
 //
@@ -1018,6 +1032,7 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                         tab_index: None,
                         tab_stop: None,
                         key: None,
+                        scroll_id: None,
                         children: Vec::new(),
                     },
                 );
@@ -1557,6 +1572,18 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                     _ => unreachable!("with_top_div guarantees a div"),
                 })
             }
+            OP_SET_SCROLL_ID => {
+                let Some(sid) = reader.read_i32() else {
+                    return GPUI_STATUS_TRUNCATED_BUFFER;
+                };
+                with_top_div(&stack, &mut nodes, |node| match node {
+                    UiNode::Div { scroll_id, .. } => {
+                        *scroll_id = Some(sid);
+                        GPUI_STATUS_OK
+                    }
+                    _ => unreachable!("with_top_div guarantees a div"),
+                })
+            }
             OP_ADD_CHILD => {
                 let (Some(child), Some(parent)) = (stack.pop(), stack.pop()) else {
                     return GPUI_STATUS_INVALID_HANDLE;
@@ -1619,21 +1646,31 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
     if nodes[root_index].is_none() {
         return GPUI_STATUS_NODE_ABSENT;
     }
+    let live_scroll_ids;
     {
         // One iterative pass validates both invariants that span the whole
         // tree: unique keys, and a bounded nesting depth. Depth is carried on
         // the walk stack rather than derived from the decoder's stack, because
         // the two are not the same number — a subtree can be built shallow and
         // then nested under a fresh parent, so only the committed shape says
-        // how deep the walkers will actually recurse (issue #74).
+        // how deep the walkers will actually recurse (issue #74). The same
+        // pass collects the tree's scroll feedback ids so the mirror can drop
+        // entries a rebuild removed (issue #89).
         let mut seen = std::collections::HashSet::new();
+        let mut scroll_ids = std::collections::HashSet::new();
         let root_ref = nodes[root_index].as_ref().expect("root present");
         let mut walk: Vec<(&UiNode, u32)> = vec![(root_ref, 1)];
         while let Some((node, depth)) = walk.pop() {
             if depth > MAX_TREE_DEPTH {
                 return GPUI_STATUS_DEPTH_EXCEEDED;
             }
-            let UiNode::Div { key, children, .. } = node else {
+            let UiNode::Div {
+                key,
+                children,
+                scroll_id,
+                ..
+            } = node
+            else {
                 continue;
             };
             if let Some(key) = key {
@@ -1641,8 +1678,12 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
                     return GPUI_STATUS_DUPLICATE_KEY;
                 }
             }
+            if let Some(sid) = scroll_id {
+                scroll_ids.insert(*sid);
+            }
             walk.extend(children.iter().map(|child| (child, depth + 1)));
         }
+        live_scroll_ids = scroll_ids;
     }
     let root_node = nodes[root_index].take().expect("root presence was validated");
     let mut views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1650,6 +1691,8 @@ fn build_tree_from_buffer(view: usize, data: &[u8]) -> i32 {
         views.resize(view + 1, None);
     }
     views[view] = Some(root_node);
+    drop(views);
+    scroll_mirror_prune(view as i32, &live_scroll_ids);
     GPUI_STATUS_OK
 }
 
@@ -1882,6 +1925,73 @@ fn mirror_get(view: i32, input_id: i32) -> Option<InputMirrorEntry> {
 fn take_input_dirty() -> i32 {
     let mut guard = INPUT_DIRTY.lock().unwrap_or_else(|e| e.into_inner());
     if std::mem::take(&mut *guard) { 1 } else { 0 }
+}
+
+// --- Scroll position feedback (issue #89) -----------------------------------
+//
+// gpui owns scroll state: its wheel handler mutates the tracked `ScrollHandle`
+// from a paint-registered listener and prepaint clamps the offset to the
+// content bounds, so there is no Rust-side commit point to intercept — the
+// settled value only exists after a draw. The `ScrollFeedback` wrapper element
+// therefore observes the offset on every paint of the subscribed div, mirrors
+// it for the pull ABI (the C exports have no `App` context — the same
+// constraint that motivates `INPUT_MIRROR`), and defers a payload-free
+// `EVENT_SCROLL` dispatch when the offset differs from the last one announced.
+// MoonBit reads the numbers via `gpui_scroll_copy_state`, following RFC 0003's
+// notify-then-pull contract: a coalesced or dropped event can never leave the
+// consumer acting on stale data, because the pull always returns the current
+// state.
+
+/// Mirrored scroll state for the pull ABI, refreshed on every paint of the
+/// subscribed div. All values are f32 px in gpui's scroll-space convention:
+/// offsets are ≤ 0 (content scrolled down/right makes them more negative),
+/// `max` is the positive scrollable extent, `viewport` is the container's
+/// laid-out size.
+#[derive(Default, Clone, Copy, PartialEq)]
+struct ScrollMirrorEntry {
+    offset: (f32, f32),
+    max: (f32, f32),
+    viewport: (f32, f32),
+}
+
+static SCROLL_MIRROR: Mutex<Option<HashMap<(i32, i32), ScrollMirrorEntry>>> = Mutex::new(None);
+
+/// Last offset per (view, scroll_id) whose change was announced. Kept apart
+/// from `SCROLL_MIRROR` because the two answer different questions: the mirror
+/// is "what is the state now" (refreshed every paint), this is "what did
+/// MoonBit last hear" (edge detection). The first observation seeds the entry
+/// without dispatching — nothing has scrolled yet, and the initial position is
+/// always pullable.
+static SCROLL_SENT: Mutex<Option<HashMap<(i32, i32), (f32, f32)>>> = Mutex::new(None);
+
+fn scroll_mirror_update(view: i32, scroll_id: i32, entry: ScrollMirrorEntry) {
+    let mut guard = SCROLL_MIRROR.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert((view, scroll_id), entry);
+}
+
+fn scroll_mirror_get(view: i32, scroll_id: i32) -> Option<ScrollMirrorEntry> {
+    SCROLL_MIRROR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(&(view, scroll_id)).copied())
+}
+
+/// Drop mirror and edge-detection state for ids a rebuild removed from
+/// `view`'s tree, so a stale pair cannot serve pulls forever. Called from the
+/// commit path with the freshly collected id set.
+fn scroll_mirror_prune(view: i32, live: &std::collections::HashSet<i32>) {
+    let mut guard = SCROLL_MIRROR.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = guard.as_mut() {
+        m.retain(|&(v, id), _| v != view || live.contains(&id));
+    }
+    drop(guard);
+    let mut sent = SCROLL_SENT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = sent.as_mut() {
+        m.retain(|&(v, id), _| v != view || live.contains(&id));
+    }
 }
 
 /// UTF-16 offset -> UTF-8 byte offset in `s` (clamped to the string's end).
@@ -2549,6 +2659,52 @@ pub extern "C" fn gpui_input_set_text(view: i32, input_id: i32, ptr: *const u8, 
     })
 }
 
+/// Number of bytes `gpui_scroll_copy_state` writes: six little-endian f32
+/// values (offset_x, offset_y, max_x, max_y, viewport_w, viewport_h).
+pub const SCROLL_STATE_BYTES: usize = 24;
+
+/// Copy the mirrored scroll state of `(view, scroll_id)` into `buf` (issue
+/// #89). Writes [`SCROLL_STATE_BYTES`] bytes: offset_x, offset_y, max_x,
+/// max_y, viewport_w, viewport_h as little-endian f32. Offsets follow gpui's
+/// scroll-space convention (≤ 0, more negative as content scrolls down/right);
+/// max is the positive scrollable extent; viewport is the container's
+/// laid-out size.
+///
+/// Returns bytes written, `GPUI_STATUS_KEY_NOT_FOUND` when the pair has never
+/// painted (or a rebuild removed it), or `GPUI_STATUS_INVALID_HANDLE` for a
+/// negative view or a null/short buffer. Main-thread contract, same as the
+/// other pull exports: call it during a dispatch.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_scroll_copy_state(view: i32, scroll_id: i32, buf: *mut u8, len: i32) -> i32 {
+    ffi_export("gpui_scroll_copy_state", || {
+        if view < 0 || buf.is_null() || len < 0 || (len as usize) < SCROLL_STATE_BYTES {
+            return GPUI_STATUS_INVALID_HANDLE;
+        }
+        let Some(entry) = scroll_mirror_get(view, scroll_id) else {
+            return GPUI_STATUS_KEY_NOT_FOUND;
+        };
+        let values = [
+            entry.offset.0,
+            entry.offset.1,
+            entry.max.0,
+            entry.max.1,
+            entry.viewport.0,
+            entry.viewport.1,
+        ];
+        let mut bytes = [0u8; SCROLL_STATE_BYTES];
+        for (chunk, v) in bytes.chunks_exact_mut(4).zip(values) {
+            chunk.copy_from_slice(&v.to_le_bytes());
+        }
+        // SAFETY: `buf` points to at least `len` >= SCROLL_STATE_BYTES
+        // writable bytes for the duration of this call (the standard FFI
+        // borrow contract).
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, SCROLL_STATE_BYTES);
+        }
+        SCROLL_STATE_BYTES as i32
+    })
+}
+
 pub struct FfiView {
     focus: FocusHandle,
     /// Index into `VIEWS` whose committed tree this view renders.
@@ -2936,6 +3092,7 @@ fn render_node_inner(
             tab_index,
             tab_stop,
             key,
+            scroll_id,
             children,
         } => {
             // Build children first (recursion borrows `cx`), then attach the
@@ -3187,7 +3344,7 @@ fn render_node_inner(
                 }
                 el
             };
-            match (key.as_deref(), *on_click) {
+            let el = match (key.as_deref(), *on_click) {
                 (Some(key), on_click) => {
                     let mut d = d.id(SharedString::from(format!("gpui_key:{key}")));
                     // G24 headless harness: expose this div's laid-out bounds to
@@ -3254,6 +3411,24 @@ fn render_node_inner(
                     }
                     (None, false) => Some(d.into_any_element()),
                 },
+            };
+            // Scroll feedback subscription (issue #89): wrap the subscribed
+            // div so the settled offset is observed after every paint. Only a
+            // div that actually scrolls (a tracked handle exists) can feed
+            // back — an `OP_SET_SCROLL_ID` without `OP_SET_OVERFLOW`'s SCROLL
+            // axis is inert by construction.
+            match (el, *scroll_id, &scroll_handle) {
+                (Some(el), Some(sid), Some(handle)) => Some(
+                    ScrollFeedback {
+                        child: el,
+                        view: view_id,
+                        scroll_id: sid,
+                        handle: handle.clone(),
+                        entity: cx.weak_entity(),
+                    }
+                    .into_any_element(),
+                ),
+                (el, _, _) => el,
             }
         }
         UiNode::Text {
@@ -3336,6 +3511,125 @@ fn render_node_inner(
                 .child(TextInputElement { input: model });
             Some(el.into_any_element())
         }
+    }
+}
+
+/// Paint-phase observer for scroll position feedback (issue #89).
+///
+/// Wraps a scroll div that carries an `OP_SET_SCROLL_ID`. Layout is delegated
+/// transparently (same shape as [`TextGlyphInset`]); the work happens after
+/// the child paints: gpui's own wheel listener mutates the tracked
+/// [`ScrollHandle`] and the div's prepaint clamps the offset to the content
+/// bounds, so post-paint is the first moment the settled value is observable.
+/// Every paint refreshes [`SCROLL_MIRROR`]; when the clamped offset differs
+/// from the last announced one, the `EVENT_SCROLL` dispatch is deferred via
+/// [`App::defer`] — dispatch re-enters MoonBit, which may commit a new tree
+/// and mark entities dirty, none of which is legal in the middle of a window
+/// draw.
+///
+/// The re-clamp here is not redundant: gpui's wheel handler adds the delta
+/// unclamped and only the *next* prepaint clamps it back, silently — no
+/// second notify. Without clamping at the observation point the announced
+/// offset could overshoot the real range and never be corrected.
+struct ScrollFeedback {
+    child: AnyElement,
+    view: i32,
+    scroll_id: i32,
+    handle: ScrollHandle,
+    entity: WeakEntity<FfiView>,
+}
+
+impl Element for ScrollFeedback {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        // Transparent: the child's own layout node is ours.
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+        let max = self.handle.max_offset();
+        let raw = self.handle.offset();
+        let offset = (
+            f32::from(raw.x.clamp(-max.width, px(0.))),
+            f32::from(raw.y.clamp(-max.height, px(0.))),
+        );
+        scroll_mirror_update(
+            self.view,
+            self.scroll_id,
+            ScrollMirrorEntry {
+                offset,
+                max: (f32::from(max.width), f32::from(max.height)),
+                viewport: (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+            },
+        );
+        // Edge detection: announce only a change, and seed silently on the
+        // first observation (nothing scrolled yet — the initial position is
+        // always pullable).
+        let announce = {
+            let mut sent = SCROLL_SENT.lock().unwrap_or_else(|e| e.into_inner());
+            match sent
+                .get_or_insert_with(HashMap::new)
+                .insert((self.view, self.scroll_id), offset)
+            {
+                None => false,
+                Some(prev) => prev != offset,
+            }
+        };
+        if announce {
+            let (view, scroll_id, entity) = (self.view, self.scroll_id, self.entity.clone());
+            cx.defer(move |cx| {
+                let changed = unsafe { mb_dispatch(ABI_VERSION, EVENT_SCROLL, view, scroll_id, 0) };
+                notify_if_changed(changed.max(take_input_dirty()), || {
+                    let _ = entity.update(cx, |_, cx| cx.notify());
+                });
+            });
+        }
+    }
+}
+
+impl IntoElement for ScrollFeedback {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
     }
 }
 
@@ -3436,6 +3730,11 @@ mod headless_tests;
 /// observed through the `test-dispatch-stub` recorder (needs the feature).
 #[cfg(all(test, feature = "test-dispatch-stub"))]
 mod async_inject_tests;
+
+/// Scroll position feedback tests (issue #89): paint-phase edge detection →
+/// `EVENT_SCROLL` dispatch → pull ABI, observed through the same recorder.
+#[cfg(all(test, feature = "test-dispatch-stub"))]
+mod scroll_feedback_tests;
 
 /// Text-input state-machine and pull-ABI tests (RFC 0003, issue #88). The
 /// entity/IME wiring needs a windowed context, but the boundary arithmetic and
@@ -4346,6 +4645,8 @@ mod tests {
             ("EVENT_ASYNC", EVENT_ASYNC),
             ("EVENT_INPUT_CHANGED", EVENT_INPUT_CHANGED),
             ("EVENT_INPUT_SUBMIT", EVENT_INPUT_SUBMIT),
+            ("EVENT_SCROLL", EVENT_SCROLL),
+            ("OP_SET_SCROLL_ID", OP_SET_SCROLL_ID),
             ("MOD_CTRL", MOD_CTRL),
             ("MOD_ALT", MOD_ALT),
             ("MOD_SHIFT", MOD_SHIFT),
@@ -5592,6 +5893,139 @@ mod tests {
                 assert_eq!(entry.view, i as i32);
                 assert_eq!(entry.payload, [i]);
             }
+        });
+    }
+
+    // --- Scroll position feedback: decode, pull ABI, prune (issue #89) -----
+
+    fn reset_scroll_statics() {
+        *SCROLL_MIRROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *SCROLL_SENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    #[::core::prelude::v1::test]
+    fn scroll_id_decodes_onto_div() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_SCROLL_ID).i32(7).set_root();
+            assert_eq!(b.build(0), GPUI_STATUS_OK);
+            with_views(|views| {
+                assert!(matches!(
+                    &views[0],
+                    Some(UiNode::Div { scroll_id: Some(7), .. })
+                ));
+            });
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn scroll_id_on_text_is_wrong_node_kind() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.text("x", 0, 0, 0, 1.0).op(OP_SET_SCROLL_ID).i32(1);
+            assert_eq!(b.build(0), GPUI_STATUS_WRONG_NODE_KIND);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn scroll_id_truncated_operand_is_rejected() {
+        with_test(|| {
+            let mut b = Buf::new();
+            b.div().op(OP_SET_SCROLL_ID).u8(1); // 1 of 4 operand bytes
+            assert_eq!(b.build(0), GPUI_STATUS_TRUNCATED_BUFFER);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn scroll_pull_validates_arguments_and_reads_the_mirror() {
+        with_test(|| {
+            reset_scroll_statics();
+            let mut buf = [0u8; SCROLL_STATE_BYTES];
+
+            assert_eq!(
+                gpui_scroll_copy_state(-1, 7, buf.as_mut_ptr(), buf.len() as i32),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(
+                gpui_scroll_copy_state(0, 7, std::ptr::null_mut(), buf.len() as i32),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(
+                gpui_scroll_copy_state(0, 7, buf.as_mut_ptr(), SCROLL_STATE_BYTES as i32 - 1),
+                GPUI_STATUS_INVALID_HANDLE
+            );
+            assert_eq!(
+                gpui_scroll_copy_state(0, 7, buf.as_mut_ptr(), buf.len() as i32),
+                GPUI_STATUS_KEY_NOT_FOUND
+            );
+
+            scroll_mirror_update(
+                0,
+                7,
+                ScrollMirrorEntry {
+                    offset: (-1.5, -30.0),
+                    max: (0.0, 400.0),
+                    viewport: (200.0, 100.0),
+                },
+            );
+            assert_eq!(
+                gpui_scroll_copy_state(0, 7, buf.as_mut_ptr(), buf.len() as i32),
+                SCROLL_STATE_BYTES as i32
+            );
+            let values: Vec<f32> = buf
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            assert_eq!(values, [-1.5, -30.0, 0.0, 400.0, 200.0, 100.0]);
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn rebuild_prunes_removed_scroll_ids_per_view() {
+        with_test(|| {
+            reset_scroll_statics();
+            let mut buf = [0u8; SCROLL_STATE_BYTES];
+
+            // View 0 subscribes id 7; view 1's mirror entry must survive
+            // view 0's rebuilds untouched.
+            let mut with_id = Buf::new();
+            with_id.div().op(OP_SET_SCROLL_ID).i32(7).set_root();
+            assert_eq!(with_id.build(0), GPUI_STATUS_OK);
+            scroll_mirror_update(0, 7, ScrollMirrorEntry::default());
+            scroll_mirror_update(1, 7, ScrollMirrorEntry::default());
+            SCROLL_SENT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert_with(HashMap::new)
+                .insert((0, 7), (0.0, 0.0));
+
+            // Rebuilding view 0 with the id still present keeps the state.
+            assert_eq!(with_id.build(0), GPUI_STATUS_OK);
+            assert_eq!(
+                gpui_scroll_copy_state(0, 7, buf.as_mut_ptr(), buf.len() as i32),
+                SCROLL_STATE_BYTES as i32
+            );
+
+            // Rebuilding without it prunes mirror + edge-detection state for
+            // view 0 only.
+            let mut without_id = Buf::new();
+            without_id.div().set_root();
+            assert_eq!(without_id.build(0), GPUI_STATUS_OK);
+            assert_eq!(
+                gpui_scroll_copy_state(0, 7, buf.as_mut_ptr(), buf.len() as i32),
+                GPUI_STATUS_KEY_NOT_FOUND
+            );
+            assert!(
+                !SCROLL_SENT
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .is_some_and(|m| m.contains_key(&(0, 7)))
+            );
+            assert_eq!(
+                gpui_scroll_copy_state(1, 7, buf.as_mut_ptr(), buf.len() as i32),
+                SCROLL_STATE_BYTES as i32
+            );
         });
     }
 

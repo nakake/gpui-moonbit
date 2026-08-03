@@ -257,3 +257,44 @@ test "ABI constants are public and distinct" {
     assert_true(is_power_of_two(m))
   }
 }
+
+///|
+test "scroll feedback public API: issue id, subscribe, dispatch, encode" {
+  let r = @gpui-bindings.HandlerRegistry::new()
+  let sid = r.new_scroll_id()
+  let log : Array[Int] = []
+  r.on_scroll(sid, fn(view) { log.push(view) })
+  r.dispatch(@gpui-bindings.Scroll(sid.to_int()), 5)
+  assert_eq(log, [5])
+  let cb = @gpui-bindings.CommandBuffer::new()
+  cb.div()
+  cb.set_key("list")
+  cb.set_overflow(
+    @gpui-bindings.OVERFLOW_VISIBLE,
+    @gpui-bindings.OVERFLOW_SCROLL,
+  )
+  cb.set_scroll_id(sid.to_int())
+  cb.set_root()
+  assert_true(
+    has_op_with_u32(
+      cb.to_bytes(),
+      @gpui-bindings.OP_SET_SCROLL_ID,
+      sid.to_int(),
+    ),
+  )
+}
+
+///|
+test "ScrollState fields are publicly constructible and readable" {
+  let st : @gpui-bindings.ScrollState = {
+    offset_x: 0.0,
+    offset_y: -30.0,
+    max_x: 0.0,
+    max_y: 400.0,
+    viewport_w: 200.0,
+    viewport_h: 100.0,
+  }
+  assert_eq(st.offset_y, -30.0)
+  assert_eq(st.max_y, 400.0)
+  assert_eq(st.viewport_w, 200.0)
+}

@@ -118,6 +118,12 @@
 #define gpui_INJECT_PAYLOAD_MAX_BYTES (1024 * 1024)
 
 /**
+ * Number of bytes `gpui_scroll_copy_state` writes: six little-endian f32
+ * values (offset_x, offset_y, max_x, max_y, viewport_w, viewport_h).
+ */
+#define gpui_SCROLL_STATE_BYTES 24
+
+/**
  * Push an event from any thread into the injection queue (RFC 0002 §3.1).
  * Non-blocking: the payload is copied under the queue lock and the call
  * returns immediately. The payload is opaque bytes — the library never
@@ -231,5 +237,20 @@ int32_t gpui_input_copy_text(int32_t view, int32_t input_id, uint8_t *buf, int32
  * widget at its next prepaint.
  */
 int32_t gpui_input_set_text(int32_t view, int32_t input_id, const uint8_t *ptr, int32_t len);
+
+/**
+ * Copy the mirrored scroll state of `(view, scroll_id)` into `buf` (issue
+ * #89). Writes [`SCROLL_STATE_BYTES`] bytes: offset_x, offset_y, max_x,
+ * max_y, viewport_w, viewport_h as little-endian f32. Offsets follow gpui's
+ * scroll-space convention (≤ 0, more negative as content scrolls down/right);
+ * max is the positive scrollable extent; viewport is the container's
+ * laid-out size.
+ *
+ * Returns bytes written, `GPUI_STATUS_KEY_NOT_FOUND` when the pair has never
+ * painted (or a rebuild removed it), or `GPUI_STATUS_INVALID_HANDLE` for a
+ * negative view or a null/short buffer. Main-thread contract, same as the
+ * other pull exports: call it during a dispatch.
+ */
+int32_t gpui_scroll_copy_state(int32_t view, int32_t scroll_id, uint8_t *buf, int32_t len);
 
 #endif  /* GPUI_SYS_H */

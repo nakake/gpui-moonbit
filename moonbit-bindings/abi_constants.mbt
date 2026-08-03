@@ -25,6 +25,9 @@ pub const EVENT_INPUT_CHANGED : Int = 6
 pub const EVENT_INPUT_SUBMIT : Int = 7
 
 ///|
+pub const EVENT_SCROLL : Int = 8
+
+///|
 pub const MOD_CTRL : Int = 1
 
 ///|
@@ -191,6 +194,9 @@ pub const OP_SET_TAB_STOP : Int = 37
 
 ///|
 pub const OP_TEXT_INPUT : Int = 38
+
+///|
+pub const OP_SET_SCROLL_ID : Int = 40
 
 ///|
 pub const ALIGN_DEFAULT : Int = 0

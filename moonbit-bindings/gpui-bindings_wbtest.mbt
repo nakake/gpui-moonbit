@@ -560,3 +560,35 @@ test "GpuiError to_string carries code and message" {
   assert_true(s.contains("GpuiError"))
   assert_eq(err.message(), status_message(-8))
 }
+
+// --- Scroll position feedback (issue #89) -----------------------------------
+
+///|
+test "command buffer set_scroll_id wire format matches the Rust decoder layout" {
+  let cb = CommandBuffer::new()
+  cb.div()
+  cb.set_scroll_id(7)
+  let b = cb.to_bytes()
+  // 8-byte header, then OP_DIV, then OP_SET_SCROLL_ID | id i32.
+  assert_eq(b[8].to_int(), OP_DIV)
+  assert_eq(b[9].to_int(), OP_SET_SCROLL_ID)
+  assert_eq(read_i32_le(b, 10), 7)
+  assert_eq(b.length(), 14)
+}
+
+///|
+test "read_f32_le decodes the six f32 fields of a scroll state" {
+  // 14.0f32 = 0x41600000, 1.0f32 = 0x3F800000, -0.5f32 = 0xBF000000 (LE).
+  let b = b"\x00\x00\x60\x41\x00\x00\x80\x3F\x00\x00\x00\xBF"
+  assert_eq(read_f32_le(b, 0), 14.0)
+  assert_eq(read_f32_le(b, 4), 1.0)
+  assert_eq(read_f32_le(b, 8), -0.5)
+}
+
+// NOTE: the `scroll_state` pull ABI is not exercised as a `moon test` case
+// because it calls the Rust export `gpui_scroll_copy_state`, which the root
+// package's test executable does not link (link/link.mbt). Its error contract
+// (unknown pair -> -10 KEY_NOT_FOUND, negative view -> -1 INVALID_HANDLE) is
+// verified by the Rust-side suite (gpui-sys/scroll_feedback_tests.rs) and
+// belongs in the linked round-trip binary (cmd/roundtrip) alongside the other
+// FFI smoke tests.

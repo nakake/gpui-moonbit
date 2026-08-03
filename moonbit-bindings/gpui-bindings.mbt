@@ -505,6 +505,18 @@ pub fn CommandBuffer::set_overflow(
 }
 
 ///|
+/// スタックトップの div にスクロール位置フィードバックの購読 id を付けます（issue #89）。
+/// id は `HandlerRegistry::new_scroll_id` で発行した型付き id の raw 値です。実際に
+/// スクロールする div（`set_overflow` の SCROLL 軸）でのみイベントが発火します。
+/// 位置の保持には従来どおり `set_key` が必要です（キーなしはリビルドごとにリセット）。
+/// オフセットが変化したフレームで `EVENT_SCROLL`（data_a = scroll_id）が 1 回 dispatch
+/// され、値は `scroll_state` で pull します。
+pub fn CommandBuffer::set_scroll_id(self : CommandBuffer, id : Int) -> Unit {
+  self.op(OP_SET_SCROLL_ID)
+  self.buf.write_int_le(id)
+}
+
+///|
 /// スタックトップの div（とその子孫）の不透明度を設定します。0.0（完全透明）〜
 /// 1.0（完全不透明）の Float を取り、内部では ×1000 の整数として送られます。
 pub fn CommandBuffer::set_opacity(
@@ -911,6 +923,58 @@ pub fn input_set_text(
   } else {
     Err(status)
   }
+}
+
+// --- Scroll position feedback (issue #89) -----------------------------------
+//
+// The scroll model lives Rust-side: each scrolling div (`set_overflow` with a
+// SCROLL axis) owns a `ScrollHandle` whose offset the gpui window mutates on
+// wheel/scroll events. `EVENT_SCROLL` envelopes carry only the scroll_id (no
+// payload), and the handler pulls the current position with `scroll_state`.
+// The Rust decoder writes 24 bytes = six f32 in little-endian order; the
+// helper below decodes one of them by reinterpreting the assembled u32 bits.
+
+///|
+fn read_f32_le(b : Bytes, offset : Int) -> Float {
+  let bits = b[offset].to_int() |
+    (b[offset + 1].to_int() << 8) |
+    (b[offset + 2].to_int() << 16) |
+    (b[offset + 3].to_int() << 24)
+  Float::reinterpret_from_uint(bits.reinterpret_as_uint())
+}
+
+///|
+/// `gpui_scroll_copy_state` が返す 6 値です。offset は gpui のスクロール座標系で
+/// **0 以下**（下/右へスクロールするほど負）。max は正のスクロール可能量、viewport は
+/// コンテナのレイアウト済みサイズ（すべて px）。
+pub(all) struct ScrollState {
+  offset_x : Float
+  offset_y : Float
+  max_x : Float
+  max_y : Float
+  viewport_w : Float
+  viewport_h : Float
+}
+
+///|
+/// `view` にコミット済みのツリーで、`scroll_id` のスクロール div の現在位置とスクロール
+/// 可能範囲を読み戻します（issue #89）。24 バイト（f32 LE ×6）を 1 回の FFI 呼び出しで
+/// コピーして `ScrollState` にデコードします。失敗時は負の `GPUI_STATUS_*` コードを
+/// `Err(status)` で返します（未知のペアは `-10` = KEY_NOT_FOUND）。
+pub fn scroll_state(view : Int, scroll_id : Int) -> Result[ScrollState, Int] {
+  let buf = Bytes::make(24, b'\x00')
+  let n = gpui_scroll_copy_state_ffi(view, scroll_id, buf, 24)
+  if n < 0 {
+    return Err(n)
+  }
+  Ok({
+    offset_x: read_f32_le(buf, 0),
+    offset_y: read_f32_le(buf, 4),
+    max_x: read_f32_le(buf, 8),
+    max_y: read_f32_le(buf, 12),
+    viewport_w: read_f32_le(buf, 16),
+    viewport_h: read_f32_le(buf, 20),
+  })
 }
 
 // --- Diagnostics (issue #54, G21) ------------------------------------------
