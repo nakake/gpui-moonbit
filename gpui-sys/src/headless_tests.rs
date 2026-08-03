@@ -16,7 +16,8 @@
 use crate::headless::{assert_bounds_eq, layout_bound, layout_bounds};
 use crate::abi_constants::{ALIGN_START, BUFFER_VERSION, JUSTIFY_DEFAULT, OP_ADD_CHILD, OP_DIV,
     OP_SET_ALIGN, OP_SET_BORDER, OP_SET_FLEX, OP_SET_GAP, OP_SET_KEY, OP_SET_PADDING,
-    OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SIZE, OP_TEXT};
+    OP_SET_ROOT, OP_SET_ROUNDED, OP_SET_SIZE, OP_TEXT, OP_TEXT_RUN, RUN_STYLE_COLOR,
+    RUN_STYLE_WEIGHT};
 use crate::{GPUI_STATUS_BAD_BUFFER_VERSION, GPUI_STATUS_INVALID_FLOAT};
 use gpui::TestAppContext;
 
@@ -170,6 +171,68 @@ fn text_node_known_size(cx: &mut TestAppContext) {
     // subpixel variant 0 (see its doc comment). Captured from the first
     // verified headless run.
     assert_bounds_eq("text:Hello", bounds["text:Hello"], 0.25, 0.0, 60.0, 32.5);
+}
+
+/// Rich text (issue #91): a text node with styled runs must lay out exactly
+/// like the same text without runs — style overrides change paint, not
+/// geometry — and the run boundaries must map to the glyph-advance grid.
+///
+/// The `NoopTextSystem` advances 600/1000·size per glyph regardless of weight
+/// or color, so "abcdef" at 20px spans 6 × 12px = 72px whether or not runs
+/// split it. Run-boundary positions are read through the render-time
+/// `TextLayout` stash (`text_layout_for`): `position_for_index` maps a UTF-8
+/// byte offset to pixels, and the run over bytes 2..4 must start and end
+/// exactly two advances apart.
+#[gpui::test]
+fn rich_text_runs_keep_layout_and_map_boundaries(cx: &mut TestAppContext) {
+    let buf = Buf::new()
+        .div()
+        .key("wrap")
+        .op(OP_SET_FLEX)
+        .u8(1) // column
+        .op(OP_SET_ALIGN)
+        .u32(ALIGN_START as u32)
+        .u32(JUSTIFY_DEFAULT as u32)
+        .op(OP_TEXT)
+        .u32(6)
+        .bytes(b"abcdef")
+        .u8(255)
+        .u8(255)
+        .u8(255)
+        .f32(20.0)
+        // One run over "cd" (bytes 2..4): color + weight overrides.
+        .op(OP_TEXT_RUN)
+        .u32(2)
+        .u32(2)
+        .u8((RUN_STYLE_COLOR | RUN_STYLE_WEIGHT) as u8)
+        .u8(10)
+        .u8(20)
+        .u8(30)
+        .u8(255)
+        .u32(700) // weight (i32 LE == u32 LE for positive values)
+        .u8(0)
+        .u8(0)
+        .u8(0)
+        .u8(0)
+        .add_child() // text -> wrap
+        .root()
+        .finish();
+    let bounds = layout_bounds(cx, &buf, &["wrap", "text:abcdef"]).expect("decode");
+    // Same geometry as the plain-text path: 72×32.5 at the ¼px glyph inset.
+    assert_bounds_eq("text:abcdef", bounds["text:abcdef"], 0.25, 0.0, 72.0, 32.5);
+
+    let layout = crate::text_layout_for("abcdef").expect("rich text stashes its layout");
+    let x_at = |index: usize| -> f32 {
+        f32::from(
+            layout
+                .position_for_index(index)
+                .unwrap_or_else(|| panic!("no position for byte {index}"))
+                .x,
+        )
+    };
+    // Run boundaries land on the glyph-advance grid: 12px per glyph at 20px.
+    assert_eq!(x_at(2) - x_at(0), 24.0, "run start (byte 2)");
+    assert_eq!(x_at(4) - x_at(2), 24.0, "run end (byte 4)");
 }
 
 /// A rejected buffer surfaces the decoder status instead of rendering.

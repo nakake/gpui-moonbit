@@ -18,19 +18,19 @@ use crate::abi_constants::{
     OP_SET_MAX_SIZE, OP_SET_MIN_SIZE, OP_SET_ON_CLICK, OP_SET_OPACITY, OP_SET_OVERFLOW,
     OP_SET_PADDING, OP_SET_PADDING_SIDES, OP_SET_POSITION, OP_SET_ROOT, OP_SET_ROUNDED,
     OP_SET_SHADOW, OP_SET_SIZE, OP_SET_TEXT_ALIGN, OP_SET_TEXT_COLOR, OP_SET_TEXT_SIZE,
-    OP_SET_WHITESPACE, OP_TEXT,
+    OP_SET_WHITESPACE, OP_TEXT, OP_TEXT_RUN,
 };
 use crate::{
     GPUI_STATUS_BAD_BUFFER_VERSION, GPUI_STATUS_DEPTH_EXCEEDED, GPUI_STATUS_DUPLICATE_KEY,
     GPUI_STATUS_INTERNAL_PANIC, GPUI_STATUS_INVALID_FLOAT, GPUI_STATUS_INVALID_HANDLE,
-    GPUI_STATUS_NO_ROOT, GPUI_STATUS_NODE_ABSENT, GPUI_STATUS_OK, GPUI_STATUS_TRUNCATED_BUFFER,
-    GPUI_STATUS_UNKNOWN_OPCODE, GPUI_STATUS_WRONG_NODE_KIND, MAX_TREE_DEPTH,
-    build_tree_from_buffer,
+    GPUI_STATUS_INVALID_TEXT_RUN, GPUI_STATUS_NO_ROOT, GPUI_STATUS_NODE_ABSENT, GPUI_STATUS_OK,
+    GPUI_STATUS_TRUNCATED_BUFFER, GPUI_STATUS_UNKNOWN_OPCODE, GPUI_STATUS_WRONG_NODE_KIND,
+    MAX_TREE_DEPTH, build_tree_from_buffer,
 };
 use gpui::TestAppContext;
 
 /// The full set of statuses the decoder may legally return.
-const LEGAL_STATUSES: [i32; 12] = [
+const LEGAL_STATUSES: [i32; 13] = [
     GPUI_STATUS_OK,
     GPUI_STATUS_INVALID_HANDLE,
     GPUI_STATUS_WRONG_NODE_KIND,
@@ -46,6 +46,9 @@ const LEGAL_STATUSES: [i32; 12] = [
     GPUI_STATUS_INVALID_FLOAT,
     // Reachable from any generator that nests past MAX_TREE_DEPTH (issue #74).
     GPUI_STATUS_DEPTH_EXCEEDED,
+    // Random OP_TEXT_RUN operands rarely satisfy the range/boundary/flag
+    // validation, so rejection is the expected fuzz outcome (issue #91).
+    GPUI_STATUS_INVALID_TEXT_RUN,
 ];
 
 /// xorshift64* — tiny, fast, deterministic. Plenty of statistical quality for
@@ -74,9 +77,10 @@ impl Rng {
 }
 
 /// Every real opcode, so the structured generator exercises all decode arms.
-const OPCODES: [i32; 34] = [
+const OPCODES: [i32; 35] = [
     OP_DIV,
     OP_TEXT,
+    OP_TEXT_RUN,
     OP_SET_SIZE,
     OP_SET_BG,
     OP_SET_FLEX,
@@ -142,6 +146,10 @@ fn emit_operands(rng: &mut Rng, buf: &mut Vec<u8>, opcode: i32) {
         OP_SET_FLEX_ITEM => 12,
         OP_SET_MARGIN | OP_SET_INSET | OP_SET_PADDING_SIDES => 16,
         OP_SET_SHADOW => 20,
+        // start u32 + len u32 + flags u8 + rgba + weight i32 + rgba (#91).
+        // Random ranges rarely validate, so this mostly exercises the
+        // INVALID_TEXT_RUN rejection path — which is the point.
+        OP_TEXT_RUN => 21,
         // Length-prefixed: u32 len + len bytes.
         OP_TEXT | OP_SET_KEY | OP_SET_FONT_FAMILY => {
             let len = rng.below(64);

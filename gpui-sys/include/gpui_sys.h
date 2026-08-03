@@ -106,6 +106,17 @@
 #define gpui_GPUI_STATUS_DEPTH_EXCEEDED -15
 
 /**
+ * An `OP_TEXT_RUN` record is semantically invalid for the text node it
+ * targets: out of bounds, not on a `char` boundary, overlapping/unsorted
+ * against the previous run, or carrying unknown style flag bits. Rejection is
+ * per-buffer (the tree is not committed) because gpui's run machinery panics
+ * on ranges like these — `StyledText::compute_runs` subtracts range starts
+ * and `with_runs` asserts the runs tile the text — so a lenient decoder would
+ * trade a diagnosable status for a paint-time abort (issue #91).
+ */
+#define gpui_GPUI_STATUS_INVALID_TEXT_RUN -16
+
+/**
  * Maximum number of queued injection entries (RFC 0002 §6-1). A full queue
  * fails `gpui_post_event` with `GPUI_STATUS_QUEUE_FULL` instead of blocking.
  */

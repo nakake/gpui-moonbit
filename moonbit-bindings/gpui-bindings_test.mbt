@@ -298,3 +298,45 @@ test "ScrollState fields are publicly constructible and readable" {
   assert_eq(st.max_y, 400.0)
   assert_eq(st.viewport_w, 200.0)
 }
+
+///|
+test "rich text public API emits runs with UTF-8 byte offsets" {
+  let cb = @gpui-bindings.CommandBuffer::new()
+  cb.div()
+  cb.rich_text(
+    [
+      ("あ", None),
+      ("いう", Some(@gpui-bindings.RunStyle::new(weight=700))),
+      ("x", None),
+    ],
+    255,
+    255,
+    255,
+    14.0,
+  )
+  cb.add_child()
+  cb.set_root()
+  let b = cb.to_bytes()
+  // The styled segment starts at UTF-8 byte 3 ("あ" is 3 bytes): the run
+  // record's start operand directly follows the opcode byte.
+  assert_true(has_op_with_u32(b, @gpui-bindings.OP_TEXT_RUN, 3))
+}
+
+///|
+test "text_run public API applies to the pushed text node" {
+  let cb = @gpui-bindings.CommandBuffer::new()
+  cb.text("ab", 255, 255, 255, 14.0)
+  cb.text_run(
+    1,
+    1,
+    @gpui-bindings.RunStyle::new(
+      color=@gpui-bindings.Color::rgba(1, 2, 3, 4),
+      italic=true,
+      underline=true,
+      strikethrough=true,
+      background=@gpui-bindings.Color::rgb(9, 9, 9),
+    ),
+  )
+  cb.set_root()
+  assert_true(has_op_with_u32(cb.to_bytes(), @gpui-bindings.OP_TEXT_RUN, 1))
+}
