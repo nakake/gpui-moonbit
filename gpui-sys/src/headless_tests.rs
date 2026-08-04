@@ -566,6 +566,7 @@ mod text_input_interaction {
     use crate::headless::with_rendered_tree;
     use crate::{EVENT_TEXT, gpui_input_text_len, take_recorded_dispatches};
     use gpui::{Modifiers, TestAppContext, point, px};
+    use std::sync::MutexGuard;
 
     /// Where a user aims: inside the 360px-wide box (x 780..1140) but off its
     /// center line. The collapsed frame is 18px wide around x = 960, so the
@@ -574,9 +575,27 @@ mod text_input_interaction {
     /// a zero-width hitbox anyway.
     const CLICK: (f32, f32) = (1060.0, 540.0);
 
-    fn reset() {
+    /// Take the process-global test locks this suite needs, in the documented
+    /// order (`INJECT_TEST_LOCK` → `INPUT_TEST_LOCK`; `with_rendered_tree`
+    /// takes `TEST_VIEWS_MUTEX` last), install a fresh dispatch recorder, and
+    /// clear the input mirror.
+    ///
+    /// `VIEWS` is deliberately NOT touched here: it belongs to
+    /// `TEST_VIEWS_MUTEX`, which is only held inside `with_rendered_tree`.
+    /// Clearing it from out here wipes whatever tree a concurrently running
+    /// headless test committed, between its commit and its render — which
+    /// shows up as an unrelated `no element with debug selector …` panic.
+    fn setup() -> (MutexGuard<'static, ()>, MutexGuard<'static, ()>, crate::RecorderGuard) {
+        let inject = crate::INJECT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let input = crate::INPUT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let recorder = crate::install_dispatch_recorder();
+        crate::set_dispatch_changed(0);
         *crate::INPUT_MIRROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        crate::VIEWS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        (inject, input, recorder)
     }
 
     /// With a definite frame width the click hits the widget, focus lands on
@@ -585,12 +604,7 @@ mod text_input_interaction {
     /// parsed into the counter).
     #[gpui::test]
     fn click_focuses_the_input_and_typed_text_stays_in_the_widget(cx: &mut TestAppContext) {
-        let _suite = crate::INJECT_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _recorder = crate::install_dispatch_recorder();
-        crate::set_dispatch_changed(0);
-        reset();
+        let _guards = setup();
 
         with_rendered_tree(cx, &prompt_box_buffer(Some(360)), |vcx| {
             vcx.simulate_click(point(px(CLICK.0), px(CLICK.1)), Modifiers::none());
@@ -611,12 +625,7 @@ mod text_input_interaction {
     /// app as `EVENT_TEXT` — the demo's counter ate the input.
     #[gpui::test]
     fn collapsed_input_cannot_be_focused_and_leaks_keys_to_the_app(cx: &mut TestAppContext) {
-        let _suite = crate::INJECT_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _recorder = crate::install_dispatch_recorder();
-        crate::set_dispatch_changed(0);
-        reset();
+        let _guards = setup();
 
         with_rendered_tree(cx, &prompt_box_buffer(None), |vcx| {
             vcx.simulate_click(point(px(CLICK.0), px(CLICK.1)), Modifiers::none());
