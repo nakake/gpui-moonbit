@@ -263,16 +263,27 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && \
   echo "WARNING: generated MoonBit bindings changed. Commit the update if intentional."
 fi
 
+# Generate the per-OS moon.pkg files BEFORE `moon check`, not after it (issue
+# #121). They are gitignored generated files, so a stale copy left by an older
+# template — a renamed import, changed cc-flags — makes 1a fail on something
+# this script already knows how to fix, and the fix used to live *after* the
+# gate: every rerun died in the same place until the files were deleted by hand.
+# Writing first also closes a coverage hole: on a cold clone neither file
+# exists, so moon does not treat cmd/main and cmd/roundtrip as packages and 1a
+# silently skips both mains.
+# Link flags stay empty here; step 4 rewrites both with $NATIVE_LIBS.
+write_moon_pkg "$PKG_TMPL" "$MB/cmd/main/moon.pkg" ""
+write_moon_pkg "$RT_PKG_TMPL" "$MB/cmd/roundtrip/moon.pkg" ""
+
 echo "==> [1a/5] MoonBit typecheck"
 ( cd "$MB" && moon check ) || {
   echo "ERROR: MoonBit compilation failed" >&2
   echo "HINT: if you added a new Rust C export, the C header must be regenerated; run ./build.sh (it regenerates the header before bindgen)." >&2
+  echo "HINT: cmd/{main,roundtrip}/moon.pkg are generated from moon.pkg.$OS_PKG just above; if an import path or link flag looks wrong there, edit the template, not the generated file." >&2
   exit 1
 }
 
 echo "==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)"
-write_moon_pkg "$PKG_TMPL" "$MB/cmd/main/moon.pkg" ""
-write_moon_pkg "$RT_PKG_TMPL" "$MB/cmd/roundtrip/moon.pkg" ""
 if ! ( cd "$MB" && moon build ) 2>&1 | tee "$BUILD_OUTPUT"; then
   if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|${PKG_FN_SUFFIX}" "$BUILD_OUTPUT"; then
     echo "    (expected bootstrap native-link failure — final link remains strict)"
