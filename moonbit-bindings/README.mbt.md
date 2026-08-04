@@ -174,10 +174,9 @@ let prompt_input = {
   let id = handlers.new_input_id()
   handlers.on_submit(fn(view) {
     match input_text(view, id) {
-      Ok(text) => {
+      Ok(text) =>
         // ... text を使って状態を更新
         ignore(input_set_text(view, id, "")) // クリア
-      }
       Err(_) => ()
     }
   })
