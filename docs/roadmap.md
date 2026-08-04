@@ -13,10 +13,11 @@
 - Windows と WSL/Linux は 2026-07-19 に手動検証済み。macOS は 2026-07-23 に再検証済み（`build.sh` のバンドル統合後、ウィンドウ表示と `j`/`k`/`r` キー操作を実機確認）。
 - アクティブな root CI（`.github/workflows/ci.yml`）: ubuntu/macos/windows の 3 OS でコールドビルド・テスト・Rust 単独変更後の再ビルドを自動検証（#33、`0f5ce3b`）。
 
+- 3 本の設計 RFC はいずれも実装済み: [`0001`](rfc/0001-component-model.md) コンポーネントモデルと状態管理（`G11`〜`G14`、#86）、[`0002`](rfc/0002-async-event-injection.md) 非同期イベント注入（#84）、[`0003`](rfc/0003-text-input-ime.md) テキスト入力 widget + IME preedit（`G6`/`G19`、#88）。
+
 ### 未完了
 - 安定した利用者向け API と、より広い GPUI surface。
-- コンポーネントモデルと状態管理の設計 RFC（`G11`〜`G14`）: [`docs/rfc/0001-component-model.md`](rfc/0001-component-model.md) 設計済み、実装未着手。
-- 配布整備（#48）: マニフェスト整備（`G1`）とバージョニング方針（`G4`、[`versioning.md`](versioning.md) + [`CHANGELOG.md`](../CHANGELOG.md)）は完了。prebuild パイプライン（`G2`、#93）は Linux で検証済み（macOS/Windows 未検証）。mooncakes 公開と macOS 署名（`G5`）は保留。
+- 配布整備（#48）: マニフェスト整備（`G1`）とバージョニング方針（`G4`、[`versioning.md`](versioning.md) + [`CHANGELOG.md`](../CHANGELOG.md)）は完了。prebuild パイプライン（`G2`、#93）は Linux x86_64 / macOS arm64 / Windows MSVC x64 の 3 OS で CI 検証済み（#103、`tests/consumer` の最小コンシューマを 3 ランナーすべてでビルド・実行）。mooncakes 公開と macOS 署名（`G5`）は保留。
 - Web/WASM を含む将来の展開。
 
 ## 目標

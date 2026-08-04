@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| ステータス | 設計済み(実装未着手) |
+| ステータス | 実装済み(#84)。現行実装の権威は [`architecture.md`](../architecture.md)であり、本 RFC は設計判断とその根拠の記録である |
 | 作成日 | 2026-08-01 |
 | 対象 | 公開注入 ABI(`framework-gaps.md` G1〜G29 の射程外。#92 M1) |
 | 関連 issue | #83(本 RFC)、#84(実装)、#70(EVENT_QUEUE リーク — 教訓を §3.4 に反映)、#85(ハーネス側 process runner、消費者例)、#10(`gpui_update_text`) |

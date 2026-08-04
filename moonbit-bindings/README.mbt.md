@@ -166,7 +166,7 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
 
 **色の渡し方**: alpha 付きの `Color` を取る API（`set_bg_color` / `set_text_color` / `set_shadow` / `set_border_color`）を推奨します。生の `r, g, b` トリプレットを取る `set_bg` / `set_border` / `text` も引き続き利用可能で、wire format は同一です（issue #81 で整合化）。`Color` は `Color::rgb(r, g, b)` / `Color::rgba(r, g, b, a)` で作ります。
 
-**テキスト入力ボックス**（RFC 0003）: `text_input(cb, props)` コンポーネント（`components.mbt`）が編集可能な 1 行ボックスを描きます。`TextInputProps { key, input_id, placeholder }` を取り、`input_id` は `HandlerRegistry::new_input_id()` で発行します。編集バッファは Rust 側のテキストモデルが正であり（再構築を跨いで生存）、MoonBit の store には置きません。イベントは **pull 型**です: `EVENT_INPUT_CHANGED`（確定テキストの変化）/ `EVENT_INPUT_SUBMIT`（Enter）は `(4, kind, view, input_id, 0)` で届き、ペイロードを運びません。ハンドラは `input_text(view, input_id)` で現在内容を読み、`input_set_text(view, input_id, text)` で書き換えます。`input_set_text` は IME 合成中に `GPUI_STATUS_BUSY_COMPOSING`（`-13`）で拒否します。登録パターンはクリックハンドラと同じく、id の発行とハンドラ登録を 1 つの top-level let に束ねます（DCE 安全）:
+**テキスト入力ボックス**（RFC 0003）: `text_input(cb, props)` コンポーネント（`components.mbt`）が編集可能な 1 行ボックスを描きます。`TextInputProps { key, input_id, placeholder, min_width }` を取り、`input_id` は `HandlerRegistry::new_input_id()` で発行します。`min_width`（px）は必須です: 入力欄の中身は枠 div の幅 100% で敷かれるため、`set_center` の列など**枠が内容幅に縮む親**に置くとその 100% が 0px に解決してしまい、枠は padding だけの細い箱になり placeholder が枠外にはみ出し、クリック判定も 0 幅になってフォーカスできません。`min_width` が枠の幅を確定させます（親が十分広ければ親が勝ちます）。編集バッファは Rust 側のテキストモデルが正であり（再構築を跨いで生存）、MoonBit の store には置きません。イベントは **pull 型**です: `EVENT_INPUT_CHANGED`（確定テキストの変化）/ `EVENT_INPUT_SUBMIT`（Enter）は `(4, kind, view, input_id, 0)` で届き、ペイロードを運びません。ハンドラは `input_text(view, input_id)` で現在内容を読み、`input_set_text(view, input_id, text)` で書き換えます。`input_set_text` は IME 合成中に `GPUI_STATUS_BUSY_COMPOSING`（`-13`）で拒否します。登録パターンはクリックハンドラと同じく、id の発行とハンドラ登録を 1 つの top-level let に束ねます（DCE 安全）:
 
 ```moonbit nocheck
 ///|
@@ -174,10 +174,9 @@ let prompt_input = {
   let id = handlers.new_input_id()
   handlers.on_submit(fn(view) {
     match input_text(view, id) {
-      Ok(text) => {
+      Ok(text) =>
         // ... text を使って状態を更新
         ignore(input_set_text(view, id, "")) // クリア
-      }
       Err(_) => ()
     }
   })
@@ -185,7 +184,7 @@ let prompt_input = {
 }
 ```
 
-ツリー側では `text_input(cb, { key: "prompt-input", input_id: prompt_input, placeholder: "..." })` を呼び `add_child()` で接続します。`on_input_changed(fn(view){…})` も登録可能で、確定テキストのたびに呼ばれます（preedit 更新では呼ばれません）。
+ツリー側では `text_input(cb, { key: "prompt-input", input_id: prompt_input, placeholder: "...", min_width: 360 })` を呼び `add_child()` で接続します。`on_input_changed(fn(view){…})` も登録可能で、確定テキストのたびに呼ばれます（preedit 更新では呼ばれません）。
 
 ### 2. ウィンドウを開く
 

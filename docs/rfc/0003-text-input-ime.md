@@ -2,13 +2,13 @@
 
 | 項目 | 内容 |
 |---|---|
-| ステータス | 設計済み(実装未着手) |
+| ステータス | 実装済み(#88)。現行実装の権威は [`architecture.md`](../architecture.md)であり、本 RFC は設計判断とその根拠の記録である |
 | 作成日 | 2026-08-01 |
 | 対象ギャップ | [`framework-gaps.md`](../framework-gaps.md) `G6`(text input widget)/ `G19`(IME preedit) |
 | 関連 issue | #87(本 RFC)、#88(実装)、#52(フォーカス/Tab トラバース)、#86(RFC 0001 実装)、#91(rich text run) |
 | 前提ドキュメント | [`a11y-ime.md`](../a11y-ime.md)(必要 API の調査完了)、[`architecture.md`](../architecture.md)、[`0001-component-model.md`](0001-component-model.md) |
 
-本 RFC は、**編集可能なテキスト入力 widget** と **IME preedit(合成中テキスト)** の設計を定める。確定テキストは `EVENT_TEXT`(`key_char` 経路)で動作済みだが、編集可能ボックス・合成中表示・候補ウィンドウ連携は未設計だった。日本語入力はハーネスのプロンプト入力に必須である。実装は #88 の管轄であり、すべてのコード片はスケッチである。
+本 RFC は、**編集可能なテキスト入力 widget** と **IME preedit(合成中テキスト)** の設計を定める。確定テキストは `EVENT_TEXT`(`key_char` 経路)で動作済みだが、編集可能ボックス・合成中表示・候補ウィンドウ連携は未設計だった。日本語入力はハーネスのプロンプト入力に必須である。実装は #88 で完了した。コード片は §3.6 を除きすべて設計時のスケッチであり、現行実装の記述は `architecture.md` を見ること。
 
 ---
 
@@ -50,6 +50,7 @@ OP_TEXT_INPUT  u8 | input_id i32 | len u32 | utf8[len] (placeholder)
 - **leaf ノード**である(子を持たない)。スタックマシン上は `OP_TEXT` と同様に push され、`add_child` で親 div に接続する。
 - `input_id` は click_id と同格の **i32 識別子**で、envelope(§3.4)と読み書き ABI(§3.5)で widget を指す。RFC 0001 のハンドラレジストリが id を発行する形(§3.2)とそのまま噛み合う。
 - スタイル(サイズ・枠・フォント)は**親 div のスタイル opcode をそのまま使う**。`TextInput` 自体はテキスト内容の描画と入力処理だけを担い、装飾は既存の style 表面に委ねる(新 opcode の増殖を避ける)。
+  - **含意(実装で判明)**: leaf は親幅の 100% で敷かれるため、**親 div の幅が確定していないと 100% が 0px に解決して潰れる**。`set_center` の列など子が内容幅に縮む親に置くと、枠は padding + border だけの箱になり、placeholder は枠外にはみ出して描かれ、クリック判定も 0 幅になってフォーカスできない(打鍵はすべてアプリ級 `EVENT_TEXT` に落ちる)。枠側で幅を確定させること — `text_input` コンポーネントは必須の `min_width` を取り、`OP_SET_MIN_SIZE` で枠に出す(§3.6)。この方針自体は「装飾は既存 style 表面に委ねる」の帰結であり、新 opcode は不要である。
 - 同一 `input_id` のノードが再構築で再送されても、**テキストモデルは保持される**(§3.2)。`OP_TEXT_INPUT` のペイロードは placeholder(空欄時の薄表示)であり、初期値・現在値ではない(値の設定は §3.5 の `gpui_input_set_text`)。
 
 ### 3.2 Rust 側テキストモデルと保持先
@@ -118,17 +119,18 @@ MoonBit 側ラッパー(`gpui-bindings.mbt`)は `input_text(view, input_id) -> R
 issue #87 第 4 の論点「input widget の state 保持先」への回答: **buffer/selection/marked は Rust のテキストモデルに属し、store(RFC 0001 §3.3)には置かない。** store に置くのは「アプリが最後に pull した値」等のアプリ都合のミラーだけである。
 
 ```moonbit
-// --- スケッチ: RFC 0001 の抽象で書いた input コンポーネント ---
+// --- 実装形 (components.mbt) ---
 struct TextInputProps {
-  key : String            // 親 div の安定キー
+  key : String            // 枠 div の安定キー
   input_id : InputId      // レジストリ発行 (HandlerId と同様の型付き i32)
   placeholder : String
-  on_submit : HandlerId   // EVENT_INPUT_SUBMIT → レジストリ配送
+  min_width : Int         // 枠の最小幅 (px)。必須 — §3.1 の含意を参照
 }
 
 fn text_input(cb : CommandBuffer, props : TextInputProps) -> Unit {
   cb.div()
   cb.set_key(props.key)
+  cb.set_min_size(props.min_width, -1) // 高さは auto
   cb.set_border(1.0, 120, 120, 140)
   cb.set_rounded(6.0)
   cb.set_padding(8.0)
@@ -137,7 +139,17 @@ fn text_input(cb : CommandBuffer, props : TextInputProps) -> Unit {
 }
 ```
 
-- `HandlerRegistry` に `submit : Map[Int, SubmitHandler]` と `input_changed : Map[Int, ChangedHandler]` を追加し、`framework_dispatch` が `EVENT_INPUT_CHANGED` / `EVENT_INPUT_SUBMIT` を配送する(RFC 0001 §3.2 の kind 追加。構造変更なし)。
+- **ハンドラは props に持たない。** `on_click` が `ButtonProps` に入るのは、クリック id を `set_on_click` で**ワイヤに書く**必要があるためである。input は `input_id` 自体がワイヤに乗り、envelope も `(4, kind, view, input_id, 0)`(§3.4)でハンドラ id を運ぶスロットを持たないため、レジストリは `input_id` をキーにするしかない。props に別の `HandlerId` を置くと widget 1 つに id が 2 つでき、配送時にどちらとも突き合わせられない。登録は id の発行と同じ top-level let に束ねる(DCE 安全):
+
+```moonbit nocheck
+let prompt_input = {
+  let id = handlers.new_input_id()
+  handlers.on_submit(id, fn(view) { … })
+  id
+}
+```
+
+- `HandlerRegistry` に `input_submit : Map[Int, InputSubmitHandler]` と `input_changed : Map[Int, InputChangedHandler]`(いずれも `input_id` をキーとする単一配送)を追加し、`framework_dispatch` が `EVENT_INPUT_CHANGED` / `EVENT_INPUT_SUBMIT` を配送する(RFC 0001 §3.2 の kind 追加。構造変更なし)。
 - **#86 への設計余地の要求は「Event enum と registry が kind 追加に閉じていないこと」のみ**であり、RFC 0001 の設計はこれを既に満たす(§3.2「キー/テキスト/名前付きキーのハンドラもレジストリで統一」)。#86 実装時に追加の考慮は不要である。
 
 ## 4. ABI 影響
@@ -170,8 +182,8 @@ RFC 0002 と合わせて新 export が 4 本増える。**#71(ヘッダ生成デ
 
 1. **controlled input**: MoonBit が値を検証しながら毎打鍵で書き戻すモード。v1 は uncontrolled のみ(§2)。必要になった時点で `EVENT_INPUT_CHANGED` + `set_text` の組で近似できるが、IME 合成中の書き戻し(`BUSY_COMPOSING`)との相性を含めて別途設計する。
 2. **複数行 / 折り返し**: v1 は単一行(ハーネスのプロンプト入力に十分)。複数行は wrap 計算とスクロールが要るため `G6` の別項として扱う。
-3. **ルート配送抑止の正確な範囲**: 抑止するのは `EVENT_TEXT` / `EVENT_KEY` と、widget が消費する `EVENT_NAMED_KEY`(矢印・Backspace/Delete・Home/End・Escape)まで。Enter は `EVENT_INPUT_SUBMIT` に変換。この表は #88 で実測して確定し、`architecture.md` §5 に記載する。
-4. **`input_id` の発行規約**: click_id と同じく「レジストリ発行 + 型付きラッパー」(RFC 0001)を推奨とするが、RFC 0001 実装(#86)前に #88 が完了した場合は生 i32 で暫定運用し、#86 で型を被せる。
+3. ~~**ルート配送抑止の正確な範囲**~~ — **#88 で決着**。実装は表を持たず、**input がフォーカス中ならアプリ級配送を一律に抑止する**(`FfiView::render` の `on_key_down` が `is_focused` を見て早期 return)。Tab / Shift+Tab はその判定より**前**にフレームワークが消費するため抑止の対象外で、フォーカストラバースを継続する。Enter は widget が消費して `EVENT_INPUT_SUBMIT` に変換する。編集キー(矢印・Backspace/Delete・Home/End)は widget 自身の `on_key_down` が処理する。確定した範囲は `architecture.md` §5 に記載済み。
+4. ~~**`input_id` の発行規約**~~ — **#88 で決着**。#86(RFC 0001)が先にマージされたため暫定運用は不要となり、推奨どおり「レジストリ発行 + 型付きラッパー」を採用した(`HandlerRegistry::new_input_id` が click id と同じ単調カウンタから発行し、`InputId` newtype で `HandlerId` と区別する)。
 5. **候補ウィンドウ位置の精度**: `bounds_for_range` は単一行前提なら `x_for_index` で正確に出せる。折り返し導入時に `line_layout` の行分解と合わせて再訪する。
 
 ---

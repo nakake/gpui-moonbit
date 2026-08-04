@@ -366,10 +366,13 @@ fn button_row(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
 fn prompt_box(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
   // Editable single-line input (RFC 0003): the Rust-side text model keeps the
   // buffer/selection/preedit across rebuilds; the demo pulls on submit only.
+  // `min_width` is required: the root column is centered, so the frame shrinks
+  // to its content and the inner leaf's 100% width would resolve to 0.
   @nakake/gpui-bindings.text_input(cb, {
     key: "prompt-input",
     input_id: prompt_input,
     placeholder: "type a number, press Enter",
+    min_width: 360,
   })
 }
 

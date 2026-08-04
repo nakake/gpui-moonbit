@@ -487,3 +487,148 @@ fn tree_past_max_depth_is_rejected(cx: &mut TestAppContext) {
     let err = layout_bounds(cx, &buf, &[]).expect_err("past MAX_TREE_DEPTH must be rejected");
     assert_eq!(err, crate::GPUI_STATUS_DEPTH_EXCEEDED);
 }
+
+// --- text input sizing (RFC 0003) ------------------------------------
+//
+// The `OP_TEXT_INPUT` leaf is laid out at 100% of its parent's width, so the
+// parent needs a *definite* width. A centered column (`OP_SET_CENTER`) sizes
+// its children to their content, which makes that percentage resolve to 0:
+// the frame collapses to padding + border, the placeholder paints outside it,
+// and the click hitbox is zero-wide (the widget cannot be focused at all).
+// The `text_input` component therefore always pins a minimum width.
+
+/// The failure mode: no width on the frame, so the input measures 0px wide.
+#[gpui::test]
+fn text_input_without_a_definite_frame_width_collapses(cx: &mut TestAppContext) {
+    let buf = prompt_box_buffer(None);
+    let b = layout_bounds(cx, &buf, &["frame", "input:1"]).expect("decode");
+    // Frame = 2×8 padding + 2×1 border only; the input leaf gets nothing.
+    assert_bounds_eq("frame", b["frame"], 951.0, 518.0, 18.0, 44.0);
+    assert_bounds_eq("input:1", b["input:1"], 960.0, 527.0, 0.0, 26.0);
+}
+
+/// With a minimum width the frame is definite, so the leaf fills its content
+/// box (360 − 2×1 border − 2×8 padding = 342) and the placeholder, the caret
+/// and the click hitbox all live inside the drawn box.
+#[gpui::test]
+fn text_input_min_width_sizes_the_input_leaf(cx: &mut TestAppContext) {
+    let buf = prompt_box_buffer(Some(360));
+    let b = layout_bounds(cx, &buf, &["frame", "input:1"]).expect("decode");
+    assert_bounds_eq("frame", b["frame"], 780.0, 518.0, 360.0, 44.0);
+    assert_bounds_eq("input:1", b["input:1"], 789.0, 527.0, 342.0, 26.0);
+}
+
+/// The demo's prompt box: a bordered, padded frame holding one `OP_TEXT_INPUT`
+/// leaf, inside a centered flex column (mirrors `app.mbt`'s `prompt_box`).
+fn prompt_box_buffer(min_width: Option<i32>) -> Vec<u8> {
+    use crate::abi_constants::{OP_SET_CENTER, OP_SET_MIN_SIZE, OP_TEXT_INPUT};
+    let placeholder = "type a number, press Enter";
+    let mut b = Buf::new()
+        .div()
+        .op(OP_SET_FLEX)
+        .u8(1) // column
+        .op(OP_SET_CENTER)
+        .op(OP_SET_GAP)
+        .f32(28.0)
+        .op(OP_SET_PADDING)
+        .f32(32.0)
+        .div()
+        .key("frame");
+    if let Some(w) = min_width {
+        b = b.op(OP_SET_MIN_SIZE).u32(w as u32).u32(-1i32 as u32); // height auto
+    }
+    b.op(OP_SET_BORDER)
+        .f32(1.0)
+        .u8(120)
+        .u8(120)
+        .u8(140)
+        .op(OP_SET_ROUNDED)
+        .f32(6.0)
+        .op(OP_SET_PADDING)
+        .f32(8.0)
+        .op(OP_TEXT_INPUT)
+        .u32(1) // input_id
+        .u32(placeholder.len() as u32)
+        .bytes(placeholder.as_bytes())
+        .add_child() // leaf -> frame
+        .add_child() // frame -> root
+        .root()
+        .finish()
+}
+
+/// The behavioral half of the sizing story: a click has to land on the widget
+/// and typed characters have to end up in its buffer instead of falling
+/// through to the app's window-level key handler. Needs the dispatch recorder,
+/// hence the feature gate.
+#[cfg(feature = "test-dispatch-stub")]
+mod text_input_interaction {
+    use super::prompt_box_buffer;
+    use crate::headless::with_rendered_tree;
+    use crate::{EVENT_TEXT, gpui_input_text_len, take_recorded_dispatches};
+    use gpui::{Modifiers, TestAppContext, point, px};
+
+    /// Where a user aims: inside the 360px-wide box (x 780..1140) but off its
+    /// center line. The collapsed frame is 18px wide around x = 960, so the
+    /// same click misses it — and gpui's `Bounds::contains` is inclusive on
+    /// both edges, so only a pixel-exact hit on the center line would land on
+    /// a zero-width hitbox anyway.
+    const CLICK: (f32, f32) = (1060.0, 540.0);
+
+    fn reset() {
+        *crate::INPUT_MIRROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        crate::VIEWS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// With a definite frame width the click hits the widget, focus lands on
+    /// it, and "42" goes into the text model — never to the app as
+    /// `EVENT_TEXT` (which is what the demo's `on_text` handler would have
+    /// parsed into the counter).
+    #[gpui::test]
+    fn click_focuses_the_input_and_typed_text_stays_in_the_widget(cx: &mut TestAppContext) {
+        let _suite = crate::INJECT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _recorder = crate::install_dispatch_recorder();
+        crate::set_dispatch_changed(0);
+        reset();
+
+        with_rendered_tree(cx, &prompt_box_buffer(Some(360)), |vcx| {
+            vcx.simulate_click(point(px(CLICK.0), px(CLICK.1)), Modifiers::none());
+            vcx.simulate_input("42");
+        })
+        .expect("decode");
+
+        assert_eq!(gpui_input_text_len(0, 1), 2, "typed text must reach the model");
+        let text_events = take_recorded_dispatches()
+            .into_iter()
+            .filter(|e| e.kind == EVENT_TEXT)
+            .count();
+        assert_eq!(text_events, 0, "a focused input must swallow typed keys");
+    }
+
+    /// The reported bug: with a collapsed frame the click misses the zero-wide
+    /// hitbox, so nothing is focused and every keystroke is delivered to the
+    /// app as `EVENT_TEXT` — the demo's counter ate the input.
+    #[gpui::test]
+    fn collapsed_input_cannot_be_focused_and_leaks_keys_to_the_app(cx: &mut TestAppContext) {
+        let _suite = crate::INJECT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _recorder = crate::install_dispatch_recorder();
+        crate::set_dispatch_changed(0);
+        reset();
+
+        with_rendered_tree(cx, &prompt_box_buffer(None), |vcx| {
+            vcx.simulate_click(point(px(CLICK.0), px(CLICK.1)), Modifiers::none());
+            vcx.simulate_input("42");
+        })
+        .expect("decode");
+
+        assert_eq!(gpui_input_text_len(0, 1), 0, "nothing can reach the model");
+        let text_events = take_recorded_dispatches()
+            .into_iter()
+            .filter(|e| e.kind == EVENT_TEXT)
+            .count();
+        assert_eq!(text_events, 2, "both keys leaked to the app");
+    }
+}
