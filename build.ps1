@@ -174,6 +174,18 @@ $ec = $LASTEXITCODE
 Pop-Location
 if ($ec -ne 0) { throw 'moon fmt gpui-bindings-ffi.mbt failed' }
 
+# Generate the moon.pkg files BEFORE `moon check`, not after it (issue #121).
+# They are gitignored generated files, so a stale copy left by an older
+# template — a renamed import, changed cc-flags — makes 1a fail on something
+# this script already knows how to fix, and the fix used to live *after* the
+# gate: every rerun died in the same place until the files were deleted by hand.
+# Writing first also closes a coverage hole: on a cold clone neither file
+# exists, so moon does not treat cmd/main and cmd/roundtrip as packages and 1a
+# silently skips both mains.
+# Link flags stay empty here; step 4 rewrites both with $nativeLibs.
+Write-MoonPkg (Join-Path $MB 'cmd\main\moon.pkg.windows') (Join-Path $MB 'cmd\main\moon.pkg') ''
+Write-MoonPkg (Join-Path $MB 'cmd\roundtrip\moon.pkg.windows') (Join-Path $MB 'cmd\roundtrip\moon.pkg') ''
+
 Write-Host '==> [1a/5] MoonBit typecheck'
 Push-Location $MB
 cmd /c "moon check 2>&1" | Out-Host
@@ -181,12 +193,11 @@ $ec = $LASTEXITCODE
 Pop-Location
 if ($ec -ne 0) {
   Write-Host 'HINT: if you added a new Rust C export, the C header must be regenerated; run .\build.ps1 (it regenerates the header before bindgen).'
+  Write-Host 'HINT: cmd\main\moon.pkg and cmd\roundtrip\moon.pkg are generated from moon.pkg.windows just above; if an import path or link flag looks wrong there, edit the template, not the generated file.'
   throw 'MoonBit compilation failed'
 }
 
 Write-Host '==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)'
-Write-MoonPkg (Join-Path $MB 'cmd\main\moon.pkg.windows') (Join-Path $MB 'cmd\main\moon.pkg') ''
-Write-MoonPkg (Join-Path $MB 'cmd\roundtrip\moon.pkg.windows') (Join-Path $MB 'cmd\roundtrip\moon.pkg') ''
 Push-Location $MB
 $coldOutput = cmd /c "moon build 2>&1"
 $ec = $LASTEXITCODE
