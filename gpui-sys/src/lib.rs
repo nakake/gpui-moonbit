@@ -2011,6 +2011,19 @@ static INPUT_SET_TEXT_QUEUE: Mutex<Vec<(i32, i32, String)>> = Mutex::new(Vec::ne
 /// their notify decision.
 static INPUT_DIRTY: Mutex<bool> = Mutex::new(false);
 
+/// Serializes every test that touches the process-global input statics above
+/// (`INPUT_MIRROR` / `INPUT_SET_TEXT_QUEUE` / `INPUT_DIRTY`): the state-machine
+/// tests (`text_input_tests`, which reset the whole mirror to `None`) and the
+/// headless interaction tests (`headless_tests`, which render a real widget and
+/// then read its mirrored text back through the pull ABI).
+///
+/// Lock order when a test needs more than one of the process-global test locks:
+/// `INJECT_TEST_LOCK` → `INPUT_TEST_LOCK` → `TEST_VIEWS_MUTEX`. Always take
+/// them in that order; `headless::layout_bounds` / `with_rendered_tree` take
+/// `TEST_VIEWS_MUTEX` internally, so it must be last.
+#[cfg(test)]
+static INPUT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 fn mirror_update(view: i32, input_id: i32, text: &str, composing: bool) {
     let mut guard = INPUT_MIRROR.lock().unwrap_or_else(|e| e.into_inner());
     guard.get_or_insert_with(HashMap::new).insert(
@@ -3937,10 +3950,6 @@ mod scroll_feedback_tests;
 #[cfg(test)]
 mod text_input_tests {
     use super::*;
-
-    /// Serializes tests that touch the process-global INPUT_MIRROR /
-    /// INPUT_SET_TEXT_QUEUE / INPUT_DIRTY statics.
-    static INPUT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_input_statics() {
         *INPUT_MIRROR.lock().unwrap_or_else(|e| e.into_inner()) = None;

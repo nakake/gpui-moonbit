@@ -74,6 +74,14 @@ pub(all) struct TextInputProps {
   input_id : InputId
   /// 空欄時の薄表示テキスト。
   placeholder : String
+  /// 枠の最小幅（px）。**必須**です。入力欄の中身（`OP_TEXT_INPUT` の leaf）は
+  /// 親の幅 100% で敷かれるため、親（この枠 div）の幅が不定だと 0px に潰れます。
+  /// 中央寄せ（`set_center`）や `align: start` の列に置くと枠は内容幅に縮むので
+  /// まさにこの状況になり、枠は padding だけの細い箱になり placeholder が枠外に
+  /// はみ出して描かれ、クリック判定も 0 幅になってフォーカスできません。この
+  /// 最小幅が枠の幅を確定させ、内側の 100% を解決可能にします。親が十分広い
+  /// （`align: stretch` など）場合はそちらが勝ちます。
+  min_width : Int
 }
 
 ///|
@@ -85,6 +93,8 @@ pub(all) struct TextInputProps {
 pub fn text_input(cb : CommandBuffer, props : TextInputProps) -> Unit {
   cb.div()
   cb.set_key(props.key)
+  // 高さは auto（-1）。幅だけ確定させれば内側の leaf の 100% が解決する。
+  cb.set_min_size(props.min_width, -1)
   cb.set_border(1.0, 120, 120, 140)
   cb.set_rounded(6.0)
   cb.set_padding(8.0)

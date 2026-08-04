@@ -83,6 +83,50 @@ pub fn layout_bounds(
     Ok(bounds)
 }
 
+/// Decode `buffer`, render it in a headless window, and hand the live window
+/// to `f` so the test can drive real input (`simulate_click`,
+/// `simulate_input`, …) through the same element tree `layout_bounds`
+/// measures.
+///
+/// `layout_bounds` tears its window down before returning, which is fine for
+/// geometry but useless for interaction: focus, hit testing and the platform
+/// input handler only exist while the window is alive. The window is removed
+/// after `f` returns; process-global state written during `f` (the input
+/// mirror, the dispatch recorder) outlives it and is what callers assert on.
+///
+/// Returns `Err(status)` when the decoder rejects the buffer, exactly like
+/// [`layout_bounds`].
+pub fn with_rendered_tree<R>(
+    cx: &mut TestAppContext,
+    buffer: &[u8],
+    f: impl FnOnce(&mut gpui::VisualTestContext) -> R,
+) -> Result<R, i32> {
+    let _guard = crate::TEST_VIEWS_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let status = build_tree_from_buffer(0, buffer);
+    if status != crate::GPUI_STATUS_OK {
+        return Err(status);
+    }
+
+    let (_view, vcx) = cx.add_window_view(|_window, cx| FfiView {
+        focus: cx.focus_handle(),
+        view: 0,
+        scroll_handles: Rc::new(RefCell::new(HashMap::new())),
+        inputs: Rc::new(RefCell::new(HashMap::new())),
+    });
+    // Same second-draw dance as `layout_bounds`: hit testing reads the
+    // rendered frame, so the tree has to be laid out before any click.
+    vcx.update(|window, _| window.refresh());
+
+    let out = f(vcx);
+
+    vcx.update(|window, _| window.remove_window());
+    crate::VIEWS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    Ok(out)
+}
+
 /// Convenience for the common single-selector case.
 pub fn layout_bound(
     cx: &mut TestAppContext,

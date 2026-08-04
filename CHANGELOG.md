@@ -52,6 +52,7 @@
 
 ### Fixed
 
+- テキスト入力ボックスが幅 0 に潰れていた（#88 の後続）。`OP_TEXT_INPUT` の leaf は枠 div の幅 100% で敷かれるため、枠の幅が不定だとその 100% が 0px に解決する。Counter デモの `prompt_box` は `set_center` の列に置かれており（子は内容幅に縮む）、枠は padding + border だけの 18px の箱になり、**placeholder が枠の外にはみ出して描かれ**、さらに**クリック判定が 0 幅になるためボックスをフォーカスできず、打鍵がすべてアプリの `EVENT_TEXT` に流れてカウンタの値を書き換えていた**。`TextInputProps` に必須の `min_width`（px）を追加し、コンポーネントが枠 div に `set_min_size(min_width, -1)`（高さは auto）を出すようにして枠の幅を確定させる。デモは 360px を渡す。回帰テストとして、潰れた場合と `min_width` 指定時のレイアウト golden 2 本と、クリック→フォーカス→入力が widget に入り `EVENT_TEXT` が漏れないことを実クリック・実キーストロークで確かめる headless 相互作用テストを追加した（ヘッドレスハーネスに `with_rendered_tree` を追加）。
 - C export 全 10 本のうち `ffi_export`（`catch_unwind` ラッパ）を通っていなかった 2 本（`gpui_event_copy_text` / `gpui_debug_dump_text`）をラップした（#73）。現状この 2 本に unwind する経路は見当たらず、`extern "C"` からの unwind は現代の Rust では abort であって UB ではないため、これは健全性の修正ではなく**契約の一貫性**の修正である。「panic は FFI 境界を越えず `GPUI_STATUS_INTERNAL_PANIC` になる」という契約が全 export に等しく適用されていなかったため、将来この 2 本に panic しうるコードが入ったときだけ静かにプロセス abort に化ける状態だった。
   - 再発防止として、`#[unsafe(no_mangle)]` の付いた export が `ffi_export` を通っているか、かつラベル文字列が関数名と一致しているかを自身のソースを走査して検証するテストを追加（属性レベルで強制する手段が無いためテキスト検査。export を 1 本でも取りこぼすと空回りするので、検出本数の下限も assert する）。`ffi_export` が panic をステータスに変換すること自体のテストも追加した。
 - コミット済みツリーを歩く再帰 3 関数（`render_node` / `collect_text_contents` / `update_keyed_text`）のスタックオーバーフローを塞いだ（#74）。`stacker` でスタックを伸長し、あわせて木のネスト深さに上限（`MAX_TREE_DEPTH` = 64）を設けて、超過分は新ステータス `GPUI_STATUS_DEPTH_EXCEEDED`（`-15`）でコミット前に拒否する。深さの検査は既存の重複キー検査と同じ 1 回の反復走査に相乗りさせている。

@@ -84,7 +84,12 @@ test "button writes the handler id, not a raw constant" {
 ///|
 test "text_input emits a keyed frame div with an OP_TEXT_INPUT leaf" {
   let cb = CommandBuffer::new()
-  text_input(cb, { key: "in1", input_id: { raw: 9 }, placeholder: "あ" })
+  text_input(cb, {
+    key: "in1",
+    input_id: { raw: 9 },
+    placeholder: "あ",
+    min_width: 360,
+  })
   let b = cb.to_bytes()
   let c = { b, pos: 8 } // skip the 8-byte header
   // outer frame div
@@ -94,6 +99,11 @@ test "text_input emits a keyed frame div with an OP_TEXT_INPUT leaf" {
   assert_eq(c.u8(), 0x69) // 'i'
   assert_eq(c.u8(), 0x6E) // 'n'
   assert_eq(c.u8(), 0x31) // '1'
+  // min width pins the frame's width so the inner leaf's 100% resolves; the
+  // height stays auto (-1).
+  assert_eq(c.u8(), OP_SET_MIN_SIZE)
+  assert_eq(c.i32(), 360)
+  assert_eq(c.i32(), -1)
   assert_eq(c.u8(), OP_SET_BORDER)
   assert_eq(c.f32_bits(), 0x3F800000) // 1.0
   assert_eq(c.u8(), 120)
@@ -121,15 +131,18 @@ test "text_input writes the issued input id, not a raw constant" {
   let r = HandlerRegistry::new()
   let id = r.new_input_id()
   let cb = CommandBuffer::new()
-  text_input(cb, { key: "k", input_id: id, placeholder: "" })
+  text_input(cb, { key: "k", input_id: id, placeholder: "", min_width: 200 })
   let b = cb.to_bytes()
   let c = { b, pos: 8 }
-  // div, set_key ("k"), set_border (f32 + 3 bytes), set_rounded (f32),
-  // set_padding (f32) — then the input leaf with the i32 id.
+  // div, set_key ("k"), set_min_size (2×i32), set_border (f32 + 3 bytes),
+  // set_rounded (f32), set_padding (f32) — then the input leaf with the i32 id.
   assert_eq(c.u8(), OP_DIV)
   assert_eq(c.u8(), OP_SET_KEY)
   assert_eq(c.u32(), 1)
   ignore(c.u8())
+  assert_eq(c.u8(), OP_SET_MIN_SIZE)
+  ignore(c.i32())
+  ignore(c.i32())
   assert_eq(c.u8(), OP_SET_BORDER)
   ignore(c.f32_bits())
   ignore(c.u8())
