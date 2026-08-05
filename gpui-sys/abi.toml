@@ -147,6 +147,8 @@ RUN_STYLE_BACKGROUND = 32
 BUFFER_VERSION = 1
 
 [callback]
-name = "dispatch"
+# Library-owned entry point in the root package `nakake/gpui-bindings`
+# (RFC 0004). The build drivers derive the mangled symbol tail from this name.
+name = "dispatch_entry"
 params = ["i32", "i32", "i32", "i32", "i32"]
 return = "i32"

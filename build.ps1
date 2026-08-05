@@ -2,7 +2,7 @@
 #   [0] regenerate the C header, ABI constants, and C FFI bindings
 #   [1a] moon check (fatal typecheck gate)
 #   [1b] MoonBit bootstrap build (native-link failure is expected before Cargo flags)
-#   [2] extract app.dispatch's mangled symbol from the generated main.c
+#   [2] extract dispatch_entry's mangled symbol from the generated main.c
 #       (x64 COFF has no ABI underscore: use the name verbatim, like ELF)
 #   [3] cargo build gpui-sys, then capture its native-static-libs list
 #   [4] regenerate cmd/main/moon.pkg from moon.pkg.windows and relink
@@ -11,7 +11,6 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $GSys = Join-Path $Root 'gpui-sys'
 $MB   = Join-Path $Root 'moonbit-bindings'
-$PkgFnSuffix = '3app8dispatch'   # package app, function dispatch (keep in sync with build.sh)
 
 $env:Path = "$env:USERPROFILE\.moon\bin;$env:Path"
 # Prefer English MSVC diagnostics when the installed toolchain honors VSLANG,
@@ -146,6 +145,34 @@ foreach ($abiLine in $abiLines) {
   }
 }
 if (-not $callbackParams) { throw 'could not derive [callback] params from abi.toml' }
+
+# The MoonBit function whose mangled symbol Rust needs, derived from abi.toml
+# so `[callback] name` is the single source of truth for the link-time contract
+# too (issue #76, RFC 0004 §3.5). The callback lives in the library's root
+# package (`nakake/gpui-bindings`), so the name alone is enough to match the
+# symbol tail: a package component would add another `<len><component>` in front
+# of it.
+#
+# Mangling of one component: '_' -> '__', then '-' -> '_2d', length-prefixed with
+# the escaped length. `dispatch_entry` -> `15dispatch__entry`.
+$callbackSection = ''
+$CallbackName = ''
+foreach ($abiLine in $abiLines) {
+  $trimmed = ($abiLine -replace '\s*#.*$', '').Trim()
+  if (-not $trimmed) { continue }
+  if ($trimmed -match '^\[([A-Za-z_][A-Za-z0-9_]*)\]$') { $callbackSection = $Matches[1]; continue }
+  if ($callbackSection -eq 'callback' -and $trimmed -match '^name\s*=\s*"([^"]*)"\s*$') {
+    $CallbackName = $Matches[1]
+    if ($CallbackName -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+      throw "invalid [callback] name in abi.toml: $CallbackName"
+    }
+    break
+  }
+}
+if (-not $CallbackName) { throw 'could not derive [callback] name from abi.toml' }
+$PkgFnSuffix = ($CallbackName -replace '_', '__' -replace '-', '_2d')
+$PkgFnSuffix = "$($PkgFnSuffix.Length)$PkgFnSuffix"
+
 $abiConstants = Join-Path $MB 'abi_constants.mbt'
 # UTF-8 without BOM and LF newlines matches awk output byte-for-byte.
 [System.IO.File]::WriteAllText($abiConstants, (($generated -join "`n") + "`n"), $utf8NoBom)
@@ -208,7 +235,7 @@ if ($ec -eq 0) {
   $coldText = $coldOutput -join "`n"
   # MSVC reports a missing input lib as LNK1181 and an unresolved external as
   # LNK2019/1120 (locale-independent codes; messages are localized).
-  if ($coldText -match '(?i)undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|3app8dispatch|LNK1104|LNK1181|LNK2019|LNK1120') {
+  if ($coldText -match "(?i)undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|$PkgFnSuffix|LNK1104|LNK1181|LNK2019|LNK1120") {
     Write-Host '    Expected cold-link failure: gpui_sys.lib or callback is not available yet; continuing.'
   } else {
     $coldOutput | Out-Host
@@ -216,13 +243,13 @@ if ($ec -eq 0) {
   }
 }
 
-Write-Host '==> [2/5] Extract the mangled symbol for app.dispatch'
+Write-Host "==> [2/5] Extract the mangled symbol for $CallbackName"
 $mainC = Join-Path $MB '_build\native\debug\build\cmd\main\main.c'
 if (-not (Test-Path $mainC)) { throw "not found: $mainC; did MoonBit compile? (step 1 output above)" }
 $symbols = @(Select-String -Path $mainC -Pattern "_M0FP[A-Za-z0-9_]*$PkgFnSuffix" -AllMatches |
        ForEach-Object { $_.Matches } | ForEach-Object { $_.Value } |
        Sort-Object -Unique)
-if ($symbols.Count -ne 1) { throw "expected exactly 1 app.dispatch symbol ending in $PkgFnSuffix, found $($symbols.Count)" }
+if ($symbols.Count -ne 1) { throw "expected exactly 1 $CallbackName symbol ending in $PkgFnSuffix, found $($symbols.Count)" }
 $sym = $symbols[0]
 $normalizedC = (Get-Content $mainC -Raw) -replace '\s+', ' '
 $escapedSym = [regex]::Escape($sym)
