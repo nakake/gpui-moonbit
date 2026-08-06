@@ -2,7 +2,8 @@
   "is-main": true,
   "import": [
     "nakake/gpui-bindings",
-    "nakake/gpui-bindings/link"
+    "nakake/gpui-bindings/link",
+    "nakake/gpui-counter-example/counter"
   ],
   "warn-list": "-29"
 }

@@ -1,15 +1,22 @@
-// Interactive app: state + logic, written in MoonBit.
+// Counter demo: the reference consumer app for nakake/gpui-bindings.
 //
-// `dispatch` is the single event entry point that Rust (gpui-sys) calls via its
-// compiled symbol. The five i32 slots carry a versioned event envelope
-// (docs/architecture.md §4b). The whole event loop — decode, typed handler
-// dispatch, dirty detection, and rebuild scheduling — is the library's
-// `framework_dispatch` (RFC 0001 §3.4): handlers `set` signals and never
-// report "changed"; the framework rebuilds only when state actually moved.
+// This is a separate module that path-depends on the library (see moon.mod.json),
+// so it exercises the exact route a third-party consumer takes: resolve the
+// dependency, register a dispatch, and run.
 //
-// NOTE: changing `dispatch`'s signature does NOT change the mangled symbol name
-// (MoonBit mangling excludes types), so the Rust `extern` must be kept in sync —
-// it is generated from a template in `gpui-sys/build.rs`.
+// The app lives in this library package rather than in `main/` so it can carry
+// unit tests: a package that imports `nakake/gpui-bindings/link` propagates the
+// prebuild's link flags into its test executable too, and moon runs tests
+// through tcc, which cannot resolve them. `main/` keeps the link import and
+// nothing else.
+//
+// `dispatch` is the app's event entry point. Rust does not call it directly — it
+// calls the library-owned `dispatch_entry`, which delegates to whatever `main`
+// registered with `register_dispatch` (RFC 0004). The five i32 slots carry a
+// versioned event envelope (docs/architecture.md §4b). The whole event loop —
+// decode, typed handler dispatch, dirty detection, and rebuild scheduling — is
+// the library's `framework_dispatch` (RFC 0001 §3.4): handlers `set` signals and
+// never report "changed"; the framework rebuilds only when state actually moved.
 
 // State lives in a typed store cell (RFC 0001 §3.3); handlers mutate it
 // through the `count` signal (RFC 0001 §3.4), which is what the framework's
@@ -81,14 +88,6 @@ let btn_increment_10 : @nakake/gpui-bindings.HandlerId = handlers.on_click(fn(
   count.set(store, count.get(store) + 10)
 })
 
-///|
-/// +1 ボタンの実ハンドラ id。リンク済み round-trip テスト（`cmd/roundtrip`）が
-/// dispatch 経路を叩くために使う。id は共有カウンタで発行されるため登録順に依存
-/// する — テスト側でのハードコードは登録の追加・並べ替えで静かに壊れる。
-pub fn increment_handler_id() -> Int {
-  btn_increment.to_int()
-}
-
 // Text input (RFC 0003): the prompt box's id is issued once and written into
 // the wire stream by `prompt_box`; the submit handler is registered right
 // there so evaluating `prompt_input` (which `build_tree` does) always wires
@@ -101,13 +100,6 @@ let prompt_input : @nakake/gpui-bindings.InputId = {
   let id = handlers.new_input_id()
   handlers.on_submit(id, fn(view) { on_submit_input(view, id) })
   id
-}
-
-///|
-/// プロンプト入力の生 input_id。リンク済み round-trip テスト（`cmd/roundtrip`）が
-/// `EVENT_INPUT_SUBMIT` 配送経路を叩くために使う（`increment_handler_id` と同じ規約）。
-pub fn prompt_input_id() -> Int {
-  prompt_input.to_int()
 }
 
 // Key codes = Unicode codepoint of a single-character key (sent by Rust).

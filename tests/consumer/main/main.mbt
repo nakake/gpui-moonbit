@@ -12,10 +12,47 @@
 // Headless, so no window is opened: input_text against an unrealized view
 // returns GPUI_STATUS_INVALID_HANDLE (-1) instead of a string.
 
+// A dispatch of the consumer's own. The library ships no app any more (RFC
+// 0004), so writing one here is the point: it is what a third party has to do,
+// and the check below proves the registration actually reached the entry point
+// Rust links against.
+
+///|
+let dispatched : Ref[Int] = { val: 0 }
+
+///|
+fn dispatch(
+  _version : Int,
+  _kind : Int,
+  _view : Int,
+  _data_a : Int,
+  _data_b : Int,
+) -> Int {
+  dispatched.val = dispatched.val + 1
+  0 // nothing to redraw: this consumer never opens a window
+}
+
+///|
 fn main {
   // Register a dispatch so the staticlib's mb_dispatch reference resolves to
-  // the library's entry point (RFC 0004).
-  @nakake/gpui-bindings.register_dispatch(@nakake/gpui-bindings/app.dispatch)
+  // the library's entry point (RFC 0004). No `_keep` binding: registering is
+  // what retains `dispatch_entry` through dead-code elimination.
+  @nakake/gpui-bindings.register_dispatch(dispatch)
+
+  // The registered closure must be what `dispatch_entry` delegates to.
+  if @nakake/gpui-bindings.dispatch_entry(
+      @nakake/gpui-bindings.ABI_VERSION,
+      @nakake/gpui-bindings.EVENT_CLICK,
+      0,
+      1,
+      0,
+    ) !=
+    0 {
+    abort("dispatch_entry did not return the registered dispatch's value")
+  }
+  if dispatched.val != 1 {
+    abort("registered dispatch ran \{dispatched.val} times, want 1")
+  }
 
   // Serialize a small tree — pure MoonBit, no FFI yet.
   let cb = @nakake/gpui-bindings.CommandBuffer::new()

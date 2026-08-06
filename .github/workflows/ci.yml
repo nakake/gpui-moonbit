@@ -122,8 +122,8 @@ jobs:
       - name: Verify .app bundle (macOS)
         if: runner.os == 'macOS'
         run: |
-          test -x dist/Counter.app/Contents/MacOS/Counter
-          plutil -lint dist/Counter.app/Contents/Info.plist
+          test -x dist/Runner.app/Contents/MacOS/Runner
+          plutil -lint dist/Runner.app/Contents/Info.plist
 
       - name: Cold build (Windows)
         if: runner.os == 'Windows'
@@ -176,6 +176,40 @@ jobs:
           & .\_build\native\debug\build\main\main.exe
           if ($LASTEXITCODE -ne 0) { throw 'consumer smoke test failed' }
 
+      # The examples are separate modules that path-depend on the library
+      # (#125, RFC 0004), so building them is the standing regression test for
+      # "a consumer can write their own app": each registers its own dispatch
+      # into the library-owned entry point and links its own executable. This
+      # replaces the type-check coverage the in-module `moon test -p …/app` and
+      # `-p …/examples/*` used to give.
+      #
+      # Build only — `run_window` blocks in the GPUI event loop and CI has no
+      # display. `moon test` runs for counter alone: the Counter demo's unit
+      # tests moved out of the library module with it, and hello / stream have
+      # none.
+      - name: Examples build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          for example in counter hello stream; do
+            (cd "examples/$example" && moon build)
+          done
+          cd examples/counter && moon test
+
+      - name: Examples build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($example in 'counter', 'hello', 'stream') {
+            Push-Location "examples/$example"
+            moon build
+            if ($LASTEXITCODE -ne 0) { throw "moon build failed for example $example" }
+            Pop-Location
+          }
+          Push-Location examples/counter
+          moon test
+          if ($LASTEXITCODE -ne 0) { throw 'moon test failed for example counter' }
+          Pop-Location
+
       - name: MoonBit tests (Unix)
         if: runner.os != 'Windows'
         working-directory: moonbit-bindings
@@ -196,11 +230,8 @@ jobs:
         run: >-
           moon test
           -p nakake/gpui-bindings
-          -p nakake/gpui-bindings/app
           -p nakake/gpui-bindings/cmd/main
           -p nakake/gpui-bindings/cmd/roundtrip
-          -p nakake/gpui-bindings/examples/hello
-          -p nakake/gpui-bindings/examples/stream
 
       - name: Rebuild after Rust-only change (Unix)
         if: runner.os != 'Windows'

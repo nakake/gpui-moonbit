@@ -23,7 +23,7 @@ MoonBit native から Rust/GPUI を C FFI 越しに呼ぶ、ローカル向け�
 │   └── examples/hello/                # Counter 以外の最小 example（ライブラリ）
 ├── build.sh                           # macOS / Linux 用 build driver
 ├── build.ps1                          # Windows 用 build driver
-├── bundle.sh                          # macOS Counter.app の作成（build.sh から呼び出される）
+├── bundle.sh                          # macOS Runner.app の作成（build.sh から呼び出される）
 └── docs/architecture.md               # 現行実装の詳細
 ```
 
@@ -50,14 +50,14 @@ build driver を使用してください。裸の `cargo build` は `gpui-sys/mb
 
 ```bash
 ./build.sh
-open dist/Counter.app
+open dist/Runner.app
 # stderr をターミナルで確認する場合
-./dist/Counter.app/Contents/MacOS/Counter
+./dist/Runner.app/Contents/MacOS/Runner
 # バンドルを省略する場合
 ./build.sh --no-bundle
 ```
 
-macOS ではキーボード入力のために `.app` バンドルが必要です。`build.sh` は macOS でデフォルトで `dist/Counter.app` を作成します（`--no-bundle` で省略）。これは macOS 固有の要件であり、他 OS に一般化しません。署名なしの開発用ビルドです。Gatekeeper に阻まれた場合は `xattr -dr com.apple.quarantine dist/Counter.app` を試してください。
+macOS ではキーボード入力のために `.app` バンドルが必要です。`build.sh` は macOS でデフォルトで `dist/Runner.app` を作成します（`--no-bundle` で省略）。これは macOS 固有の要件であり、他 OS に一般化しません。署名なしの開発用ビルドです。Gatekeeper に阻まれた場合は `xattr -dr com.apple.quarantine dist/Runner.app` を試してください。
 
 ### Linux / WSLg
 

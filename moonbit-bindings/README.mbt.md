@@ -1,6 +1,6 @@
 # gpui-bindings 消費者向けガイド
 
-Rust/GPUI を MoonBit native から C FFI 越しに呼び、ネイティブウィンドウを描画するための MoonBit モジュール（`nakake/gpui-bindings`）です。UI ツリー全体を 1 つの**コマンドバッファ**として記述し、`build_tree` 1 回の FFI 呼び出しで Rust 側にコミットします。クリック・キー・テキストイベントは Rust から MoonBit の固定 callback `app.dispatch` に戻り、フレームワーク層（型付きハンドラレジストリ・状態ストア・signal・コンポーネント、RFC 0001）がデコード・配送・再構築を担います。
+Rust/GPUI を MoonBit native から C FFI 越しに呼び、ネイティブウィンドウを描画するための MoonBit モジュール（`nakake/gpui-bindings`）です。UI ツリー全体を 1 つの**コマンドバッファ**として記述し、`build_tree` 1 回の FFI 呼び出しで Rust 側にコミットします。クリック・キー・テキストイベントは Rust から MoonBit のライブラリ所有 callback `dispatch_entry`（アプリが `register_dispatch` で登録した dispatch へ委譲）に戻り、フレームワーク層（型付きハンドラレジストリ・状態ストア・signal・コンポーネント、RFC 0001）がデコード・配送・再構築を担います。
 
 このモジュールはローカル向けの実験的プロジェクトであり、安定した汎用 UI API ではありません。内部設計の詳細は [`docs/architecture.md`](../docs/architecture.md)（AI 向け内部文書）を参照してください。
 
@@ -34,9 +34,9 @@ build 完了後、build driver が起動コマンドを表示します。
 
 ```bash
 # macOS（キーボード入力には .app バンドルが必要）
-open dist/Counter.app
+open dist/Runner.app
 # stderr をターミナルで見る場合
-./dist/Counter.app/Contents/MacOS/Counter
+./dist/Runner.app/Contents/MacOS/Runner
 
 # Linux / WSLg（X11 経路を明示）
 cd moonbit-bindings
@@ -52,7 +52,7 @@ LD_LIBRARY_PATH=$PWD/../.linux-libs env -u WAYLAND_DISPLAY \
 .\moonbit-bindings\_build\native\debug\build\cmd\main\main.exe
 ```
 
-起動すると Counter デモが表示されます。`-1` / `Reset` / `+1` / `+10` ボタン、`j` / `k` / `r` キー、Enter/Escape/矢印キー、数字入力で値を操作できます。テキスト入力ボックス（RFC 0003）に数字を入力して Enter を押すと、その値がカウントにセットされボックスはクリアされます（IME 合成にも対応）。
+起動するのは `cmd/main` の最小ランナーです（クリックと `space` キーで受信イベント数が動きます）。build driver が用意するのはこの実行ファイルで、デモアプリは `examples/` 配下の独立モジュールになりました（#125）。Counter デモを動かすには `cd examples/counter && moon build` してから `./_build/native/debug/build/main/main.exe` を実行します。`-1` / `Reset` / `+1` / `+10` ボタン、`j` / `k` / `r` キー、Enter/Escape/矢印キー、数字入力で値を操作でき、テキスト入力ボックス（RFC 0003）に数字を入力して Enter を押すとその値がカウントにセットされます（IME 合成にも対応）。
 
 MoonBit 側の型検査だけなら、このディレクトリで `moon check`（および `moon test`）を実行できます。
 
@@ -78,13 +78,12 @@ DSL 形式の `moon.mod` は registry 依存しか記述できないため、**J
 
 git 依存の場合は `{ "git": { "url": "https://github.com/nakake/gpui-moonbit", "subdir": "moonbit-bindings" } }` の形式を使います（未検証）。
 
-### 2. 実行ファイルの moon.pkg で 3 パッケージを import する
+### 2. 実行ファイルの moon.pkg で 2 パッケージを import する
 
 ```moonbit nocheck
 // exe の moon.pkg
 import {
   "nakake/gpui-bindings",       // 高水準 API（CommandBuffer / build_tree / run_window）
-  "nakake/gpui-bindings/app",   // app.dispatch を保持（callback リンク解決に必須）
   "nakake/gpui-bindings/link",  // Rust staticlib のリンクフラグ伝播を受ける
 }
 
@@ -93,20 +92,42 @@ options("is-main": true)
 
 `link` パッケージはコードを含まず、prebuild のリンクフラグ伝播の受け口としてだけ存在します。**ライブラリパッケージやテストファイルからは import しないでください**（テスト実行ファイルにフラグが伝播し、tcc リンカが失敗します）。
 
-### 3. main で app.dispatch を明示保持する
+同じ理由で、**`link` を import したパッケージにはテストを置けません**。`moon test` はそのパッケージのテスト実行ファイルにも伝播したフラグを渡し、moon はテストを tcc でリンクするため `library 'stdc++' not found` で落ちます。ユニットテストを書くなら、アプリ本体を `link` を import しない別のライブラリパッケージに置き、`main` パッケージは `link` の import と `fn main` だけに保つ構成が安全です（[`examples/counter`](../examples/counter) がその形です）。
 
-Rust staticlib は `app.dispatch` のマングルシンボルを未解決参照として持つため、dead-code elimination で消されないよう明示保持が必須です:
+### 3. main で自分の dispatch を登録する
+
+Rust staticlib が解決するコールバックはライブラリ所有の `dispatch_entry` 1 本で、その中身は起動時に差し替えます。`run_window` より前に、メインスレッドから登録してください（RFC 0004）:
 
 ```moonbit nocheck
 ///|
+fn dispatch(
+  version : Int,
+  kind : Int,
+  view : Int,
+  data_a : Int,
+  data_b : Int,
+) -> Int {
+  @nakake/gpui-bindings.framework_dispatch(
+    ctx,
+    version,
+    kind,
+    view,
+    data_a,
+    data_b,
+    fn(v) { build_tree(v) },
+  )
+}
+
+///|
 fn main {
-  let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
-  ignore(_keep)
+  @nakake/gpui-bindings.register_dispatch(dispatch)
   ignore(@nakake/gpui-bindings/link.LINK_MARKER)
 
   // ... アプリ本体（build_tree / run_window）
 }
 ```
+
+再登録は last-wins です（テストが dispatch を差し替える手段を兼ねます）。登録を忘れたままイベントが届いた場合は、`0`（変化なし）が返り初回だけ警告が 1 行出ます。かつて必要だった `let _keep : (Int, Int, Int, Int, Int) -> Int = …` の明示保持は**不要になりました** — `register_dispatch` の呼び出し自体が `dispatch_entry` を dead-code elimination から守ります。
 
 ### 4. ビルドして実行する
 
@@ -124,7 +145,7 @@ env -u WAYLAND_DISPLAY ./_build/native/debug/build/main/main.exe
 
 ## 使い方
 
-アプリの実装パターンは [`app/app.mbt`](app/app.mbt)（Counter）が手本です。低水準のコマンドバッファの上に、フレームワーク層（状態・ハンドラ・コンポーネント・イベントループ）を載せます。
+アプリの実装パターンは [`examples/counter`](../examples/counter)（Counter デモ。path 依存の別モジュールとして本モジュールを消費します）が手本です。低水準のコマンドバッファの上に、フレームワーク層（状態・ハンドラ・コンポーネント・イベントループ）を載せます。
 
 ### 1. ツリーをコマンドバッファで記述する
 
@@ -272,14 +293,15 @@ pub fn dispatch(version : Int, kind : Int, view : Int, data_a : Int, data_b : In
 
 MoonBit native の `Int` は 32-bit であり、この callback とコマンドバッファの境界も **i32** です（`gpui_abi_probe` で機械検証済み）。値は i32 範囲で扱ってください。
 
-`main` 関数では、dead-code elimination が `dispatch` を消さないよう明示的に保持します（[`cmd/main/main.mbt`](cmd/main/main.mbt) を参照）。
+`main` 関数では、`register_dispatch` で自分の dispatch を登録します（[`cmd/main/main.mbt`](cmd/main/main.mbt) を参照）。
 
 ## Examples
 
-- [`app/app.mbt`](app/app.mbt) — interactive Counter（ボタン 4 つ + キー操作 + テキスト入力ボックス）。`cmd/main` から起動する現行デモです。テキストボックスへの数字入力 + Enter でカウントをセットします（`on_submit` + `input_text` / `input_set_text`、RFC 0003）。
-- [`examples/hello/`](examples/hello/) — Counter 以外の最小例。静的なタイトルと ON/OFF が切り替わるステータスカード、1 つのトグルボタン、`space` / `Escape` キー操作を実装しています。
+いずれもリポジトリ root の [`examples/`](../examples) にある**独立モジュール**で、path 依存で本モジュールを消費します（`tests/consumer` と同じ経路）。つまり配布された形での呼び出し方をそのまま実演しており、各自が `register_dispatch` で自分の dispatch を登録する実行ファイルです。ビルドと実行は各ディレクトリで `moon build` → `./_build/native/debug/build/main/main.exe`。
 
-`examples/hello` は `app/` と同じく**ライブラリパッケージ**です。`moon check` / `moon build` で型検査・コンパイルされ、API 変更に対して常に追従します。実行可能ファイルの生成には Rust staticlib とのリンクが必要で、それは root の build driver が `cmd/main` 向けにだけ準備するため、現状はコード例としての提供です。実行可能にするには、`cmd/main` と同じ OS 別 link template 方式で `cmd/hello` エントリを追加し build driver に組み込む作業が別途必要です（将来の作業）。`hello.mbt` の `launch()` が、その際の実行ファイルから呼ぶエントリポイントです。
+- [`examples/counter`](../examples/counter) — interactive Counter（ボタン 4 つ + キー操作 + テキスト入力ボックス）。テキストボックスへの数字入力 + Enter でカウントをセットします（`on_submit` + `input_text` / `input_set_text`、RFC 0003）。ユニットテスト付きで、アプリの実装パターンの手本です。
+- [`examples/hello`](../examples/hello) — Counter 以外の最小例。静的なタイトルと ON/OFF が切り替わるステータスカード、1 つのトグルボタン、`space` / `Escape` キー操作を実装しています。
+- [`examples/stream`](../examples/stream) — 非同期イベント注入（RFC 0002）の消費者側。外部のネイティブ producer が `gpui_post_event` で流したペイロードを `EVENT_ASYNC` として受け、ログ表示を in-place 更新します。
 
 ## API リファレンス
 
@@ -291,9 +313,9 @@ MoonBit native の `Int` は 32-bit であり、この callback とコマンド�
 ## 制約・注意
 
 - **native バックエンド専用**です。wasm 等の他 target には対応しません。
-- **callback は単一固定契約**です。Rust→MoonBit のイベント経路は `app.dispatch(version, kind, view, data_a, data_b) -> Int`（5×i32 envelope、`ABI_VERSION` = 4）の 1 本だけです。実体は `framework_dispatch` への委譲で、デコード・型付き配送・dirty 判定・再構築をフレームワーク層が担います。パッケージ `app` と関数 `dispatch` を改名するとマングルシンボルが変わり、Rust 側と build driver の両方の更新が必要になります。
+- **callback は単一固定契約**です。Rust→MoonBit のイベント経路は `dispatch_entry(version, kind, view, data_a, data_b) -> Int`（5×i32 envelope、`ABI_VERSION` = 4）の 1 本だけで、これはライブラリが所有します。アプリは `register_dispatch` でその中身を差し替え、実体は通常 `framework_dispatch` への委譲になります（デコード・型付き配送・dirty 判定・再構築はフレームワーク層の担当）。`dispatch_entry` の名前は `gpui-sys/abi.toml` の `[callback] name` が正本で、改名するとマングルシンボルが変わるため Rust 側と build driver の更新が必要になります。
 - **境界の整数は i32** です。MoonBit native の `Int` は 32-bit 2 の補数機械語であり、FFI 境界とコマンドバッファの wire format は i32/u32 little-endian です。この ABI 互換は `gpui_abi_probe` の境界値往復（ビルドのたびに実行）と wbtest で機械検証されています。
-- **ツリー更新は dirty 時の再構築**です。状態変化（signal の `set`）のたびにフレームワークがツリーを再構築します。Counter は `update_text` でカウント表示だけを書き換えるインクリメンタル経路を試し、キー未登録時は `build_tree` による全再構築へフォールバックします（issue #10）。汎用 vdom diff は意図的に未実装です。
+- **ツリー更新は dirty 時の再構築**です。状態変化（signal の `set`）のたびにフレームワークがツリーを再構築します。Counter デモは `update_text` でカウント表示だけを書き換えるインクリメンタル経路を試し、キー未登録時は `build_tree` による全再構築へフォールバックします（issue #10）。汎用 vdom diff は意図的に未実装です。
 - **opcode と ABI 定数は生成物**です。`gpui-sys/abi.toml` を正本として build driver が生成します。`abi_constants.mbt` と `gpui-bindings-ffi.mbt` は手編集しません。
 - 負の status code の意味（無効 handle、バッファの magic/バージョン不一致、未知 opcode、ルート未指定、キー重複など）は [`docs/architecture.md`](../docs/architecture.md) を参照してください。
 - **callback はメインスレッド限定・total 関数**です。ランタイムは非アトミック参照カウントのため、`dispatch` はメインスレッドからのみ呼べます。MoonBit の panic は FFI 境界を越えられず process abort になるため、callback は例外を投げない全関数に保ってください。詳細は [`docs/architecture.md`](../docs/architecture.md) §11「MoonBit native 実行時制約」を参照。

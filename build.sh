@@ -20,7 +20,7 @@ BUILD_OUTPUT="$(mktemp)"
 trap 'rm -f "$BUILD_OUTPUT"' EXIT
 
 # --- CLI flags ---
-# macOS builds bundle dist/Counter.app by default (keyboard delivery needs it);
+# macOS builds bundle dist/Runner.app by default (keyboard delivery needs it);
 # --no-bundle skips. --bundle requests bundling explicitly and is an error on
 # other OSes, where .app bundles are meaningless.
 BUNDLE=auto
@@ -485,7 +485,7 @@ case "$OS_PKG" in
 esac
 
 if [ "$OS_PKG" = macos ] && [ "$BUNDLE" != no ]; then
-  echo "==> [7/7] Bundle Counter.app (keyboard delivery needs the bundle)"
+  echo "==> [7/7] Bundle Runner.app (keyboard delivery needs the bundle)"
   "$ROOT/bundle.sh"
 fi
 
@@ -493,10 +493,15 @@ fi
 case "$OS_PKG" in
   macos)
     if [ "$BUNDLE" != no ]; then
-      echo "Done. Run:  open dist/Counter.app  (or ./dist/Counter.app/Contents/MacOS/Counter to keep stderr on the terminal)"
+      echo "Done. Run:  open dist/Runner.app  (or ./dist/Runner.app/Contents/MacOS/Runner to keep stderr on the terminal)"
     else
-      echo "Done. Run:  ./bundle.sh && open dist/Counter.app  (keyboard needs the bundle)"
+      echo "Done. Run:  ./bundle.sh && open dist/Runner.app  (keyboard needs the bundle)"
     fi
     ;;
   linux) echo 'Done. Run:  (cd moonbit-bindings && env -u WAYLAND_DISPLAY LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug/build/cmd/main/main.exe)' ;;
 esac
+# cmd/main is the minimal runner the driver needs (it is where the callback
+# symbol is extracted from). The demo apps are separate modules under examples/
+# that consume this one the way a third party would (issue #125).
+echo "Demos:      (cd examples/counter && moon build && ./_build/native/debug/build/main/main.exe)"
+echo "            examples/hello and examples/stream build and run the same way." 

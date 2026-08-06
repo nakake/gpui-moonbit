@@ -8,7 +8,7 @@
 // Usage in your executable's moon.pkg:
 //   import {
 //     "nakake/gpui-bindings",
-//     "nakake/gpui-bindings/app",   // retain app.dispatch for the callback
+//     "nakake/gpui-bindings",       // the library (register_dispatch lives here)
 //     "nakake/gpui-bindings/link",  // pull in the Rust staticlib link flags
 //   }
 //

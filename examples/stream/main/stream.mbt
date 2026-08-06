@@ -13,10 +13,10 @@
 // chunks appended to the log" — lives entirely in this file; the library never
 // interprets the bytes.
 //
-// Like `app/` and `examples/hello`, this is a library package: `moon check` /
-// `moon build` compile it, but producing an executable needs the Rust
-// staticlib link that the root build driver prepares for `cmd/main` only.
-// `launch` is the entry point such an executable would call.
+// This is a separate module that path-depends on the library (see moon.mod.json),
+// so it exercises the exact route a third-party consumer takes: resolve the
+// dependency, import `nakake/gpui-bindings/link` so the prebuild's link flags
+// apply, register a dispatch, and run.
 
 ///|
 let log : @buffer.Buffer = Buffer()
@@ -51,7 +51,7 @@ fn decode(version : Int, kind : Int, data_a : Int, data_b : Int) -> Event {
 }
 
 ///|
-pub fn dispatch(
+fn dispatch(
   version : Int,
   kind : Int,
   view : Int,
@@ -105,7 +105,7 @@ fn current_log() -> String {
 }
 
 ///|
-pub fn build_tree(view : Int) -> Result[Unit, Int] {
+fn build_tree(view : Int) -> Result[Unit, Int] {
   let cb = @nakake/gpui-bindings.CommandBuffer::new()
   cb.div() // root
   cb.set_bg(24, 26, 32)
@@ -143,17 +143,11 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   @nakake/gpui-bindings.build_tree(view, cb)
 }
 
-// Entry point for a future `cmd/stream` executable: retain `dispatch`, commit
-// the initial tree, and block in the GPUI event loop.
-
 ///|
-pub fn launch() -> Unit {
-  // `dispatch` is only ever called from Rust (via its mangled symbol), which
-  // MoonBit's dead-code elimination cannot see. The explicit function type both
-  // retains it and anchors the five-Int / Int callback ABI during `moon check`.
-  let _keep : (Int, Int, Int, Int, Int) -> Int = dispatch
-  ignore(_keep)
-
+fn main {
+  // Install this app's dispatch into the library-owned entry point Rust links
+  // (RFC 0004). Must happen before `run_window`.
+  @nakake/gpui-bindings.register_dispatch(dispatch)
   match build_tree(0) {
     Ok(_) => ()
     Err(status) => abort("initial build_tree failed with status \{status}")

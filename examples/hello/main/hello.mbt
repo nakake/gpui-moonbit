@@ -7,12 +7,10 @@
 // handlers `set` the `on` signal and never report "changed"; the framework
 // rebuilds only when state actually moved.
 //
-// This package is a library (like `app/`): `moon check` / `moon build` compile
-// it, but producing an executable needs the Rust staticlib link that the root
-// build driver prepares for `cmd/main` only. Making it a standalone executable
-// means adding a `cmd/hello` entry with per-OS link templates and wiring it
-// into build.sh (future work). `launch` below is the entry point such an
-// executable calls.
+// This is a separate module that path-depends on the library (see moon.mod.json),
+// so it exercises the exact route a third-party consumer takes: resolve the
+// dependency, import `nakake/gpui-bindings/link` so the prebuild's link flags
+// apply, register a dispatch, and run.
 
 // State lives in a typed store cell (RFC 0001 §3.3); handlers mutate it
 // through the `on` signal (RFC 0001 §3.4).
@@ -73,7 +71,7 @@ fn on_named_key(id : Int, _mods : Int) -> Unit {
 let ctx : @nakake/gpui-bindings.RenderCtx = { view: 0, store, handlers }
 
 ///|
-pub fn dispatch(
+fn dispatch(
   version : Int,
   kind : Int,
   view : Int,
@@ -135,7 +133,7 @@ fn key_hints(cb : @nakake/gpui-bindings.CommandBuffer) -> Unit {
 }
 
 ///|
-pub fn build_tree(view : Int) -> Result[Unit, Int] {
+fn build_tree(view : Int) -> Result[Unit, Int] {
   let cb = @nakake/gpui-bindings.CommandBuffer::new()
   cb.div() // root
   cb.set_bg(24, 26, 32)
@@ -157,17 +155,11 @@ pub fn build_tree(view : Int) -> Result[Unit, Int] {
   @nakake/gpui-bindings.build_tree(view, cb)
 }
 
-// Entry point for a future `cmd/hello` executable: retain `dispatch`, commit
-// the initial tree, and block in the GPUI event loop.
-
 ///|
-pub fn launch() -> Unit {
-  // `dispatch` is only ever called from Rust (via its mangled symbol), which
-  // MoonBit's dead-code elimination cannot see. The explicit function type both
-  // retains it and anchors the five-Int / Int callback ABI during `moon check`.
-  let _keep : (Int, Int, Int, Int, Int) -> Int = dispatch
-  ignore(_keep)
-
+fn main {
+  // Install this app's dispatch into the library-owned entry point Rust links
+  // (RFC 0004). Must happen before `run_window`.
+  @nakake/gpui-bindings.register_dispatch(dispatch)
   match build_tree(0) {
     Ok(_) => ()
     Err(status) => abort("initial build_tree failed with status \{status}")
