@@ -67,8 +67,12 @@ fn main() {
         .get("name")
         .unwrap_or_else(|| panic!("missing callback `name` in abi.toml"))
         .trim_matches('"');
-    if callback_name != "dispatch" {
-        panic!("abi.toml callback name must be `dispatch`");
+    // The name itself is not used here (the real symbol arrives via
+    // mb_symbol.txt); this is a tripwire for a rename that did not reach the
+    // build drivers, which derive the mangled tail from this same field
+    // (RFC 0004 §3.5).
+    if callback_name != "dispatch_entry" {
+        panic!("abi.toml callback name must be `dispatch_entry`");
     }
     let params = callback
         .get("params")
@@ -89,7 +93,7 @@ fn main() {
     }
 
     // --- Rust -> MoonBit callback symbol ---
-    // `mb_symbol.txt` holds the MoonBit `app.dispatch` mangled symbol (with the
+    // `mb_symbol.txt` holds the MoonBit `dispatch_entry` mangled symbol (with the
     // Mach-O leading underscore already stripped for `#[link_name]`). It is
     // produced by `build.sh`, which extracts the *real* symbol from MoonBit's
     // compiled output — so a rename or a toolchain mangling change is tracked
@@ -118,7 +122,7 @@ fn main() {
             panic!(
                 "gpui-sys/mb_symbol.txt is missing or empty.\n\
                  The MoonBit callback symbol is injected at build time — run `./build.sh`\n\
-                 (which extracts app.dispatch and writes mb_symbol.txt) instead of a bare\n\
+                 (which extracts dispatch_entry and writes mb_symbol.txt) instead of a bare\n\
                  `cargo build`."
             );
         }

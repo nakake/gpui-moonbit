@@ -28,9 +28,11 @@ extern "C" fn gpui_abi_probe_ffi(value : Int) -> Int = "gpui_abi_probe"
 
 ///|
 fn main {
-  // Retain app.dispatch so the Rust staticlib's mb_dispatch reference resolves.
-  let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
-  ignore(_keep)
+  // Register the Counter demo's dispatch into the library-owned entry point Rust
+  // links (RFC 0004). The smoke below then drives `dispatch_entry`, so the
+  // registration path itself is covered by the linked run, not just the slot's
+  // unit tests.
+  @nakake/gpui-bindings.register_dispatch(@nakake/gpui-bindings/app.dispatch)
 
   // Edge-case text: NUL byte, multibyte UTF-8 (hiragana), 4-byte emoji.
   let texts = ["A\u{0}あ", "🎉"]
@@ -93,7 +95,7 @@ fn main {
   }
   println("PASS: abi probe verified (\{probe_values.length()} values)")
 
-  // Dispatch smoke test (RFC 0001): exercise the real linked `app.dispatch`
+  // Dispatch smoke test (RFC 0001): exercise the real linked `dispatch_entry`
   // symbol end to end — registry routing, the framework's dirty gate, the
   // stale-version rejection, and the committed state. The tree committed
   // above has no keyed count label, so the first state-changing dispatch
@@ -101,7 +103,7 @@ fn main {
   // counter tree) and returns 1; a stale ABI version must return 0 without
   // touching anything; a key event then updates the now-present count label
   // in place and returns 1.
-  let changed_click = @nakake/gpui-bindings/app.dispatch(
+  let changed_click = @nakake/gpui-bindings.dispatch_entry(
     @nakake/gpui-bindings.ABI_VERSION,
     @nakake/gpui-bindings.EVENT_CLICK,
     0,
@@ -122,7 +124,7 @@ fn main {
   }
   // A click with no registered handler must not rebuild (dirty gate): the
   // committed tree is unchanged and dispatch returns 0.
-  let changed_noop = @nakake/gpui-bindings/app.dispatch(
+  let changed_noop = @nakake/gpui-bindings.dispatch_entry(
     @nakake/gpui-bindings.ABI_VERSION,
     @nakake/gpui-bindings.EVENT_CLICK,
     0,
@@ -139,7 +141,7 @@ fn main {
   if !after_noop.contains("Count: 1") {
     abort("after noop, dump changed unexpectedly: \{after_noop}")
   }
-  let changed_stale = @nakake/gpui-bindings/app.dispatch(
+  let changed_stale = @nakake/gpui-bindings.dispatch_entry(
     @nakake/gpui-bindings.ABI_VERSION + 1,
     @nakake/gpui-bindings.EVENT_CLICK,
     0,
@@ -149,7 +151,7 @@ fn main {
   if changed_stale != 0 {
     abort("dispatch(stale) returned \{changed_stale}, want 0")
   }
-  let changed_key = @nakake/gpui-bindings/app.dispatch(
+  let changed_key = @nakake/gpui-bindings.dispatch_entry(
     @nakake/gpui-bindings.ABI_VERSION,
     @nakake/gpui-bindings.EVENT_KEY,
     0,
@@ -191,7 +193,7 @@ fn main {
   }
   // EVENT_INPUT_SUBMIT decodes and routes to the registered handler; its pull
   // fails headless, so no state changes and dispatch returns 0 (dirty gate).
-  let changed_submit = @nakake/gpui-bindings/app.dispatch(
+  let changed_submit = @nakake/gpui-bindings.dispatch_entry(
     @nakake/gpui-bindings.ABI_VERSION,
     @nakake/gpui-bindings.EVENT_INPUT_SUBMIT,
     0,
@@ -226,7 +228,7 @@ fn main {
         abort("scroll_state(-1) returned \{s}, want -1 (INVALID_HANDLE)")
       }
   }
-  let changed_scroll = @nakake/gpui-bindings/app.dispatch(
+  let changed_scroll = @nakake/gpui-bindings.dispatch_entry(
     @nakake/gpui-bindings.ABI_VERSION,
     @nakake/gpui-bindings.EVENT_SCROLL,
     0,

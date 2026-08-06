@@ -13,9 +13,9 @@
 // returns GPUI_STATUS_INVALID_HANDLE (-1) instead of a string.
 
 fn main {
-  // Retain app.dispatch so the staticlib's mb_dispatch reference resolves.
-  let keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch
-  ignore(keep)
+  // Register a dispatch so the staticlib's mb_dispatch reference resolves to
+  // the library's entry point (RFC 0004).
+  @nakake/gpui-bindings.register_dispatch(@nakake/gpui-bindings/app.dispatch)
 
   // Serialize a small tree — pure MoonBit, no FFI yet.
   let cb = @nakake/gpui-bindings.CommandBuffer::new()

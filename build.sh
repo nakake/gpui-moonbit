@@ -2,8 +2,9 @@
 #
 # Build driver for GPUI + MoonBit.
 #
-# The Rust side (gpui-sys) calls back into MoonBit's `app.dispatch` by its
-# compiled (mangled) symbol. That symbol only exists after MoonBit is compiled,
+# The Rust side (gpui-sys) calls back into MoonBit's `dispatch_entry` (the
+# library-owned entry point apps register into, RFC 0004) by its compiled
+# (mangled) symbol. That symbol only exists after MoonBit is compiled,
 # and Rust needs it at *its* compile time (for `#[link_name]`) — a chicken/egg.
 # We resolve it by extracting the *real* mangled symbol from MoonBit's build
 # output and injecting it into gpui-sys's build. This tracks the actual symbol,
@@ -191,9 +192,34 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && \
   echo "          git config core.hooksPath moonbit-bindings/.githooks"
 fi
 
-# The MoonBit function whose mangled symbol Rust needs. Its package path suffix
-# + name determine the symbol; keep in sync if you rename the callback.
-PKG_FN_SUFFIX="3app8dispatch"   # …/app :: dispatch  (see notes for the scheme)
+# The MoonBit function whose mangled symbol Rust needs, derived from abi.toml so
+# `[callback] name` is the single source of truth for the link-time contract too
+# (issue #76, RFC 0004 §3.5). The callback lives in the library's root package
+# (`nakake/gpui-bindings`), so the name alone is enough to match the symbol tail:
+# a package component would add another `<len><component>` in front of it.
+#
+# Mangling of one component: '_' -> '__', then '-' -> '_2d', length-prefixed with
+# the escaped length. `dispatch_entry` -> `15dispatch__entry`.
+CALLBACK_NAME="$(awk '
+  { sub(/[[:space:]]*#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+  /^\[[A-Za-z_][A-Za-z0-9_]*\]$/ { section=$0; next }
+  section == "[callback]" && /^name[[:space:]]*=/ {
+    sub(/^name[[:space:]]*=[[:space:]]*/, "")
+    gsub(/["[:space:]]/, "")
+    if ($0 !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+      print "ERROR: invalid [callback] name in abi.toml: " $0 > "/dev/stderr"
+      exit 1
+    }
+    print $0
+    exit
+  }
+' "$GSYS/abi.toml")"
+if [ -z "$CALLBACK_NAME" ]; then
+  echo "ERROR: could not derive [callback] name from $GSYS/abi.toml" >&2
+  exit 1
+fi
+PKG_FN_SUFFIX="$(printf '%s' "$CALLBACK_NAME" | sed -e 's/_/__/g' -e 's/-/_2d/g')"
+PKG_FN_SUFFIX="${#PKG_FN_SUFFIX}${PKG_FN_SUFFIX}"
 
 # Expected C parameter list for the MoonBit callback, derived from abi.toml so
 # `[callback] params` stays the single source of truth (issue #76).
@@ -293,7 +319,7 @@ if ! ( cd "$MB" && moon build ) 2>&1 | tee "$BUILD_OUTPUT"; then
   fi
 fi
 
-echo "==> [2/5] Extract the real mangled symbol for app.dispatch"
+echo "==> [2/5] Extract the real mangled symbol for ${CALLBACK_NAME}"
 # Prefer nm over compiled objects (macOS flow leaves per-pkg .o files). Fall back
 # to scanning the C source that `moonc link-core` generates: the Linux flow
 # compiles+links it in a single cc step, so no .o survives a failed cold link.
@@ -308,7 +334,7 @@ if [ -z "${SYM}" ]; then
 fi
 SYM_COUNT="$(printf '%s\n' "$SYM" | sed '/^$/d' | wc -l)"
 if [ "$SYM_COUNT" -ne 1 ]; then
-  echo "ERROR: expected exactly 1 app.dispatch symbol (…${PKG_FN_SUFFIX}), found $SYM_COUNT." >&2
+  echo "ERROR: expected exactly 1 ${CALLBACK_NAME} symbol (…${PKG_FN_SUFFIX}), found $SYM_COUNT." >&2
   exit 1
 fi
 # The mangled name does not encode types. Validate the actual generated C

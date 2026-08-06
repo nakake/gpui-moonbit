@@ -7,7 +7,7 @@ Runs when this module is consumed as a path/git dependency, or when the module
 itself is built with `moon build` / `moon test`.
 
 What it does:
-  1. Computes the MoonBit callback symbol (app.dispatch) deterministically.
+  1. Computes the MoonBit callback symbol (dispatch_entry) deterministically.
   2. Writes gpui-sys/mb_symbol.txt if absent (standalone builds without build.sh).
   3. Runs `cargo build` to produce libgpui_sys.a.
   4. Runs `cargo rustc -- --print native-static-libs` to capture link flags.
@@ -56,28 +56,31 @@ def escape_mangling_component(s):
     return s.replace("_", "__").replace("-", "_2d")
 
 
-def compute_callback_symbol():
-    """Compute the mangled symbol for nakake/gpui-bindings :: app :: dispatch.
+def compute_callback_symbol(abi_toml):
+    """Compute the mangled symbol for nakake/gpui-bindings :: dispatch_entry.
+
+    The callback lives in the module's root package (nakake/gpui-bindings),
+    so no package component is mangled into the symbol; only the module parts
+    and the function name appear. The function name comes from gpui-sys/abi.toml's
+    `[callback] name`, the single source of truth (RFC 0004).
 
     Mangling scheme: _M0FP<N><len1><comp1><len2><comp2>...<fnlen><fn>
-    where N = number of path components (module parts + package).
+    where N = number of path components (module parts only).
 
-    For module nakake/gpui-bindings, package app, function dispatch:
-      components: ["nakake", "gpui-bindings", "app"]
-      escaped:    ["nakake", "gpui_2dbindings", "app"]
-      fn:         "dispatch" (no escaping needed)
-      -> _M0FP3 6nakake 15gpui_2dbindings 3app 8dispatch
-      -> _M0FP36nakake15gpui_2dbindings3app8dispatch
+    For module nakake/gpui-bindings, function dispatch_entry:
+      components: ["nakake", "gpui-bindings"]
+      escaped:    ["nakake", "gpui_2dbindings"]
+      fn:         "dispatch_entry" -> "dispatch__entry" (15 chars)
+      -> _M0FP2 6nakake 15gpui_2dbindings 15dispatch__entry
+      -> _M0FP26nakake15gpui_2dbindings15dispatch__entry
 
     The leading '_' is the ELF symbol prefix. Mach-O adds one more via the
     linker (#[link_name] uses one underscore; the linker adds the other).
     """
-    module_parts = ["nakake", "gpui-bindings"]
-    package = "app"
-    function = "dispatch"
+    function = read_callback_name(abi_toml)
 
+    module_parts = ["nakake", "gpui-bindings"]
     components = [escape_mangling_component(p) for p in module_parts]
-    components.append(escape_mangling_component(package))
     fn = escape_mangling_component(function)
 
     parts = [str(len(components))]  # N
@@ -88,6 +91,31 @@ def compute_callback_symbol():
     parts.append(fn)
 
     return "_M0FP" + "".join(parts)
+
+
+def read_callback_name(abi_toml):
+    """Extract `[callback] name` from gpui-sys/abi.toml. Exits on error."""
+    with open(abi_toml) as f:
+        lines = f.read().splitlines()
+    in_callback = False
+    for raw in lines:
+        line = re.sub(r"\s*#.*", "", raw).strip()
+        if not line:
+            continue
+        if re.match(r"^\[[A-Za-z_][A-Za-z0-9_]*\]$", line):
+            in_callback = line == "[callback]"
+            continue
+        if not in_callback:
+            continue
+        m = re.match(r"^name\s*=\s*\"([^\"]*)\"\s*$", line)
+        if m:
+            name = m.group(1)
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+                log(f"ERROR: invalid [callback] name in abi.toml: {name}")
+                sys.exit(1)
+            return name
+    log(f"ERROR: could not derive [callback] name from {abi_toml}")
+    sys.exit(1)
 
 
 def normalize_native_libs(native_libs_str, os_pkg):
@@ -226,7 +254,7 @@ def main():
         sys.exit(1)
 
     # --- Compute and write the callback symbol ---
-    symbol = compute_callback_symbol()
+    symbol = compute_callback_symbol(os.path.join(gpui_sys, "abi.toml"))
     log(f"callback symbol: {symbol}")
 
     mb_symbol_path = os.path.join(gpui_sys, "mb_symbol.txt")
