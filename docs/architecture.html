@@ -149,10 +149,10 @@
 
   <!-- ===== 中央: 呼び出しの流れ ===== -->
   <div class="node mb" style="left:460px;top:30px;width:340px;height:58px">
-    <div class="t">cmd/main/main.mbt</div><div class="d">MoonBit がプロセスの main を所有。dispatch を <code>_keep</code> で保持し DCE を防ぐ</div></div>
+    <div class="t">cmd/main/main.mbt</div><div class="d">MoonBit がプロセスの main を所有。<code>register_dispatch</code> で自前 dispatch を登録（これが DCE 対策も兼ねる）</div></div>
 
   <div class="node mb" style="left:460px;top:120px;width:340px;height:70px">
-    <div class="t">app/app.mbt — Counter の状態とルーティング</div><div class="d">count / イベントの意味づけ / ツリー構築。変化したら 1、しなければ 0 を返す</div></div>
+    <div class="t">examples/counter — 消費者が書くアプリ</div><div class="d">count / イベントの意味づけ / ツリー構築。変化したら 1、しなければ 0 を返す。path 依存の別モジュール</div></div>
 
   <div class="node mb" style="left:460px;top:225px;width:340px;height:70px">
     <div class="t">gpui-bindings.mbt — 高レベル API</div><div class="d">CommandBuffer・Color・GpuiError / classify_status・UTF-8 エンコード</div></div>
@@ -184,7 +184,7 @@
 
   <!-- ===== 左: イベントループ ===== -->
   <div class="node mb" style="left:60px;top:170px;width:300px;height:78px">
-    <div class="t">mb_dispatch(...) → app.dispatch</div><div class="d">(ABI_VERSION, kind, view, data_a, data_b)。戻り値 1 のときだけ Rust が cx.notify()</div></div>
+    <div class="t">mb_dispatch(...) → dispatch_entry → 登録済み dispatch</div><div class="d">(ABI_VERSION, kind, view, data_a, data_b)。戻り値 1 のときだけ Rust が cx.notify()</div></div>
 
   <div class="node rs" style="left:60px;top:558px;width:300px;height:78px">
     <div class="t">GPUI リスナー</div><div class="d">on_click / on_key_down / text。Tab・Shift+Tab は外側コンテナが消費し MoonBit には届かない</div></div>
@@ -257,7 +257,7 @@
   </div>
   <div>
     <h3>帰り: Rust → MoonBit（コールバック）</h3>
-    <p>コールバックは<b>たった 1 つ</b>。<code>app.dispatch(version, kind, view, data_a, data_b) -&gt; Int</code> を、Rust がマングル名経由で直接呼ぶ。</p>
+    <p>コールバックは<b>たった 1 つ</b>。ライブラリ所有の <code>dispatch_entry(version, kind, view, data_a, data_b) -&gt; Int</code> を、Rust がマングル名経由で直接呼ぶ。<code>dispatch_entry</code> は純粋な委譲で、消費者が <code>register_dispatch</code> で登録したクロージャをそのまま呼ぶ（RFC 0004）。</p>
     <table>
       <tr><th>slot</th><th>中身</th></tr>
       <tr><td>0</td><td><code>ABI_VERSION</code>（= 4）。不一致なら MoonBit が Unknown を返して拒否</td></tr>
@@ -363,7 +363,7 @@
     <div class="t">moon build（コールド）</div><div class="d">まだ Rust ライブラリが無いのでリンクは失敗する想定</div></div>
 
   <div class="node gn" style="left:60px;top:372px;width:310px;height:62px">
-    <div class="t">mb_symbol.txt（生成・非追跡）</div><div class="d">app.dispatch のマングル名をちょうど 1 つ抽出</div></div>
+    <div class="t">mb_symbol.txt（生成・非追跡）</div><div class="d">dispatch_entry のマングル名をちょうど 1 つ抽出（suffix は abi.toml の [callback] name から導出）</div></div>
 
   <div class="node rs" style="left:890px;top:372px;width:310px;height:70px">
     <div class="t">cargo → libgpui_sys.a</div><div class="d">staticlib。未解決の <code>mb_dispatch</code> 参照を残したまま出力される</div></div>
@@ -400,7 +400,7 @@
 <h2>6. MoonBit native ならではの制約</h2>
 <p>API が強制してくれないので、<b>呼ぶ側が守る</b>必要があるルール。ここを外すと静かに壊れる。</p>
 <ul>
-  <li><b>コールバックはメインスレッド限定。</b> ランタイムの参照カウントは非アトミック（<code>int32_t rc</code>）。別スレッドから <code>app.dispatch</code> を呼ぶとデータ競合になる</li>
+  <li><b>コールバックはメインスレッド限定。</b> ランタイムの参照カウントは非アトミック（<code>int32_t rc</code>）。別スレッドから <code>dispatch_entry</code> を呼ぶとデータ競合になる。<code>register_dispatch</code> も同じ制約（run_window より前・メインスレッド）</li>
   <li><b>コールバックは素のトップレベル関数。</b> MoonBit のクロージャは「コードポインタ + 環境」の RC ヒープオブジェクトで、C の関数ポインタとしてエクスポートできない。だから「Rust からマングル名を直参照して呼ぶ」の一択</li>
   <li><b>envelope はスカラのみ。</b> MoonBit のヒープオブジェクトを Rust 側に保持してはいけない（incref/decref を避けるため）</li>
   <li><b>MoonBit <code>Int</code> == Rust <code>i32</code>。</b> 前提ではなく、<code>gpui_abi_probe</code> が毎ビルド <code>i32::MAX</code> / <code>i32::MIN</code> / 0 / -1 の往復で機械検証している</li>

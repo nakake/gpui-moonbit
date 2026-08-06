@@ -64,7 +64,7 @@ gpui 0.2.2 はフォーカス時のスタイル変更を公開している:
 
 IME で確定（コミット）されたテキストは既存の経路で動作している。
 
-- ルート要素の `on_key_down` ハンドラが `ev.keystroke.key_char` を読み、`typed_text()`（`gpui-sys/src/lib.rs`）が確定文字列（IME 合成結果・マルチ文字キーを含む）を抽出して `EVENT_TEXT` として配送する。MoonBit 側は `gpui_event_copy_text` でペイロードを同期的にコピーする（`moonbit-bindings/app/app.mbt` の `decode` / `on_text`）。
+- ルート要素の `on_key_down` ハンドラが `ev.keystroke.key_char` を読み、`typed_text()`（`gpui-sys/src/lib.rs`）が確定文字列（IME 合成結果・マルチ文字キーを含む）を抽出して `EVENT_TEXT` として配送する。MoonBit 側は `gpui_event_copy_text` でペイロードを同期的にコピーする（`moonbit-bindings/event.mbt` の `decode_event`、アプリ側のハンドラ例は `examples/counter/counter/counter.mbt` の `on_text`）。
 
 ### 2.2 preedit（合成中）/ 候補ウィンドウ — 実装済み（#88、RFC 0003）
 

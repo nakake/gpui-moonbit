@@ -67,7 +67,7 @@
 
 - **`G15` 単一ウィンドウ・永久ブロック実行。** `run_window` は 1 ウィンドウを開きイベントループでブロックする（`moonbit-bindings/cmd/main/main.mbt:14`）。複数ウィンドウ、非ブロッキング実行、アプリ級ループ、quit 処理がない。
 - **`G16` ウィンドウ/アプリイベントの欠如。** resize / close / focus / menu / tray 等のイベント経路がない。
-- **`G17` ~~イベントが view 単位でルーティングされない。~~** ✅ #49 解決済み（2026-07-25）: dispatch envelope を 5 スロット `(abi_version, event_kind, view, data_a, data_b)` に拡張（`ABI_VERSION=4`）。slot 2 が view id を運び、`app.dispatch` は view 単位で rebuild をルーティングする。
+- **`G17` ~~イベントが view 単位でルーティングされない。~~** ✅ #49 解決済み（2026-07-25）: dispatch envelope を 5 スロット `(abi_version, event_kind, view, data_a, data_b)` に拡張（`ABI_VERSION=4`）。slot 2 が view id を運び、コールバック（現在は `dispatch_entry`、#125）は view 単位で rebuild をルーティングする。
 
 ---
 
@@ -92,9 +92,9 @@
 
 ## 7. ドキュメント / DX
 
-- **`G27` 消費者向け getting-started がない。** `README.md` はリポジトリビルダー向け。counter 以外の example がない。
+- **`G27` 消費者向け getting-started がない。** 🟡 部分解決（#125、RFC 0004）: `examples/` の counter / hello / stream がライブラリを path 依存で消費する**実消費者モジュール**になり、`register_dispatch` で自分の dispatch を登録する経路が動く形で示された（`tests/consumer` が 3 OS CI でその経路を回している）。残るのは導線: `README.md` は依然リポジトリビルダー向けで、消費者が最初に読む単独のチュートリアルがない。
 - **`G28` API リファレンスがない。** `///|` doc comment はあるが生成ドキュメントサイトがない。`architecture.md` は AI 向け内部文書。
-- **`G29` `moonbit-bindings/README.md` が空（0 バイト）。**
+- **~~`G29` `moonbit-bindings/README.md` が空（0 バイト）。~~** ✅ 解決済み: `README.mbt.md`（`README.md` はそこへの symlink）が消費者向けの使い方を持つ。#125 で `_keep` 手順を `register_dispatch` に差し替え済み。
 
 ---
 
