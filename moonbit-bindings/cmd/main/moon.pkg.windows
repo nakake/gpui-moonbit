@@ -1,6 +1,5 @@
 import {
   "nakake/gpui-bindings",
-  "nakake/gpui-bindings/app",
 }
 
 options(

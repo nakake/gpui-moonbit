@@ -1,0 +1,12 @@
+{
+  "name": "nakake/gpui-hello-example",
+  "version": "0.1.0",
+  "description": "Hello example for nakake/gpui-bindings: a minimal consumer app (issue #125, RFC 0004).",
+  "license": "Apache-2.0",
+  "deps": {
+    "nakake/gpui-bindings": {
+      "path": "../../moonbit-bindings"
+    }
+  },
+  "preferred-target": "native"
+}

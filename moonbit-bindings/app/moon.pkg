@@ -1,4 +1,0 @@
-import {
-  "moonbitlang/core/encoding/utf8",
-  "nakake/gpui-bindings",
-}
