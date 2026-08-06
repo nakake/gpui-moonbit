@@ -13,7 +13,7 @@
 
 ### `ABI_VERSION` — 境界のワイヤ契約
 
-`ABI_VERSION` は Rust→MoonBit コールバック `app.dispatch(version, kind, view, data_a, data_b) -> Int` の slot 0 に常に載る。MoonBit 側は不一致時に `Unknown` を返して古い Rust バイナリを**ランタイムに拒否**する（[`architecture.md`](architecture.md) §5）。イベント種別・envelope 定数・コールバックのシグネチャはすべて `abi.toml` に由来し、build driver が両言語へ生成・検証する。
+`ABI_VERSION` は Rust→MoonBit コールバック `dispatch_entry(version, kind, view, data_a, data_b) -> Int`（ライブラリ所有のエントリポイント、RFC 0004）の slot 0 に常に載る。MoonBit 側は不一致時に `Unknown` を返して古い Rust バイナリを**ランタイムに拒否**する（[`architecture.md`](architecture.md) §5）。イベント種別・envelope 定数・コールバックのシグネチャはすべて `abi.toml` に由来し、build driver が両言語へ生成・検証する。
 
 履歴（すべて `git log` で追跡可能）:
 

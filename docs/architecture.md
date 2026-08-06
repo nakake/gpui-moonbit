@@ -17,7 +17,9 @@
 |---|---|---|---|
 | `gpui-sys/` | Rust | C ABI 越しに GPUI を公開する静的ライブラリ。ノードストア、レンダリング、イベントリスナー、ヘッドレステスト harness | `src/lib.rs`、`src/headless.rs`、`build.rs`、`abi.toml`、`cbindgen.toml`、`benches/`、`fuzz/` |
 | `bindgen-moonbit/` | Rust | 生成された C ヘッダーをパースして MoonBit の FFI import 宣言にする CLI | `src/main.rs` |
-| `moonbit-bindings/` | MoonBit | 高レベル API、合成 widget、Counter の状態・ロジック、MoonBit 製 `main` | `gpui-bindings.mbt`、`widgets.mbt`、生成物 `gpui-bindings-ffi.mbt`、`app/app.mbt`、`cmd/main/main.mbt`、`examples/hello/` |
+| `moonbit-bindings/` | MoonBit | 高レベル API、合成 widget、フレームワーク層、dispatch の登録とライブラリ所有のエントリポイント、build driver 用の最小ランナー | `gpui-bindings.mbt`、`widgets.mbt`、`dispatch.mbt`、生成物 `gpui-bindings-ffi.mbt`、`cmd/main/main.mbt` |
+| `examples/` | MoonBit | ライブラリを path 依存で消費する**別モジュール**のサンプルアプリ（Counter / hello / stream）。第三者が通る経路をそのまま踏む（RFC 0004 §4） | `counter/counter/counter.mbt`、`counter/main/main.mbt`、`hello/`、`stream/` |
+| `tests/consumer/` | MoonBit | 消費者経路の回帰テスト。自前アプリを登録し `dispatch_entry` へイベントを注入して状態遷移を assert する（RFC 0004 §6-1） | `main/main.mbt` |
 | ルート | shell / PowerShell | 言語横断のビルド orchestration とプラットフォームセットアップ | `build.sh`、`build.ps1`、`bundle.sh` |
 
 ターゲットは MoonBit の `native`。サポートするホスト/ターゲットの組み合わせは macOS arm64 または x86_64、Linux x86_64（WSLg を含む）、Windows MSVC x64。クロスコンパイルはサポート対象外である。ツールチェーンの最低バージョンはこのリポジトリでは固定していない。ビルドドライバは観測したバージョンを表示し、Cargo.lock が依存解決を固定する（現在は GPUI 0.2.2 を含む）。
@@ -137,7 +139,9 @@ opcode・`BUFFER_VERSION`・enum 定数（`[align_items]` 等の各セクショ�
 
 ### 4b. Rust → MoonBit（イベントコールバック）
 
-- コールバックは 1つ: MoonBit の `app.dispatch(version, kind, view, data_a, data_b) -> Int`（`moonbit-bindings/app/app.mbt` 内）。本体はフレームワークの `framework_dispatch`（`moonbit-bindings/framework.mbt`）への 1 行委譲で、envelope デコード（`event.mbt`）→ `HandlerRegistry` 配送（`handlers.mbt`）→ store の dirty 判定（`store.mbt`）→ アプリの再構築コールバック、の順に実行する（RFC 0001 §3.4）。ハンドラは signal の `set` のみを行い、「変わったか」を戻り値で報告しない。
+- コールバックは 1つ: **ライブラリ所有**の `dispatch_entry(version, kind, view, data_a, data_b) -> Int`（`moonbit-bindings/dispatch.mbt`、ルートパッケージ `nakake/gpui-bindings`）。Rust が解決するシンボルはこれ 1 本に固定され、アプリの側では二度と動かない（RFC 0004）。本体は純粋な委譲で、`register_dispatch` で登録されたクロージャをそのまま呼ぶ（version の解釈もしない）。
+- **アプリの dispatch は消費者が書いて登録する**: `register_dispatch((Int, Int, Int, Int, Int) -> Int)` を `run_window` より前に、メインスレッドから呼ぶ。登録は last-wins（テストが差し替える手段を兼ねる）。未登録のままイベントが届いた場合は `0`（変化なし）を返し、初回だけ stdout に警告を 1 行出す — `EVENT_ASYNC` は dispatch 後にキューを clear するため、警告が無いとイベントが無音で消える。
+- 登録されたクロージャは通常フレームワークの `framework_dispatch`（`moonbit-bindings/framework.mbt`）へ 1 行委譲する。envelope デコード（`event.mbt`）→ `HandlerRegistry` 配送（`handlers.mbt`）→ store の dirty 判定（`store.mbt`）→ アプリの再構築コールバック、の順に実行する（RFC 0001 §3.4）。ハンドラは signal の `set` のみを行い、「変わったか」を戻り値で報告しない。
 - Rust 側の生成された extern はこれを `mb_dispatch(version, kind, view, data_a, data_b) -> i32` として呼ぶ。`gpui-sys/build.rs` は `gpui-sys/mb_symbol.txt` を読み取り、`#[link_name]` 宣言を出力する。
 - 5 スロットは**バージョニング済みイベントエンベロープ** `(abi_version, event_kind, view, data_a, data_b)` を運ぶ。slot 0 は常に `ABI_VERSION` で、MoonBit 側は不一致時にハンドラを一切実行せず `0` を返して古い Rust バイナリをランタイムに拒否する（`framework_dispatch` のバージョンゲート）。slot 2 は view id（`VIEWS` のインデックス）で、更新対象のビューをルーティングする。戻り値 `1` は状態変化（ツリーのその場更新または再構築）、`0` は不変。Rust は `1` のときだけ `cx.notify()` を呼ぶ。
 - イベント種別・エンベロープ定数・コールバックのパラメータと戻り値型は `gpui-sys/abi.toml` に由来する。ドライバが定数を生成し、シグネチャを検証する。
@@ -146,9 +150,9 @@ opcode・`BUFFER_VERSION`・enum 定数（`[align_items]` 等の各セクショ�
 - `EVENT_ASYNC`（`5`）は非同期注入イベントを運ぶ（RFC 0002）。外部 native コードが `gpui_post_event(view, ptr, len)` で任意スレッドからペイロードを有界キューへ push し、メインスレッドの drain pump が各エントリを `(4, EVENT_ASYNC, view, token, byte_len)` として配送する。ペイロードは `EVENT_TEXT` と同じ token+copy 機構（`EVENT_QUEUE` + `gpui_event_copy_text`）に乗り、MoonBit は dispatch 中に `copy_async_payload(token, len)` で同期的にコピーする。ペイロードは opaque bytes でライブラリは一切解釈せず、フレーミングは producer と MoonBit ハンドラの契約である。新しい種別の追加なので `ABI_VERSION` は据え置き（古い MoonBit は `Unknown` を返す）。
 - `EVENT_INPUT_CHANGED`（`6`）/ `EVENT_INPUT_SUBMIT`（`7`）はテキスト入力 widget のイベントを運ぶ（RFC 0003）。envelope は `(4, kind, view, input_id, 0)` で、**ペイロードを運ばない**: 変化通知のたびに全文を積むとペイロードが単調に肥大するため（#70 の教訓）、通知は軽く、現在内容は `gpui_input_text_len` / `gpui_input_copy_text` で明示的に pull する（ラッパー `input_text`）。`EVENT_INPUT_CHANGED` は確定テキストの変化（IME 確定・タイプ・delete・`set_text`）で、preedit 更新（`replace_and_mark_text_in_range`）は Rust 内で完結し MoonBit には届かない。`EVENT_INPUT_SUBMIT` はフォーカス中の input での Enter（単一行の既定動作。改行は挿入しない）。`input_id` は `HandlerRegistry::new_input_id` の発行値で、`HandlerRegistry` の `on_input_changed` / `on_submit` が id ごとの単一配送でルーティングする。新しい種別の追加なので `ABI_VERSION` は据え置き（古い MoonBit は `Unknown` を返す）。
 - `EVENT_SCROLL`（`8`）はスクロール位置の変化通知を運ぶ（issue #89）。envelope は `(4, EVENT_SCROLL, view, scroll_id, 0)` で、`EVENT_INPUT_*` と同じ **notify-then-pull**: 通知はペイロードを運ばず、現在値は `gpui_scroll_copy_state`（ラッパー `scroll_state`）で明示的に pull する。**push でなく pull を選んだ理由**（issue #89 の記録）: (1) dispatch envelope は i32 ×2 slot しかなく、`(scroll_id, offset_x, offset_y)` の 3 値が乗らない、(2) スクロール状態は gpui が所有し複数フレームにまたがって変化するため、イベントに値を焼き込むと coalescing や取りこぼしで古い値に基づく描画が起きる — pull は常に現在値を返すのでこの事故が構造的に消える、(3) #90 の手動仮想化は offset に加えて max_offset / viewport も必要で、pull なら 1 回の FFI で 6 値まとめて返せる。発火は Rust 側の `ScrollFeedback` ラッパー要素が paint ごとにクランプ済みオフセットを観測して差分検出し（gpui の wheel ハンドラは Rust 側にフックが無いため paint 観測が唯一の commit point）、`App::defer` で draw の外から dispatch する。初回観測は無通知でシードされる（何もスクロールしていない）。購読は `OP_SET_SCROLL_ID` を持つ div のうち実際にスクロールするもの（`OP_SET_OVERFLOW` の SCROLL 軸）だけで、位置の保持には従来どおり `OP_SET_KEY` が必要。新しい種別の追加なので `ABI_VERSION` は据え置き。
-- `cmd/main/main.mbt` は `app.dispatch` を `_keep` に束縛し、Rust からのみ参照される関数の dead-code elimination（不要コード削除）を防ぐ。
+- **消費者側の `_keep` は不要**（RFC 0004 §3.4）。`register_dispatch` の内部が `dispatch_entry` を参照するため、登録するだけで dead-code elimination から retain される。別モジュール + path 依存（`tests/consumer`）で `_keep` なしにリンク・実行できることを確認済み。
 
-ドライバは固定の `app.dispatch` に対する実際の現在のマングル名を抽出するため、ツールチェーンのマングル方式の変更にも追従する。これはパッケージ/関数名の自動リネームサポートではない。`app` や `dispatch` を変更する場合は、`build.sh` の `PKG_FN_SUFFIX`、`build.ps1` の `$PkgFnSuffix`、および `gpui-sys/build.rs` のコールバック ABI ポリシー/テンプレートを更新する必要がある。MoonBit のマングル名には型が含まれないため、ドライバは `main.c` が利用可能な場合、生成された C から `int32_t` の戻り値と 5 つの `int32_t` パラメータを別途検証する。
+ドライバは固定の `dispatch_entry` に対する実際の現在のマングル名を抽出するため、ツールチェーンのマングル方式の変更にも追従する。これはパッケージ/関数名の自動リネームサポートではない。関数名を変更する場合は `gpui-sys/abi.toml` の `[callback] name` が単一情報源で、`build.sh` の `PKG_FN_SUFFIX` と `build.ps1` の `$PkgFnSuffix` はそこから導出する。MoonBit のマングル名には型が含まれないため、ドライバは `main.c` が利用可能な場合、生成された C から `int32_t` の戻り値と 5 つの `int32_t` パラメータを別途検証する。
 
 ## 5. データフロー
 
@@ -197,7 +201,7 @@ Tab / Shift+Tab は外側コンテナの `on_key_down` が消費してフォー�
 1. ネイティブのホスト/ターゲットと、必要な MoonBit、Rust、コンパイラ/リンカ、シンボルツールを検証する。ツールチェーンのバージョンを表示し、診断とリンクのためにネイティブの Rust ホストと実際の Cargo ターゲットディレクトリを導出する。
 2. `gpui-sys/abi.toml` から MoonBit の ABI 定数を生成する。`gen-header`（cbindgen のみ依存の小クレート）で `gpui-sys/include/gpui_sys.h` を再生成してから、そのヘッダーに対して `bindgen-moonbit` を実行し、生成された MoonBit ファイルをフォーマットする。ヘッダー再生成が bindgen より前にあることが重要である: bindgen の出力は `moon check` でゲートされ、`moon check` はヘッダーを再生成する唯一の `cargo build` より前に走るため、順序が逆だと新しい Rust の C エクスポートがビルドをデッドロックさせる（issue #71）。
 3. fatal な `moon check` を実行し、その後 Cargo 由来のネイティブライブラリをまだ持たない状態でコールドな `moon build` を行う。このブートストラップ段階ではネイティブリンクの失敗が想定される。完全な Cargo 一覧を用いる後のビルドが厳密なリンクのゲートである。
-4. `app.dispatch` のマングルされたシンボルをちょうど 1 つ抽出する。`main.c` が存在する場所では、生成された C のプロトタイプを `int32_t` の戻り値と 5 つの `int32_t` パラメータとして検証する。`cmd/main/main.mbt` の明示的な `_keep` 型が、全プラットフォームにおける MoonBit コンパイル時のシグネチャアンカーである。
+4. `dispatch_entry` のマングルされたシンボルをちょうど 1 つ抽出する（suffix は `abi.toml` の `[callback] name` から導出）。`main.c` が存在する場所では、生成された C のプロトタイプを `int32_t` の戻り値と 5 つの `int32_t` パラメータとして検証する。シグネチャのアンカーはライブラリ側の `dispatch_entry` の定義そのものであり、消費者の `_keep` に依存しない。
 5. 検出されたネイティブの Rust ホスト向けに `gpui-sys` をビルドし、`cargo rustc --lib --crate-type staticlib -- --print native-static-libs` を捕捉し、Cargo metadata が報告するターゲットディレクトリを使って最終的なプラットフォーム用 `moon.pkg` を生成する。`build.rs` は `mb_symbol.txt` を読み取り、コールバックの extern を生成し、Rust の ABI 定数を再生成する。cbindgen による `include/gpui_sys.h` の再生成も残っているが、ステップ 2 の `gen-header` と同じ呼び出しの冪等なバックストップである（素の `cargo build` 用）。
 6. MoonBit のリンク済み出力を削除して再度ビルドし、新しい Rust 静的ライブラリと Cargo 由来のネイティブ依存に対して強制的に再リンクする。
 7. リンケージを検証する。macOS/Linux は最終バイナリを調べ、コールバック定義がちょうど 1 つであることを確認する。Windows は、MoonBit の `main.obj` にコールバック定義が 1 つ、`gpui_sys.lib` に未解決参照が 1 つあること、および最終リンクが成功することを検証する（リンク済み PE は通常 COFF シンボルテーブルを省略するため）。
@@ -219,7 +223,7 @@ bindgen ステップは、同じドライバ実行内で直前に `gen-header` �
 
 スクリプトの処理:
 
-1. マングル規則（`docs/moonbit-native-notes.md` §3）から `app.dispatch` のシンボル `_M0FP36nakake15gpui_2dbindings3app8dispatch` を**決定的に計算**する。chicken/egg（Rust が MoonBit のマングルシンボルをコンパイル時に必要とする）を、ブートストラップビルドなしに解決する。
+1. マングル規則（`docs/moonbit-native-notes.md` §3）から `dispatch_entry` のシンボル `_M0FP26nakake15gpui_2dbindings15dispatch__entry` を**決定的に計算**する。chicken/egg（Rust が MoonBit のマングルシンボルをコンパイル時に必要とする）を、ブートストラップビルドなしに解決する。
 2. `gpui-sys/mb_symbol.txt` が無ければ書き込む（`build.sh` 非経由の単独ビルド用）。既存値が計算値と異なれば警告する。
 3. `cargo build --target <host>` で `libgpui_sys.a` をビルドする。
 4. `cargo rustc -- --print native-static-libs` でリンクフラグを捕捉し、`build.sh` と同一の OS 別正規化（`-lc` 除去、Linux の XCB/XKB SONAME 化、macOS の `-lm` 除去 + IOSurface 追加、システムライブラリ検索パス注入）を適用する。
@@ -241,12 +245,13 @@ bindgen ステップは、同じドライバ実行内で直前に `gen-header` �
 // exe の moon.pkg
 import {
   "nakake/gpui-bindings",       // 高水準 API
-  "nakake/gpui-bindings/app",   // app.dispatch を保持（callback リンク解決に必須）
   "nakake/gpui-bindings/link",  // Rust staticlib のリンクフラグ伝播を受ける
 }
 ```
 
-exe の `main` では `app.dispatch` を `let _keep : (Int, Int, Int, Int, Int) -> Int = @nakake/gpui-bindings/app.dispatch` で明示保持する（dead-code elimination 対策。Rust staticlib の `mb_dispatch` 未解決参照を最終リンクで解決するために必須）。
+exe の `main` では、自前の dispatch を `@nakake/gpui-bindings.register_dispatch(my_dispatch)` で `run_window` より前に登録する。これが Rust staticlib の `mb_dispatch` 未解決参照を解決する `dispatch_entry` の retain も兼ねるため、かつて必要だった `let _keep : (Int, Int, Int, Int, Int) -> Int = @….app.dispatch` は不要になった（RFC 0004 §3.4）。
+
+**テストを持つ消費者はパッケージを 2 つに割る**: `link` を import したパッケージには `moon test` のテストを置けない。moon がリンクフラグをテスト実行ファイルにも伝播させ、テストのリンクに使う tcc が `-lstdc++` 等を解決できないためである。`examples/counter` は「アプリ本体（`link` を import しない、テストを置ける）」と「`main`（`link` の import と `fn main` だけ）」に分けている。
 
 **制約・未検証事項**:
 
@@ -259,7 +264,7 @@ exe の `main` では `app.dispatch` を `let _keep : (Int, Int, Int, Int, Int) 
 ## 7. 不変条件と落とし穴
 
 - **テキスト:** 借用した UTF-8 の `Bytes` と長さを渡す。MoonBit の `String` を C ポインタとして渡したり、NUL 終端の C 文字列契約を用いたりしてはならない。
-- **コールバック:** 現在のマングル名は抽出されるが、固定の `app.dispatch(version, kind, view, data_a, data_b) -> i32`、その 5 つの `i32` パラメータ（slot 0 = ABI_VERSION、slot 2 = view id）、および `0`/`1` の結果ポリシーはチェックされる。パッケージ/関数名のリネームには、両ドライバの suffix 更新が必要である。
+- **コールバック:** 現在のマングル名は抽出されるが、固定の `dispatch_entry(version, kind, view, data_a, data_b) -> i32`、その 5 つの `i32` パラメータ（slot 0 = ABI_VERSION、slot 2 = view id）、および `0`/`1` の結果ポリシーはチェックされる。関数名を変える場合は `abi.toml` の `[callback] name` を更新すれば両ドライバの suffix はそこから導出される。
 - **再リンク:** `gpui-sys` を変更した後は、ルートのドライバを使うか、`moon build` の前に MoonBit のリンク済み出力を明示的にクリーンすること。
 - **ロック:** render は、リスナーが MoonBit コールバックを呼び出し得る前に、`VIEWS` をスナップショットして解放しなければならない。
 - **キーボード:** macOS では `.app` を実行すること。フォーカスは `render` 中ではなく、GPUI ビュー構築時に割り当てられる。
@@ -274,8 +279,8 @@ exe の `main` では `app.dispatch` を `let _keep : (Int, Int, Int, Int, Int) 
 | 区分 | ファイル |
 |---|---|
 | 手編集の ABI ソース | `gpui-sys/abi.toml` |
-| 手編集の実装・ビルドツール | `gpui-sys/src/lib.rs`、`gen-header/src/main.rs`、`bindgen-moonbit/src/main.rs`、`moonbit-bindings/gpui-bindings.mbt`、`moonbit-bindings/widgets.mbt`、`moonbit-bindings/components.mbt`、`store.mbt`、`signal.mbt`、`event.mbt`、`handlers.mbt`、`framework.mbt`、`moonbit-bindings/app/app.mbt` |
-| 手編集のテスト・ベンチ・サンプル | `gpui-sys/src/headless.rs`、`headless_tests.rs`、`fuzz_tests.rs`、`gpui-sys/benches/decode_bench.rs`、`gpui-sys/fuzz/`（cargo-fuzz scaffold）、`moonbit-bindings/examples/hello/`、`*_wbtest.mbt` / `*_test.mbt` |
+| 手編集の実装・ビルドツール | `gpui-sys/src/lib.rs`、`gen-header/src/main.rs`、`bindgen-moonbit/src/main.rs`、`moonbit-bindings/gpui-bindings.mbt`、`moonbit-bindings/widgets.mbt`、`moonbit-bindings/components.mbt`、`store.mbt`、`signal.mbt`、`event.mbt`、`handlers.mbt`、`framework.mbt`、`moonbit-bindings/dispatch.mbt` |
+| 手編集のテスト・ベンチ・サンプル | `gpui-sys/src/headless.rs`、`headless_tests.rs`、`fuzz_tests.rs`、`gpui-sys/benches/decode_bench.rs`、`gpui-sys/fuzz/`（cargo-fuzz scaffold）、`examples/counter/`、`examples/hello/`、`examples/stream/`、`tests/consumer/`、`*_wbtest.mbt` / `*_test.mbt` |
 | 追跡対象の生成ソース | `gpui-sys/include/gpui_sys.h`、`gpui-sys/src/abi_constants.rs`、`moonbit-bindings/abi_constants.mbt`、`moonbit-bindings/gpui-bindings-ffi.mbt` |
 | 手編集の OS テンプレート | `moonbit-bindings/cmd/main/moon.pkg.macos`、`.linux`、`.windows`、`moonbit-bindings/cmd/roundtrip/moon.pkg.*` |
 | 無視されるビルド生成物 | `moonbit-bindings/cmd/main/moon.pkg`、`moonbit-bindings/cmd/roundtrip/moon.pkg`、`gpui-sys/mb_symbol.txt`、`_build/`、`target/`、`dist/` |
@@ -299,8 +304,9 @@ MoonBit 側のテストは 2 層に分かれる（issue #80）。**whitebox**（
 - 生成された低レベルの MoonBit import: `moonbit-bindings/gpui-bindings-ffi.mbt`
 - 高レベルの MoonBit UI API（`CommandBuffer`、`Color`、構造化エラー `GpuiError` / `classify_status` / `expect_ok`、`update_text` / `debug_dump_text` / `abi_probe` / `input_text` / `input_set_text` ラッパー）と UTF-8 エンコード: `moonbit-bindings/gpui-bindings.mbt`
 - コンポーネント/状態/イベントのフレームワーク層（RFC 0001）: `moonbit-bindings/components.mbt`（`RenderCtx` / `button` / `text_input`）、`store.mbt`（`Store` / `CellId`）、`signal.mbt`（`Signal`）、`event.mbt` / `handlers.mbt`（`Event` / `HandlerRegistry` / `InputId`）、`framework.mbt`（`framework_dispatch`）
-- Counter の状態（signal）・コンポーネント列・dispatch 委譲: `moonbit-bindings/app/app.mbt`
-- エントリポイントとコールバックの保持: `moonbit-bindings/cmd/main/main.mbt`
+- dispatch の登録とライブラリ所有のエントリポイント（RFC 0004）: `moonbit-bindings/dispatch.mbt`（`register_dispatch` / `dispatch_entry`）
+- Counter の状態（signal）・コンポーネント列・dispatch 委譲: `examples/counter/counter/counter.mbt`（path 依存の別モジュール）
+- build driver 用の最小ランナー（dispatch を登録してウィンドウを開く）: `moonbit-bindings/cmd/main/main.mbt`
 - OS ネイティブのリンクテンプレート: `moonbit-bindings/cmd/main/moon.pkg.*`
 - ビルド/バンドルの orchestration: `build.sh`、`build.ps1`、`bundle.sh`
 - ヘッドレス往復テスト（issue #34）: `moonbit-bindings/cmd/roundtrip/main.mbt`
@@ -311,13 +317,13 @@ MoonBit 側のテストは 2 層に分かれる（issue #80）。**whitebox**（
 - デコードベンチ（G26）: `gpui-sys/benches/decode_bench.rs`
 - 合成 widget（`checkbox` / `labeled_row`、G6）: `moonbit-bindings/widgets.mbt`
 - 公開 API のブラックボックステスト（issue #80）: `moonbit-bindings/gpui-bindings_test.mbt`
-- 消費者向けサンプル: `moonbit-bindings/examples/hello/hello.mbt`
+- 消費者向けサンプル（path 依存の別モジュール、それぞれ実行ファイル）: `examples/hello/main/`、`examples/stream/main/`
 
 ## 11. MoonBit native 実行時制約
 
 このブリッジは MoonBit native ランタイムの実装挙動に依存しており、以下の制約は API が強制しないため**呼び出し側が守る必要がある**。背景は [`docs/moonbit-native-notes.md`](./moonbit-native-notes.md) §4/§6 と codex レビュー [`docs/reviews/2026-07-16-codex-gpt5.6-sol.md`](./reviews/2026-07-16-codex-gpt5.6-sol.md) §2 に記録されている。
 
-- **callback はメインスレッド限定。** ランタイムは参照カウント方式で、RC は**非アトミック**（`moonbit.h` の `int32_t rc`）。したがって Rust→MoonBit の `app.dispatch` はメインスレッド（MoonBit が開始した GPUI イベントループの内側）からのみ呼んでよい。別スレッドから呼ぶとデータ競合になる。
+- **callback はメインスレッド限定。** ランタイムは参照カウント方式で、RC は**非アトミック**（`moonbit.h` の `int32_t rc`）。したがって Rust→MoonBit の `dispatch_entry` はメインスレッド（MoonBit が開始した GPUI イベントループの内側）からのみ呼んでよい。別スレッドから呼ぶとデータ競合になる。`register_dispatch` も同じ制約に従う（`run_window` より前・メインスレッド）。
 - **callback は素のトップレベル関数でなければならない。** MoonBit のクロージャは RC ヒープオブジェクト（`{code ptr + 環境}`）であり、C の関数ポインタとしてエクスポートできない（`#export_name` は実行ファイルビルドで C シンボルを出さない）。Rust→MoonBit は「マングル名を Rust から直参照して呼ぶ」の一択であり、渡す値はスカラに限定する。
 - **envelope はスカラのみ。** イベントは 5×`i32` の envelope（slot 0 = `ABI_VERSION`、slot 2 = view id）で届く。MoonBit のヒープオブジェクトを Rust 側に保持してはならない（incref/decref を避ける）。テキスト等のペイロードは Rust 所有のキューから `gpui_event_copy_text` で同期的にコピーする。
 - **MoonBit `Int` == Rust `i32`。** native の `Int` は 32-bit 2 の補数機械語であり、C 境界とコマンドバッファの wire format は i32/u32 little-endian である。これは実験的前提ではなく、`gpui_abi_probe` による境界値（`i32::MAX` / `i32::MIN` / 0 / -1）の往復がビルドのたびに機械検証する（`cmd/roundtrip`、issue #54 G23）。32-bit wrap セマンティクスは `gpui-bindings_wbtest.mbt` でも固定する。

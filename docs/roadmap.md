@@ -8,7 +8,7 @@
 
 ### 実装済み
 - retained UI と MoonBit 側の Counter (`-1` / `Reset` / `+1` / `+10`)。
-- click/key callback。コールバック ABI は固定の `app.dispatch(version, kind, view, data_a, data_b)`（5 × `i32` のバージョニング済みイベントエンベロープ、`ABI_VERSION` = 4）で、実マングル表記のみを build driver が自動検出する。
+- click/key callback。コールバック ABI は固定の `dispatch_entry(version, kind, view, data_a, data_b)`（ライブラリ所有、5 × `i32` のバージョニング済みイベントエンベロープ、`ABI_VERSION` = 4）で、実マングル表記のみを build driver が自動検出する。アプリの dispatch は消費者が書いて `register_dispatch` で登録する（RFC 0004）。
 - `abi.toml` からの共有 ABI 定数生成、C ヘッダーからの MoonBit FFI 生成・検証、および macOS/Linux/Windows の build 経路。
 - Windows と WSL/Linux は 2026-07-19 に手動検証済み。macOS は 2026-07-23 に再検証済み（`build.sh` のバンドル統合後、ウィンドウ表示と `j`/`k`/`r` キー操作を実機確認）。
 - アクティブな root CI（`.github/workflows/ci.yml`）: ubuntu/macos/windows の 3 OS でコールドビルド・テスト・Rust 単独変更後の再ビルドを自動検証（#33、`0f5ce3b`）。

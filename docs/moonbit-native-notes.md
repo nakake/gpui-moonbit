@@ -50,19 +50,20 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
   - 例: `username/gpui-bindings/spike` の `mb_ping` → `__M0FP38username15gpui_2dbindings5spike8mb__ping`
     - `3`(要素数) + `8username` + `15gpui_2dbindings` + `5spike` + `8mb__ping`(`mb_ping`→`mb__ping` で8字)。先頭の `38` は `3`+`8username`。
     - 旧観測(リネーム前、2026-07-15)。spike パッケージは現存しないため再測定不可。マングル規則の説明として旧 `username` 名のまま残す。
-  - 例: `nakake/gpui-bindings/app` の `dispatch` → `_M0FP36nakake15gpui_2dbindings3app8dispatch`(ELF 実測。Mach-O なら先頭 `_` がもう1本付く)
-    - 旧観測(リネーム前、2026-07-15): `__M0FP38username15gpui_2dbindings3app8dispatch`。リネーム後は `36` = `3`+`6nakake`。観測日: 2026-08-01(`./build.sh` step 2 で再測定)
+  - 例: `nakake/gpui-bindings`(ルートパッケージ) の `dispatch_entry` → `_M0FP26nakake15gpui_2dbindings15dispatch__entry`(ELF 実測。Mach-O なら先頭 `_` がもう1本付く)
+    - 要素数は 2(`nakake` / `gpui-bindings`)なので先頭は `26` = `2`+`6nakake`。関数名は `dispatch_entry` → `_` が `__` にエスケープされて `dispatch__entry`(15字)。観測日: 2026-08-06(`./build.sh` step 2 で再測定)
+    - 旧観測: コールバックが Counter デモ所有だった頃は `nakake/gpui-bindings/app` の `dispatch` → `_M0FP36nakake15gpui_2dbindings3app8dispatch`(2026-08-01)。さらに前(リネーム前、2026-07-15)は `__M0FP38username15gpui_2dbindings3app8dispatch`。**パッケージが 1 段浅くなると先頭の要素数も変わる**(`36` → `26`)ことがこの 3 例で確認できる
   - 観測日: 2026-07-15
 - **Rust から MoonBit 関数をマングル名で参照する**(Rust→MoonBit コールバックの実用手段):
   ```rust
   unsafe extern "C" {
-      #[link_name = "_M0FP36nakake15gpui_2dbindings3app8dispatch"] // ← 先頭 _ は1本
+      #[link_name = "_M0FP26nakake15gpui_2dbindings15dispatch__entry"] // ← 先頭 _ は1本
       fn mb_dispatch(id: i32);
   }
   ```
   - **Mach-O は `link_name` に先頭 `_` を1本自動付与**する。nm 表示が `__M0FP…`(2本)なら、`link_name` には `_M0FP…`(1本)と書く。2本書くと参照が `___`(3本)になって未解決。
   - 脆さ: 関数/パッケージ改名・ツールチェーンのマングル変更で壊れるが**リンクエラーで即検知**でき、`nm` で新名に更新するだけ。
-  - **旧説明の補足 (現在は superseded)**: `build.sh` が MoonBit ビルド出力から `app.dispatch` の実マングル名を `nm` で抽出 → `gpui-sys/mb_symbol.txt` に書き、`gpui-sys/build.rs` がそれを読んで `extern`(`#[link_name]`)を生成する。これはマングル表記の抽出だけを自動化する。改名・引数数・型・ABI 方針への自動追従ではない。
+  - **旧説明の補足 (現在は superseded)**: `build.sh` が MoonBit ビルド出力から callback(現在は `dispatch_entry`)の実マングル名を `nm` で抽出 → `gpui-sys/mb_symbol.txt` に書き、`gpui-sys/build.rs` がそれを読んで `extern`(`#[link_name]`)を生成する。これはマングル表記の抽出だけを自動化する。改名・引数数・型・ABI 方針への自動追従ではない(ただし suffix の導出元は `abi.toml` の `[callback] name` に一本化済み、RFC 0004)。
   - 観測日: 2026-07-15
 - **マングル名が変わる/変わらない条件**(`#[link_name]` に直書きしているので重要):
   - **変わる**: 関数名の変更 / パッケージ名・場所(ディレクトリ)の変更 / モジュール名(`moon.mod` の `name`)の変更 / MoonBit ツールチェーンのマングル方式変更(version up)。→ いずれも**リンクエラーで即検知**でき、`nm … | grep <fn>` で得た新名を(先頭 `_` を1本にして)貼り直すだけ。
@@ -87,12 +88,15 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
 
 - 実行ファイルビルドでは、**MoonBit から参照されない `pub` 関数は DCE で消える**(`#export_name` 付きでも消えた)。
 - Rust からマングル名でしか呼ばれない関数は、MoonBit 側から**値として参照して retain** する: `let _keep : (Int) -> Unit = @pkg.f`。
+  - **本リポジトリでは消費者に `_keep` を書かせない**(2026-08-06、RFC 0004 §3.4)。retain 対象をライブラリ所有の `dispatch_entry` に移し、消費者が呼ぶ `register_dispatch` の内部からそれを参照させることで、「登録する」という自然な操作が retain を兼ねる。別モジュール + path 依存(`tests/consumer`)で `_keep` なしにリンク・実行できることを確認済み。上の一般則自体は MoonBit の挙動として有効。
 - `-Wl,-u,<sym>` だけでは、MoonBit が既に `.o` から落とした関数は復活できない(MoonBit 側で残す必要がある)。
 - 観測日: 2026-07-15
 
 ## 6. コールバックの方向(Rust ↔ MoonBit)
 
-> **現行設計 (2026-07-20)**: コールバック ABI は `app.dispatch(kind, id, a, b) -> i32`（4 個の `i32` 引数、`i32` 戻り値）に固定される。戻り値 `1` は状態変更と tree 再構築済み、`0` は no-op を表し、Rust は `1` のときだけ `cx.notify()` を呼ぶ。build driver が自動追従するのは実マングル表記だけで、生成 C の戻り値と引数を別途検証する。関数名・パッケージ名・引数数・型の変更は自動追従の対象ではなく、`abi.toml`、両 build driver、Rust extern を同時に更新する。
+> **現行設計 (2026-08-06)**: コールバック ABI は**ライブラリ所有**の `dispatch_entry(version, kind, view, data_a, data_b) -> i32`（ルートパッケージ `nakake/gpui-bindings`、5 個の `i32` 引数、`i32` 戻り値）に固定される。5 スロットはバージョニング済みイベントエンベロープで、slot 0 は `ABI_VERSION`、slot 2 は view id。戻り値 `1` は状態変更、`0` は no-op を表し、Rust は `1` のときだけ `cx.notify()` を呼ぶ。`dispatch_entry` は純粋な委譲で、アプリの dispatch は消費者が `register_dispatch` で登録する（RFC 0004）。build driver が自動追従するのは実マングル表記だけで、生成 C の戻り値と引数を別途検証する。関数名・引数数・型の単一情報源は `abi.toml` の `[callback]`（`name` / `params` / `return`）で、両 build driver の suffix と Rust extern はそこから導出される。
+>
+> **旧設計 (2026-07-20)**: `app.dispatch(kind, id, a, b) -> i32`（4 個の `i32` 引数）。コールバックが Counter デモ所有だったため、消費者は自分のアプリを書けなかった（#125）。
 
 - **MoonBit のクロージャを C 関数ポインタとして渡すのは不可**。公開 `FuncRef`/`#callback` は無い。クロージャは RC ヒープオブジェクト `{code ptr + 環境}` で、C の `void(*)()` ではない。非キャプチャのトップレベル関数のみ内部的に raw fn ptr 化できる(未公開)。
 - したがって **Rust→MoonBit は「名前付き(マングル)シンボルを Rust から参照して呼ぶ」の一択**(§3)。渡すのは `Int` 等スカラのみにして MoonBit オブジェクトを Rust 側に保持しない(incref/decref を避ける)。

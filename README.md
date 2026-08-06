@@ -19,8 +19,13 @@ MoonBit native から Rust/GPUI を C FFI 越しに呼ぶ、ローカル向け�
 │   ├── gpui-bindings.mbt              # 手編集する高水準 API
 │   ├── gpui-bindings-ffi.mbt          # bindgen による tracked な生成 FFI
 │   ├── abi_constants.mbt              # abi.toml からの tracked な生成定数
-│   ├── app/app.mbt                    # Counter の状態・イベント・UI 構築
-│   └── examples/hello/                # Counter 以外の最小 example（ライブラリ）
+│   ├── dispatch.mbt                   # register_dispatch / dispatch_entry（RFC 0004）
+│   └── cmd/main/main.mbt              # build driver 用の最小ランナー
+├── examples/                          # ライブラリを path 依存で消費する別モジュール
+│   ├── counter/                       # Counter デモ（アプリ本体 + main の 2 パッケージ）
+│   ├── hello/                         # 最小 example
+│   └── stream/                        # 非同期注入 example
+├── tests/consumer/                    # 消費者経路の回帰テスト（イベント注入）
 ├── build.sh                           # macOS / Linux 用 build driver
 ├── build.ps1                          # Windows 用 build driver
 ├── bundle.sh                          # macOS Runner.app の作成（build.sh から呼び出される）
@@ -89,15 +94,42 @@ PowerShell を MSVC x64 環境で開く（または build driver に検出させ
 
 1. `gpui-sys/abi.toml` から ABI 定数を生成し、`gen-header`（cbindgen のみ依存の小クレート、gpui はビルドしない）で C ヘッダーを再生成してから、そのヘッダーから MoonBit FFI 宣言を生成する。ヘッダーが bindgen より前に再生成されるため、新しい Rust の C export を追加してもビルドはデッドロックしない（issue #71）。
 2. `moon check` を必須ゲートとして実行し、MoonBit を一度 build する。この段階では callback/static library 未解決による想定内の cold-link failure だけを許容する。
-3. `app.dispatch` の実マングルシンボルを抽出し、生成 C がある環境では callback が `int32_t` を返し、`abi.toml` の `[callback] params` から導出した個数の `int32_t` 引数を取ることも検証する。
+3. `dispatch_entry` の実マングルシンボルを抽出し、生成 C がある環境では callback が `int32_t` を返し、`abi.toml` の `[callback] params` から導出した個数の `int32_t` 引数を取ることも検証する。
 4. `mb_symbol.txt` を読む `gpui-sys` を Rust で build し、Cargo の `native-static-libs` 出力から OS 固有 link flags を生成して MoonBit を強制再リンクする。
 5. callback の最終リンクを検証する。macOS/Linux は最終バイナリ上で定義を検査し、Windows は COFF の事情から MoonBit object の定義、Rust archive の未解決参照、最終リンク成功を検査する。
 
-callback のパッケージ/関数は `app.dispatch`、5 個の `i32` 引数という固定契約です。5 スロットは **バージョニング済みイベントエンベロープ** `(abi_version, event_kind, view, data_a, data_b)` を運びます。slot 0 は常に `ABI_VERSION` で、古い Rust バイナリをランタイムに拒否します。slot 2 は view id で、再構築対象のビューをルーティングします。`EVENT_TEXT` は Rust 所有のイベントキューから `gpui_event_copy_text(token, buf, len)` で UTF-8 ペイロードをコピーします。現在の実マングル表記は抽出により追従しますが、`app` package または `dispatch` を改名する場合は、両 build driver の `PKG_FN_SUFFIX` / `$PkgFnSuffix` と ABI 方針も更新する必要があります。一方、**引数の個数**は `abi.toml` の `[callback] params` が単一情報源で、build driver・`gpui-sys/build.rs` はいずれもそこから導出するため、スロット数を変えても build driver 側の手直しは不要です（#76）。
+callback は**ライブラリ所有**の `dispatch_entry`（ルートパッケージ `nakake/gpui-bindings`）、5 個の `i32` 引数という固定契約です。5 スロットは **バージョニング済みイベントエンベロープ** `(abi_version, event_kind, view, data_a, data_b)` を運びます。slot 0 は常に `ABI_VERSION` で、古い Rust バイナリをランタイムに拒否します。slot 2 は view id で、再構築対象のビューをルーティングします。`EVENT_TEXT` は Rust 所有のイベントキューから `gpui_event_copy_text(token, buf, len)` で UTF-8 ペイロードをコピーします。
+
+Rust が解決するシンボルはこの 1 本に固定されており、**アプリ側では動きません**（RFC 0004）。消費者は自分の dispatch を書いて `register_dispatch(...)` で登録し、`dispatch_entry` がそれへ委譲します（下記「消費者の書き方」）。現在の実マングル表記は抽出により追従します。関数名を変える場合は `abi.toml` の `[callback] name` が単一情報源で、両 build driver の `PKG_FN_SUFFIX` / `$PkgFnSuffix` はそこから導出されます。**引数の個数**も同様に `[callback] params` が単一情報源で、build driver・`gpui-sys/build.rs` はいずれもそこから導出するため、スロット数を変えても build driver 側の手直しは不要です（#76）。
+
+### 消費者の書き方
+
+```moonbit
+fn my_dispatch(
+  version : Int, kind : Int, view : Int, data_a : Int, data_b : Int,
+) -> Int {
+  // 通常はフレームワークへ委譲する（RFC 0001 §3.4）
+  @nakake/gpui-bindings.framework_dispatch(
+    ctx, version, kind, view, data_a, data_b, fn(v) { build_tree(v) },
+  )
+}
+
+fn main {
+  @nakake/gpui-bindings.register_dispatch(my_dispatch) // run_window より前・メインスレッド
+  ...
+}
+```
+
+- 登録は last-wins（テストが dispatch を差し替える手段を兼ねます）
+- 未登録のままイベントが届くと `0`（変化なし）が返り、初回だけ stdout に警告が 1 行出ます
+- かつて必要だった `let _keep : (Int, Int, Int, Int, Int) -> Int = @….app.dispatch` は**不要**です。`register_dispatch` の内部が `dispatch_entry` を参照するため、登録するだけで dead-code elimination から retain されます（RFC 0004 §3.4）
+- テストを持つ消費者は「アプリ本体（`link` を import しない）」と「`main`（`link` の import と `fn main` だけ）」の 2 パッケージに分けてください。`link` を import したパッケージには `moon test` のテストを置けません（伝播したリンクフラグを tcc が解決できないため）
+
+動く実例は `examples/counter/`（アプリ本体 + main の 2 パッケージ構成）と `tests/consumer/` です。
 
 ## FFI と実行モデル
 
-MoonBit は Rust 側に retained node tree を組み立て、GPUI が描画します。ツリーは **コマンドバッファ**（length-delimited な opcode ストリーム）として記述され、`build_tree(view, cb)` 1 回の FFI 呼び出しで送信・コミットされます（issue #5 で property-per-call から集約）。opcode と `BUFFER_VERSION` は `gpui-sys/abi.toml` から両言語へ生成され、drift guard テストが食い違いを検出します。クリック・キー・テキストイベントは Rust から MoonBit の `app.dispatch(version, kind, view, data_a, data_b)` に戻ります。`EVENT_CLICK` は `(4, 1, view, click_id, 0)`、`EVENT_KEY` は `(4, 2, view, codepoint, mods)`、`EVENT_TEXT` は `(4, 3, view, token, byte_len)`、`EVENT_NAMED_KEY` は `(4, 4, view, named_key_id, mods)` を送り（Enter/Escape/矢印などの名前付きキー）、MoonBit は `EVENT_TEXT` のペイロードを `gpui_event_copy_text` でコピーします。callback は状態が変わった場合に `1`、変わらない場合に `0` を返し、`1` のときだけ tree 全体を再構築して Rust が `cx.notify()` を呼びます。未知のイベントや reset 済みの値を再度 reset する操作では再描画しません。
+MoonBit は Rust 側に retained node tree を組み立て、GPUI が描画します。ツリーは **コマンドバッファ**（length-delimited な opcode ストリーム）として記述され、`build_tree(view, cb)` 1 回の FFI 呼び出しで送信・コミットされます（issue #5 で property-per-call から集約）。opcode と `BUFFER_VERSION` は `gpui-sys/abi.toml` から両言語へ生成され、drift guard テストが食い違いを検出します。クリック・キー・テキストイベントは Rust から MoonBit の `dispatch_entry(version, kind, view, data_a, data_b)` に戻り、そこから登録済みのアプリの dispatch へ委譲されます。`EVENT_CLICK` は `(4, 1, view, click_id, 0)`、`EVENT_KEY` は `(4, 2, view, codepoint, mods)`、`EVENT_TEXT` は `(4, 3, view, token, byte_len)`、`EVENT_NAMED_KEY` は `(4, 4, view, named_key_id, mods)` を送り（Enter/Escape/矢印などの名前付きキー）、MoonBit は `EVENT_TEXT` のペイロードを `gpui_event_copy_text` でコピーします。callback は状態が変わった場合に `1`、変わらない場合に `0` を返し、`1` のときだけ tree 全体を再構築して Rust が `cx.notify()` を呼びます。未知のイベントや reset 済みの値を再度 reset する操作では再描画しません。
 
 コマンドバッファ内のテキストは `len u32 + UTF-8 バイト列`（明示長、NUL 終端なし）で、MoonBit は `@utf8.encode` で変換します。Rust はポインタ/長さをその呼び出しの間だけ読み取ります。
 
