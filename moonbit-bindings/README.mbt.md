@@ -34,9 +34,9 @@ build 完了後、build driver が起動コマンドを表示します。
 
 ```bash
 # macOS（キーボード入力には .app バンドルが必要）
-open dist/Counter.app
+open dist/Runner.app
 # stderr をターミナルで見る場合
-./dist/Counter.app/Contents/MacOS/Counter
+./dist/Runner.app/Contents/MacOS/Runner
 
 # Linux / WSLg（X11 経路を明示）
 cd moonbit-bindings
@@ -52,7 +52,7 @@ LD_LIBRARY_PATH=$PWD/../.linux-libs env -u WAYLAND_DISPLAY \
 .\moonbit-bindings\_build\native\debug\build\cmd\main\main.exe
 ```
 
-起動すると Counter デモが表示されます。`-1` / `Reset` / `+1` / `+10` ボタン、`j` / `k` / `r` キー、Enter/Escape/矢印キー、数字入力で値を操作できます。テキスト入力ボックス（RFC 0003）に数字を入力して Enter を押すと、その値がカウントにセットされボックスはクリアされます（IME 合成にも対応）。
+起動するのは `cmd/main` の最小ランナーです（クリックと `space` キーで受信イベント数が動きます）。build driver が用意するのはこの実行ファイルで、デモアプリは `examples/` 配下の独立モジュールになりました（#125）。Counter デモを動かすには `cd examples/counter && moon build` してから `./_build/native/debug/build/main/main.exe` を実行します。`-1` / `Reset` / `+1` / `+10` ボタン、`j` / `k` / `r` キー、Enter/Escape/矢印キー、数字入力で値を操作でき、テキスト入力ボックス（RFC 0003）に数字を入力して Enter を押すとその値がカウントにセットされます（IME 合成にも対応）。
 
 MoonBit 側の型検査だけなら、このディレクトリで `moon check`（および `moon test`）を実行できます。
 
