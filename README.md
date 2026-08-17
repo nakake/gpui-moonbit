@@ -129,13 +129,7 @@ fn main {
 
 mooncakes からの registry 依存（`.mooncakes/` への展開）にはモジュールの隣に `gpui-sys/` が無いため、prebuild（`moonbit-bindings/build.py`）は sibling の有無で消費経路を自動判定し、無い場合はユーザキャッシュに wrapper crate（`extern crate gpui_sys;` だけの staticlib で、crates.io の `gpui-sys` に依存する）を生成してビルドします（#132、[RFC 0005](docs/rfc/0005-build-driver-redesign.md)）。このリポジトリ・`examples/`・`tests/consumer` はいずれも sibling のある経路なので挙動は変わりません。`gpui-sys` は crates.io 未公開のため、wrapper 経路が実際に使えるのは公開後です。
 
-wrapper と、その cargo 成果物（`CARGO_TARGET_DIR` 未設定時）の置き場:
-
-- Linux: `$XDG_CACHE_HOME/nakake-gpui-bindings/`（既定は `~/.cache/nakake-gpui-bindings/`）
-- macOS: `~/Library/Caches/nakake-gpui-bindings/`
-- Windows: `%LOCALAPPDATA%\nakake-gpui-bindings\`
-
-初回は gpui の全依存のコールドビルドになるため数十分かかり（ネットワーク必須）、容量は cargo 成果物込みで 1 環境あたり約 1.2 GB です。丸ごと削除して構いません（次回ビルドで再生成・再ビルドされます）。詳細は [`moonbit-bindings/README.md`](moonbit-bindings/README.md) の該当節を参照してください。
+wrapper と cargo 成果物は OS 慣例のユーザキャッシュに置かれます。初回は gpui の全依存のコールドビルドになるため数十分かかり（ネットワーク必須）、容量は約 1.2 GB で、丸ごと削除して構いません。キャッシュの正確な位置（3 OS）と削除手順は [`moonbit-bindings/README.md`](moonbit-bindings/README.md) の「registry 消費（wrapper 経路、#132）」節が正本です（[`docs/troubleshooting.md`](docs/troubleshooting.md) §5 にも対処付きで再掲）。
 
 ## FFI と実行モデル
 

@@ -219,12 +219,22 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          (cd gpui-sys && cargo package --no-verify)
-          (cd gpui-sys && cargo package --list) > /tmp/crate-list.txt
+          # --allow-dirty: this step tests structural consumption of the
+          # packaged file set, not git hygiene (generation drift is guarded
+          # by build.sh's diff warning and the pre-commit hook); without it a
+          # future toolchain-induced regeneration diff would fail here with a
+          # misleading error.
+          (cd gpui-sys && cargo package --no-verify --allow-dirty)
+          (cd gpui-sys && cargo package --list --allow-dirty) > /tmp/crate-list.txt
           grep -qx 'abi.toml' /tmp/crate-list.txt
           grep -qx 'include/gpui_sys.h' /tmp/crate-list.txt
           grep -qx 'src/abi_constants.rs' /tmp/crate-list.txt
-          ! grep -qx 'mb_symbol.txt' /tmp/crate-list.txt
+          # NOTE: `! grep` alone is dead under set -e (a negated pipeline
+          # never triggers errexit) — gate explicitly.
+          if grep -qx 'mb_symbol.txt' /tmp/crate-list.txt; then
+            echo "ERROR: mb_symbol.txt must not be part of the published crate" >&2
+            exit 1
+          fi
           VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' gpui-sys/Cargo.toml | head -n1)
           mkdir -p /tmp/pkgtest
           tar -xzf "gpui-sys/target/package/gpui-sys-$VERSION.crate" -C /tmp/pkgtest

@@ -118,6 +118,19 @@ registry 消費(#132)は build.py に「sibling が無い環境で gpui-sys を�
 - **pin drift assert**: build.py の `GPUI_SYS_VERSION` を一時的に 0.2.0 へ変えると build.sh preflight が即エラー、0.1.0 で緑(negative/positive 両方向を実測)
 - checkout 経路は無回帰(tests/consumer・build.sh フル PASS)
 
+#### PR-B レビュー反映(2026-08-17、/code-review 8 観点 + critic 反証)
+
+critic の必須 3 件 + 推奨/finder 指摘を反映し、D1/D2/D4 を次のとおり精緻化した:
+
+1. **wrapper の置き場は依存元ごとにバケット化**(D2 精緻化): `wrapper/<pin>/<bucket>/`。bucket = route 接頭辞 + 依存行の sha256 先頭 12 桁。同一 dir を registry / 各 path 依存で共有すると、切替のたびに Cargo.toml 書き換え → cargo の path-identity fingerprint 無効化で gpui-sys 再ビルドが起き(CI の D4-(1)→(2) で毎回)、検証専用 env の並行異 route ビルドに TOCTOU もあった。分離で両方消える。
+2. **wrapper-path は依存先の Cargo.lock をシード**(D4 精緻化、critic 必須 2): wrapper は lockfile を持たず gpui と約 740 推移依存を毎回最新解決するため、上流リリース 1 回で「rust-cache に保存されない cold build を毎 CI 実行で払い、timeout 超過で全 PR ブロック」になり得た。build.py が依存先 gpui-sys/Cargo.lock を wrapper へコピーし(`.seeded-from` マーカーで lock 変更時のみ再シード)、CI/検証の解決を repo lock に固定する。**wrapper-registry(実消費)は lock 供給源が無いため従来どおり浮動**(割り切りは不変。troubleshooting に反映)。
+3. **sibling 判定は realpath**(critic 必須 3): normpath の字句的 `..` 解決は symlink 経由の path 依存で実在する sibling を不在と誤判定し、fail-loud だった旧挙動を「無言で crates.io を使う」に変えてしまう(critic が実測再現)。realpath で実体解決に変更。auto 判定が registry 経路へ落ちる際は stderr に理由と復帰手段(`GPUI_BINDINGS_ROUTE=checkout`)を明示するログも追加(壊れた checkout のマスキング対策)。
+4. **ci.yml の `! grep` は set -e 下で死んでいた**(critic 必須 1、実測再現済み): mb_symbol.txt 非同梱アサートが常に素通りだった。明示的な if/exit 1 に修正。`cargo package` には `--allow-dirty` を付与(このステップは梱包構造の検証であり git 衛生は別段の守備範囲。生成物ドリフトで無関係な赤にしない)。
+5. **caret 判定は build.py `--check-pin` に一本化**: bash/PowerShell の二重実装は cargo の `^0.0.z`(= 完全一致)を誤許容しており、将来の意味論修正も片側に漏れる。Python 1 実装を両ドライバが呼ぶ。
+6. **build.rs の write_generated は「書き込み可能 dir での書き込み失敗」を fail-loud に**: 警告続行は読み取り専用 checkout(内容一致が通常)限定。書き込み可能なのに失敗した場合は stale な生成物での静かなビルド = 言語間 ABI 不一致(ビルド時シグナルなし)につながるため panic を維持。親 dir の create_dir_all も cbindgen 従来挙動に合わせて復元。
+7. **cargo 成功時も build.rs の warning を prebuild ログへ転送**(critic 推奨): 冪等化ガードレールの cargo:warning が consumer に見えなかった。
+8. **mb_symbol.txt の rerun-if-changed はファイル存在時のみ発行**: 不在パスの登録は build script を常時 dirty にし、registry 消費の warm ビルドに毎回 build.rs 実行(cbindgen 解析込み)の税を課していた。
+
 ### PR-C(#132 中盤): publish 準備 → 【ユーザゲート 1】crates.io へ gpui-sys 0.1.0
 - 前提条件: §4 の D0 観測で赤信号なし(満了)
 - `docs/versioning.md`(リリースチェックリストへ「publish → バンプ PR merge」の順序、pin 更新、「patch は ABI/シンボル契約を壊さない」規律)、`CHANGELOG.md`。コード変更なし

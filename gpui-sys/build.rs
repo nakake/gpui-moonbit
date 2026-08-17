@@ -88,19 +88,35 @@ fn mangled_callback_symbol(module: &str, name: &str) -> String {
 }
 
 /// Write a generated file only when its content actually changed, and treat
-/// an unwritable destination as non-fatal. Registry checkouts are read-only:
-/// the packaged copies of the generated files are current by construction, so
-/// "content already matches" is the normal case there, and a mismatch we
-/// cannot write (e.g. a different cbindgen version regenerating the header)
-/// must not fail the consumer's build (RFC 0005, PR-B).
+/// an unwritable destination as non-fatal ONLY when the crate directory is
+/// genuinely read-only. Registry checkouts are read-only and their packaged
+/// copies are current by construction, so "content already matches" is the
+/// normal case there and a residual mismatch (e.g. a different cbindgen
+/// version regenerating the header) must not fail the consumer's build
+/// (RFC 0005, PR-B). In a *writable* checkout, though, a failed write means
+/// the crate would silently compile against stale generated sources — for
+/// abi_constants.rs that is a cross-language ABI mismatch with no build-time
+/// signal — so there the old fail-loud behavior is kept.
 fn write_generated(path: &str, content: &[u8]) {
     match std::fs::read(path) {
         Ok(existing) if existing == content => return,
         _ => {}
     }
+    if let Some(parent) = Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Err(err) = std::fs::write(path, content) {
+        let probe = Path::new(path).with_extension("writability-probe");
+        let dir_writable = std::fs::write(&probe, b"")
+            .map(|_| {
+                let _ = std::fs::remove_file(&probe);
+            })
+            .is_ok();
+        if dir_writable {
+            panic!("write {path}: {err} (directory is writable; refusing to build against a stale generated file)");
+        }
         println!(
-            "cargo:warning=could not update generated {path}: {err}; \
+            "cargo:warning=could not update generated {path} in a read-only checkout: {err}; \
              continuing with the packaged copy"
         );
     }
@@ -165,7 +181,14 @@ fn main() {
     // toolchain mangling change the computation would miss. A disagreement
     // between the two is exactly that situation, so it is reported rather than
     // silently accepted.
-    println!("cargo:rerun-if-changed=mb_symbol.txt");
+    // Watch mb_symbol.txt only when it exists: registering a nonexistent
+    // path makes cargo treat the build script as always-dirty, which would
+    // tax every warm build of a registry consumer (the published crate never
+    // ships the file). In checkout flows build.py writes it before cargo
+    // runs, so it is present whenever it matters.
+    if Path::new("mb_symbol.txt").exists() {
+        println!("cargo:rerun-if-changed=mb_symbol.txt");
+    }
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TEST_DISPATCH_STUB");
     println!("cargo:rerun-if-env-changed=GPUI_SYS_ALLOW_TEST_DISPATCH_STUB");
     let test_stub_enabled = std::env::var_os("CARGO_FEATURE_TEST_DISPATCH_STUB").is_some();

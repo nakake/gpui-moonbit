@@ -55,27 +55,10 @@ if ($clBanner -notmatch '(?i)\bfor x64\b') {
 & cargo --version
 & rustc --version
 # RFC 0005 D1: build.py pins gpui-sys for the wrapper (registry) routes with a
-# cargo caret requirement. Assert the sibling crate stays inside that range so
-# this repo always tests what a registry consumer would resolve.
-$pinLine = @(Get-Content (Join-Path $MB 'build.py') | Where-Object { $_ -match '^GPUI_SYS_VERSION = "(.*)"$' })
-if ($pinLine.Count -ne 1) { throw 'could not read GPUI_SYS_VERSION from moonbit-bindings/build.py' }
-$null = $pinLine[0] -match '^GPUI_SYS_VERSION = "(.*)"$'
-$gpuiSysPin = $Matches[1]
-$crateLine = @(Get-Content (Join-Path $GSys 'Cargo.toml') | Where-Object { $_ -match '^version = "(.*)"$' } | Select-Object -First 1)
-if ($crateLine.Count -ne 1) { throw 'could not read version from gpui-sys/Cargo.toml' }
-$null = $crateLine[0] -match '^version = "(.*)"$'
-$crateVersion = $Matches[1]
-$pin = $gpuiSysPin -split '\.' | ForEach-Object { [int]$_ }
-$cr  = $crateVersion -split '\.' | ForEach-Object { [int]$_ }
-$pinOk = if ($pin[0] -gt 0) {
-  ($cr[0] -eq $pin[0]) -and (($cr[1] -gt $pin[1]) -or (($cr[1] -eq $pin[1]) -and ($cr[2] -ge $pin[2])))
-} else {
-  ($cr[0] -eq 0) -and ($cr[1] -eq $pin[1]) -and ($cr[2] -ge $pin[2])
-}
-if (-not $pinOk) {
-  throw "gpui-sys/Cargo.toml version $crateVersion is outside build.py's caret pin $gpuiSysPin; update GPUI_SYS_VERSION in moonbit-bindings/build.py (see docs/versioning.md)"
-}
-Write-Host "    gpui-sys pin: ^$gpuiSysPin (crate $crateVersion)"
+# cargo caret requirement. The comparison lives in build.py (--check-pin, the
+# single implementation both drivers share); it exits non-zero on drift.
+cmd /c "python `"$MB\build.py`" --check-pin 2>&1" | Out-Host
+if ($LASTEXITCODE -ne 0) { throw 'gpui-sys version pin drift (see message above)' }
 if (Get-Command rustup -ErrorAction SilentlyContinue) {
   & rustup show active-toolchain
 }
