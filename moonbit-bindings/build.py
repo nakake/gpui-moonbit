@@ -201,7 +201,7 @@ def msvc_path(path):
     return p
 
 
-def cargo_build(gpui_sys, rust_target):
+def cargo_build(gpui_sys, rust_target, rust_lib_dir=None):
     """Build gpui-sys with `cargo build`. Logs and exits on failure."""
     log("building gpui-sys...")
     result = run(
@@ -214,6 +214,15 @@ def cargo_build(gpui_sys, rust_target):
         log("ERROR: cargo build failed:")
         sys.stderr.write(result.stderr)
         sys.exit(1)
+    # gpui-sys is staticlib-only; a stale dynamic lib left by a past
+    # crate-type experiment would win over libgpui_sys.a on the -l link
+    # line with no build-time error. Drop any such leftover.
+    if rust_lib_dir:
+        for stale in ("libgpui_sys.dylib", "libgpui_sys.so"):
+            path = os.path.join(rust_lib_dir, stale)
+            if os.path.exists(path):
+                os.remove(path)
+                log(f"removed stale {path}")
 
 
 def extract_native_libs(gpui_sys, rust_target):
@@ -335,13 +344,13 @@ def main():
     # `cargo build` last guarantees gpui_sys.lib exists for moon's link step.
     if os_pkg == "windows":
         native_libs_line = extract_native_libs(gpui_sys, rust_target)
-        cargo_build(gpui_sys, rust_target)
+        cargo_build(gpui_sys, rust_target, rust_lib_dir)
         gpui_sys_lib = os.path.join(rust_lib_dir, "gpui_sys.lib")
         if not os.path.exists(gpui_sys_lib):
             log(f"ERROR: {gpui_sys_lib} not found after cargo build")
             sys.exit(1)
     else:
-        cargo_build(gpui_sys, rust_target)
+        cargo_build(gpui_sys, rust_target, rust_lib_dir)
         native_libs_line = extract_native_libs(gpui_sys, rust_target)
 
     # --- Normalize per-OS ---

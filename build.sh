@@ -167,6 +167,8 @@ CALLBACK_MODULE="$(awk '
 # Mangled prefix of the module path (component: _ -> __ then - -> _2d, each
 # length-prefixed, count first). Used only to narrow link-failure diagnostics
 # to this module's symbols; function-name independent by construction.
+# Keep in sync with compute_callback_symbol() in moonbit-bindings/build.py
+# (the authoritative copy; a drift here only widens the diagnostic list).
 MODULE_PREFIX=""
 if [ -n "$CALLBACK_MODULE" ]; then
   N=0

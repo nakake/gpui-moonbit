@@ -171,6 +171,8 @@ foreach ($abiLine in $abiLines) {
 # Mangled prefix of the module path (component: _ -> __ then - -> _2d, each
 # length-prefixed, count first). Used only to narrow link-failure diagnostics
 # to this module's symbols; function-name independent by construction.
+# Keep in sync with compute_callback_symbol() in moonbit-bindings/build.py
+# (the authoritative copy; a drift here only widens the diagnostic list).
 $ModulePrefix = ''
 if ($CallbackModule) {
   $components = $CallbackModule -split '/'
@@ -294,7 +296,7 @@ if (-not (Test-Path $rustLib)) { throw "Rust static library not found at $rustLi
 $referencePattern = '^.*UNDEF.*External\s+\|\s+' + [regex]::Escape($sym) + '\s*$'
 $references = @(& dumpbin /SYMBOLS $rustLib 2>&1 | Where-Object { $_ -match $referencePattern })
 if ($LASTEXITCODE -ne 0) { throw 'dumpbin /SYMBOLS gpui_sys.lib failed' }
-if ($references.Count -ne 1) { throw "expected exactly 1 reference to $sym in gpui_sys.lib, found $($references.Count)" }
+if ($references.Count -ne 1) { throw "expected exactly 1 reference to $sym ($CallbackName) in gpui_sys.lib, found $($references.Count)" }
 Write-Host "    Verified: gpui_sys.lib references $sym exactly once and main.exe linked"
 
 $mainObj = Join-Path $MB '_build\native\debug\build\cmd\main\main.obj'
@@ -302,7 +304,7 @@ if (Test-Path $mainObj) {
   $definitionPattern = '^.*SECT[0-9]+.*External\s+\|\s+' + [regex]::Escape($sym) + '\s*$'
   $definitions = @(& dumpbin /SYMBOLS $mainObj 2>&1 | Where-Object { $_ -match $definitionPattern })
   if ($LASTEXITCODE -ne 0) { throw 'dumpbin /SYMBOLS main.obj failed' }
-  if ($definitions.Count -ne 1) { throw "expected exactly 1 definition of $sym in main.obj, found $($definitions.Count)" }
+  if ($definitions.Count -ne 1) { throw "expected exactly 1 definition of $sym ($CallbackName) in main.obj, found $($definitions.Count)" }
   Write-Host "    Verified: main.obj defines $sym exactly once"
 } else {
   Write-Host '    main.obj not present under the prebuild flow; definition side is covered by the successful link'
