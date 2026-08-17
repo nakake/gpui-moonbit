@@ -221,11 +221,16 @@ bindgen ステップは、同じドライバ実行内で直前に `gen-header` �
 
 スクリプトの処理:
 
-1. マングル規則（`docs/moonbit-native-notes.md` §3）から `dispatch_entry` のシンボル `_M0FP26nakake15gpui_2dbindings15dispatch__entry` を**決定的に計算**する。chicken/egg（Rust が MoonBit のマングルシンボルをコンパイル時に必要とする）を、ブートストラップビルドなしに解決する。
-2. `gpui-sys/mb_symbol.txt` が無ければ書き込む（`build.sh` 非経由の単独ビルド用）。既存値が計算値と異なれば警告する。
-3. `cargo build --target <host>` で `libgpui_sys.a` をビルドする。
-4. `cargo rustc -- --print native-static-libs` でリンクフラグを捕捉し、`build.sh` と同一の OS 別正規化（`-lc` 除去、Linux の XCB/XKB SONAME 化、macOS の `-lm` 除去 + IOSurface 追加、システムライブラリ検索パス注入）を適用する。
-5. `link_configs` を stdout に出力する。`package` には `nakake/gpui-bindings/link` を指定し、正規化済みフラグを `link_flags`（空白区切り文字列、shlex 分割）に載せる。
+1. **消費経路（route）を判定する**（#132、RFC 0005 D3）。自動判定は sibling `<module_root>/../gpui-sys` の存在チェックのみで、あれば `checkout`（チェックアウト・path/git 依存）、無ければ `wrapper-registry`（`.mooncakes/` へ展開された registry 消費）である。環境変数 `GPUI_BINDINGS_ROUTE`（`auto` = 既定 / `checkout` / `wrapper-path` / `wrapper-registry`）で強制できるが、これは検証専用である。`wrapper-path` は crates.io ではなく `GPUI_BINDINGS_GPUI_SYS_PATH`（未指定なら sibling）が指す gpui-sys へ path 依存する wrapper で、公開前の CI シミュレーションに使う（依存の形はコード生成にもリンクにも影響しないため代理になる）。
+2. `checkout` の場合のみ、マングル規則（`docs/moonbit-native-notes.md` §3）から `dispatch_entry` のシンボル `_M0FP26nakake15gpui_2dbindings15dispatch__entry` を**決定的に計算**し（chicken/egg — Rust が MoonBit のマングルシンボルをコンパイル時に必要とする — をブートストラップビルドなしに解決する）、`gpui-sys/mb_symbol.txt` が無ければ書き込む（`build.sh` 非経由の単独ビルド用。既存値が計算値と異なれば警告する）。**wrapper 経路ではこの手順ごとスキップする**: `abi.toml` の読み取りも `mb_symbol.txt` の書き込みも行わない。公開された `gpui-sys` の `build.rs` が同梱の `abi.toml` から同じ値を計算するためであり、registry checkout は読み取り専用でもある。
+3. wrapper 経路の場合は、ユーザキャッシュの wrapper crate を生成・更新する（下記）。
+4. `cargo build --target <host>` で staticlib をビルドする。cwd は `checkout` なら `gpui-sys/`、wrapper 経路なら wrapper ディレクトリである。
+5. `cargo rustc -- --print native-static-libs` でリンクフラグを捕捉し、`build.sh` と同一の OS 別正規化（`-lc` 除去、Linux の XCB/XKB SONAME 化、macOS の `-lm` 除去 + IOSurface 追加、システムライブラリ検索パス注入）を適用する。
+6. `link_configs` を stdout に出力する。`package` には `nakake/gpui-bindings/link` を指定し、正規化済みフラグを `link_flags`（空白区切り文字列、shlex 分割）に載せる。ライブラリ名は経路で分岐する（`-lgpui_sys` / `-lgpui_sys_wrapper`、Windows は `gpui_sys.lib` / `gpui_sys_wrapper.lib`）。
+
+**wrapper crate の生成と置き場**（RFC 0005 D1/D2）: wrapper は `gpui_sys_wrapper` という名前の `crate-type = ["staticlib"]` で、中身は `extern crate gpui_sys;` の 1 行だけである（`gpui-sys` の `#[no_mangle]` エクスポートをそのまま最終 staticlib へ通す）。`Cargo.toml` は `[workspace]` ガード（外側のワークスペースに取り込まれないため）と `publish = false` を持つ。生成は「無ければ書く」ではなく**毎回内容を照合し、期待値と異なるときだけ一時ファイル + rename で原子的に書き直す**: 経路を切り替えたときに古い依存行が残ると e2e が偽陽性になり、並行ビルドに半端な manifest を見せてもいけないためである。crates.io の pin は `build.py` 冒頭の定数 `GPUI_SYS_VERSION` から caret 形式（`gpui-sys = "0.1.0"` = `>=0.1.0 <0.2.0`）で書き出し、`build.sh` / `build.ps1` の preflight が `gpui-sys/Cargo.toml` の version がこの範囲に入っていることを assert する。置き場は OS 慣例のユーザキャッシュ配下 `nakake-gpui-bindings/wrapper/<pin version>/`（Linux は `$XDG_CACHE_HOME`、既定 `~/.cache`。macOS は `~/Library/Caches`。Windows は `%LOCALAPPDATA%`）で、`.mooncakes/` を汚さずコンシューマ間で warm 共有できる。cargo の成果物は `CARGO_TARGET_DIR` が**未設定のときだけ** `<キャッシュ>/nakake-gpui-bindings/target` に向ける（設定済みならそれを尊重する。CI のキャッシュ接続口）。ホームディレクトリを解決できない環境では module_root 配下の `.gpui-wrapper-cache` にフォールバックし、stderr に警告を出す。
+
+**`gpui-sys/build.rs` の生成物書き込みは冪等である**（RFC 0005 PR-B）: `src/abi_constants.rs` と `include/gpui_sys.h` は内容が一致すれば書き込まない。差分があって書き込めない場合は `cargo:warning` を出して同梱のコピーで続行する。registry checkout は読み取り専用であり、そこでは「同梱の生成物が既に正しい」が通常ケースだからである。
 
 **`link/` パッケージの設計意図**: LinkConfig をルートパッケージに付けると、`moon test` のテスト実行ファイルにもリンクフラグが伝播し、テストが使う tcc リンカが `-lstdc++` 等を解決できず失敗する。リンクフラグ専用の `link/` パッケージ（コードはマーカー定数のみ）を新設し、LinkConfig の対象をそこに限定した。コンシューマの実行ファイルが `moon.pkg` で `nakake/gpui-bindings/link` を import することで初めて伝播を受ける。ライブラリ自身のテスト実行ファイルは `link` を import しないため影響を受けない。
 
@@ -256,6 +261,7 @@ exe の `main` では、自前の dispatch を `@nakake/gpui-bindings.register_d
 - `--moonbit-unstable-prebuild` は「extremely experimental, API may change at any time」。LinkConfig にはソースに "merely a POC" の注記がある。
 - `rerun_if` は現状無効（"DOES NOT WORK NOW"）で、prebuild は `moon build` ごとに無条件再実行される。cargo はインクリメンタルのため warm ビルドは高速。
 - Linux x86_64 のみ検証済み。macOS arm64/x86_64・Windows MSVC x64 は未検証（リンクフラグ構文・シェル実行の差異）。
+- wrapper 経路は `gpui-sys/Cargo.lock` の影響を受けない（wrapper が自分で依存を解決する）。registry コンシューマは最新の gpui 0.2.x を引く設計と割り切っている（RFC 0005 D4）。
 - mooncakes 公開は意図的に見送った。実験的機能への依存を公開パッケージに固定するのは時期尚早と判断（`docs/versioning.md` §リリースチェックリスト参照）。
 - フォールバック: prebuild の API が壊れた場合は、テンプレートリポジトリ方式（`build.sh` / `build.ps1` を含むリポジトリの fork/clone）に退避できる。`build.sh` は本機構と干渉せず併存する（回帰検証済み）。
 
@@ -281,6 +287,7 @@ exe の `main` では、自前の dispatch を `@nakake/gpui-bindings.register_d
 | 手編集のテスト・ベンチ・サンプル | `gpui-sys/src/headless.rs`、`headless_tests.rs`、`fuzz_tests.rs`、`gpui-sys/benches/decode_bench.rs`、`gpui-sys/fuzz/`（cargo-fuzz scaffold）、`examples/counter/`、`examples/hello/`、`examples/stream/`、`tests/consumer/`、`*_wbtest.mbt` / `*_test.mbt` |
 | 追跡対象の生成ソース | `gpui-sys/include/gpui_sys.h`、`gpui-sys/src/abi_constants.rs`、`moonbit-bindings/abi_constants.mbt`、`moonbit-bindings/gpui-bindings-ffi.mbt` |
 | 無視されるビルド生成物 | `gpui-sys/mb_symbol.txt`、`_build/`、`target/`、`dist/` |
+| 無視されるキャッシュ（リポジトリ外） | `<ユーザキャッシュ>/nakake-gpui-bindings/`（wrapper crate と、`CARGO_TARGET_DIR` 未設定時の cargo target。§6.1、RFC 0005 D2） |
 | 無視される手動配置フォールバック | `.linux-libs/` |
 
 ## 9. 検証の範囲

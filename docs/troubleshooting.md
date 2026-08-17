@@ -236,6 +236,48 @@ preflight を迂回して生成ファイルを手編集しない。環境を修�
 
 ---
 
+## 5. registry 消費(wrapper 経路)のトラブル
+
+mooncakes からの registry 依存ではモジュールの隣に `gpui-sys/` が無いため、prebuild(`moonbit-bindings/build.py`)がユーザキャッシュに wrapper crate を生成し、crates.io の `gpui-sys` を引いてビルドする(#132、[RFC 0005](./rfc/0005-build-driver-redesign.md))。以下はこの経路に固有の症状で、sibling `gpui-sys/` があるチェックアウト・path/git 依存には当たらない。
+
+### 初回ビルドが異常に長い
+
+wrapper のビルドは gpui の全依存のコールドビルドであり、**数十分かかりネットワーク接続が必要**である。ハングではない。進捗は cargo の出力(prebuild の stderr にそのまま流れる)で確認できる。2 回目以降は共有 target が warm なので高速になる。pin する `gpui-sys` のバージョンが異なるコンシューマを同じ環境で併用すると、共有 target で再ビルドが往復する(ビルドの正しさは保たれる)。
+
+### `no matching package named gpui-sys` で止まる
+
+`gpui-sys` はまだ crates.io に公開されていない(公開はユーザゲート、RFC 0005 PR-C)。公開前に `wrapper-registry` 経路を踏めばこのエラーになるのが正しい挙動である。公開前に wrapper 機構だけを検証したい場合は、path 依存の wrapper でシミュレートする:
+
+```bash
+GPUI_BINDINGS_ROUTE=wrapper-path \
+GPUI_BINDINGS_GPUI_SYS_PATH=/path/to/gpui-moonbit/gpui-sys \
+  moon build
+```
+
+`GPUI_BINDINGS_ROUTE` は `auto`(既定) / `checkout` / `wrapper-path` / `wrapper-registry` を取る検証専用のスイッチで、通常の消費では設定しない。
+
+### ディスクが逼迫する
+
+wrapper と cargo の成果物は 1 環境あたり約 1.2 GB になる。次のディレクトリは丸ごと削除してよい(次回ビルドで再生成・再ビルドされる):
+
+- Linux: `$XDG_CACHE_HOME/nakake-gpui-bindings/`(既定は `~/.cache/nakake-gpui-bindings/`)
+- macOS: `~/Library/Caches/nakake-gpui-bindings/`
+- Windows: `%LOCALAPPDATA%\nakake-gpui-bindings\`
+
+`CARGO_TARGET_DIR` を設定している場合、cargo の成果物はそちらにあり、キャッシュ配下に残るのは wrapper の manifest と `src/lib.rs`、`Cargo.lock` だけである。
+
+### wrapper 経路だけがビルドに失敗する(上流 gpui の浮動)
+
+`gpui-sys/Cargo.lock` は wrapper crate には効かない。wrapper は自分で依存を解決するため、上流 gpui の 0.2.x 系で新しい patch が出ればそれを引き得る(checkout 経路は lock で固定される)。したがって checkout 経路が緑のまま wrapper 経路だけが赤くなることがある。
+
+一次切り分け:
+
+1. 同じコードを checkout 経路(sibling がある状態、または `GPUI_BINDINGS_ROUTE=checkout`)でビルドし、失敗が wrapper 経路に限るかを確かめる。checkout 経路も赤ならこの節の問題ではない。
+2. wrapper の lock(`<キャッシュ>/nakake-gpui-bindings/wrapper/<pin>/Cargo.lock`)で解決された gpui のバージョンを、`gpui-sys/Cargo.lock` の値と比べる。
+3. 食い違っていてエラーが上流由来なら、wrapper キャッシュを消して再解決する。恒常的に赤くなるようなら wrapper 生成時に gpui を pin することを検討する(RFC 0005 §6 の残存リスク)。
+
+---
+
 ## 計測メモ(再現手順)
 
 macOS の Metal ウィンドウは `screencapture -l<windowID>` で撮れないことがある(`could not

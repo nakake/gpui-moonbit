@@ -118,6 +118,35 @@ esac
 moon --version
 cargo --version
 rustc --version
+# RFC 0005 D1: build.py pins gpui-sys for the wrapper (registry) routes with a
+# cargo caret requirement. Assert the sibling crate stays inside that range so
+# this repo always tests what a registry consumer would resolve.
+GPUI_SYS_PIN="$(sed -n 's/^GPUI_SYS_VERSION = "\(.*\)"$/\1/p' "$MB/build.py")"
+CRATE_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$GSYS/Cargo.toml" | head -n1)"
+if [ -z "$GPUI_SYS_PIN" ] || [ -z "$CRATE_VERSION" ]; then
+  echo "ERROR: could not read GPUI_SYS_VERSION from build.py or version from gpui-sys/Cargo.toml" >&2
+  exit 1
+fi
+IFS=. read -r PIN_MAJ PIN_MIN PIN_PAT <<EOF_VER
+$GPUI_SYS_PIN
+EOF_VER
+IFS=. read -r CR_MAJ CR_MIN CR_PAT <<EOF_VER
+$CRATE_VERSION
+EOF_VER
+PIN_OK=no
+if [ "$PIN_MAJ" -gt 0 ]; then
+  if [ "$CR_MAJ" -eq "$PIN_MAJ" ] && { [ "$CR_MIN" -gt "$PIN_MIN" ] || { [ "$CR_MIN" -eq "$PIN_MIN" ] && [ "$CR_PAT" -ge "$PIN_PAT" ]; }; }; then
+    PIN_OK=yes
+  fi
+elif [ "$CR_MAJ" -eq 0 ] && [ "$CR_MIN" -eq "$PIN_MIN" ] && [ "$CR_PAT" -ge "$PIN_PAT" ]; then
+  PIN_OK=yes
+fi
+if [ "$PIN_OK" != yes ]; then
+  echo "ERROR: gpui-sys/Cargo.toml version $CRATE_VERSION is outside build.py's caret pin $GPUI_SYS_PIN." >&2
+  echo "Update GPUI_SYS_VERSION in moonbit-bindings/build.py (see docs/versioning.md release checklist)." >&2
+  exit 1
+fi
+echo "    gpui-sys pin: ^$GPUI_SYS_PIN (crate $CRATE_VERSION)"
 if command -v rustup >/dev/null 2>&1; then
   rustup show active-toolchain
 fi

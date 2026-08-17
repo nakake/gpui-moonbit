@@ -139,6 +139,23 @@ env -u WAYLAND_DISPLAY ./_build/native/debug/build/main/main.exe
 
 初回ビルドでは `build.py` が `cargo build` を実行するため時間がかかります（Rust toolchain 必須）。2 回目以降は cargo のインクリメンタルビルドで高速です。
 
+### registry 消費（wrapper 経路、#132）
+
+mooncakes からの registry 依存では、モジュールが `.mooncakes/` に展開されるため隣に `gpui-sys/` がありません。この形に備えて、`build.py` は sibling `gpui-sys/` の有無で消費経路を自動判定し、無い場合はユーザキャッシュに wrapper crate（`extern crate gpui_sys;` だけの staticlib で、crates.io の `gpui-sys` に caret 依存します）を生成してビルドし、そのリンクフラグを伝播する経路を実装済みです（[RFC 0005](../docs/rfc/0005-build-driver-redesign.md)）。path / git 依存とこのリポジトリのチェックアウトは従来どおり sibling を直接ビルドするので、挙動は変わりません。**`gpui-sys` は crates.io 未公開のため、この経路が実際に使えるのは公開後です**（現時点で踏むと cargo が `no matching package named gpui-sys` で停止します）。
+
+wrapper と、その cargo 成果物（`CARGO_TARGET_DIR` 未設定時）は、モジュールの中ではなく OS 慣例のユーザキャッシュに置かれます。
+
+- Linux: `$XDG_CACHE_HOME/nakake-gpui-bindings/`（既定は `~/.cache/nakake-gpui-bindings/`）
+- macOS: `~/Library/Caches/nakake-gpui-bindings/`
+- Windows: `%LOCALAPPDATA%\nakake-gpui-bindings\`
+
+利用上の注意:
+
+- **初回ビルドは gpui の全依存のコールドビルドになるため数十分かかり、ネットワーク接続が必要です**。2 回目以降は cargo のインクリメンタルビルドで高速です。
+- 容量は cargo 成果物込みで 1 環境あたり約 1.2 GB です。ディスクを空けたい場合は上のディレクトリを丸ごと削除して構いません（次回ビルドで再生成・再ビルドされます）。
+- cargo の出力先は `CARGO_TARGET_DIR` が未設定のときだけこのキャッシュ配下になります。設定済みならそれを尊重するので、CI ではキャッシュ対象のディレクトリを指すのが接続口です。
+- pin する `gpui-sys` のバージョンが異なるコンシューマを同じ環境で併用すると、共有 target で再ビルドが往復します（ビルドの正しさは保たれます）。
+
 ### フォールバック（テンプレートリポジトリ方式）
 
 `--moonbit-unstable-prebuild` は「extremely experimental」で API が予告なく変わり得ます。壊れた場合は、本リポジトリを fork / clone して `build.sh` / `build.ps1` を使うテンプレートリポジトリ方式に退避できます（[スパイレポート](../docs/spikes/2026-07-24-packaging-feasibility.md) の方式 B）。mooncakes 公開は、実験的機能への依存を公開パッケージに固定しないため、意図的に見送っています（[`docs/versioning.md`](../docs/versioning.md) 参照）。

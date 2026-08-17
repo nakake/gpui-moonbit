@@ -87,6 +87,25 @@ fn mangled_callback_symbol(module: &str, name: &str) -> String {
     out
 }
 
+/// Write a generated file only when its content actually changed, and treat
+/// an unwritable destination as non-fatal. Registry checkouts are read-only:
+/// the packaged copies of the generated files are current by construction, so
+/// "content already matches" is the normal case there, and a mismatch we
+/// cannot write (e.g. a different cbindgen version regenerating the header)
+/// must not fail the consumer's build (RFC 0005, PR-B).
+fn write_generated(path: &str, content: &[u8]) {
+    match std::fs::read(path) {
+        Ok(existing) if existing == content => return,
+        _ => {}
+    }
+    if let Err(err) = std::fs::write(path, content) {
+        println!(
+            "cargo:warning=could not update generated {path}: {err}; \
+             continuing with the packaged copy"
+        );
+    }
+}
+
 fn main() {
     // --- Shared Rust/MoonBit ABI ---
     println!("cargo:rerun-if-changed=abi.toml");
@@ -98,7 +117,7 @@ fn main() {
         let rust_name = key.to_ascii_uppercase();
         rust_constants.push_str(&format!("pub(crate) const {rust_name}: i32 = {};\n", value));
     }
-    std::fs::write("src/abi_constants.rs", rust_constants).expect("write src/abi_constants.rs");
+    write_generated("src/abi_constants.rs", rust_constants.as_bytes());
 
     let callback_name = callback
         .get("name")
@@ -194,10 +213,12 @@ fn main() {
     // --- C header (cbindgen) ---
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let config = cbindgen::Config::from_file("cbindgen.toml").unwrap_or_default();
-    cbindgen::Builder::new()
+    let bindings = cbindgen::Builder::new()
         .with_crate(crate_dir)
         .with_config(config)
         .generate()
-        .expect("Unable to generate bindings")
-        .write_to_file("include/gpui_sys.h");
+        .expect("Unable to generate bindings");
+    let mut header = Vec::new();
+    bindings.write(&mut header);
+    write_generated("include/gpui_sys.h", &header);
 }
