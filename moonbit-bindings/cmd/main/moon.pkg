@@ -1,0 +1,8 @@
+import {
+  "nakake/gpui-bindings",
+  "nakake/gpui-bindings/link",
+}
+
+pkgtype(kind: "executable")
+
+warnings = "-29"

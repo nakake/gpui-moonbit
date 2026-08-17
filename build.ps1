@@ -1,12 +1,13 @@
 # Build driver for GPUI + MoonBit on Windows. Mirrors build.sh:
 #   [0] regenerate the C header, ABI constants, and C FFI bindings
-#   [1a] moon check (fatal typecheck gate)
-#   [1b] MoonBit bootstrap build (native-link failure is expected before Cargo flags)
-#   [2] extract dispatch_entry's mangled symbol from the generated main.c
-#       (x64 COFF has no ABI underscore: use the name verbatim, like ELF)
-#   [3] cargo build gpui-sys, then capture its native-static-libs list
-#   [4] regenerate cmd/main/moon.pkg from moon.pkg.windows and relink
-#   [5] verify the callback definition/reference contract used by the final link
+#   [1] moon check (fatal typecheck gate)
+#   [2] moon build — the prebuild script (moonbit-bindings/build.py) computes
+#       the callback symbol, writes gpui-sys/mb_symbol.txt, cargo-builds
+#       gpui-sys, and supplies the link flags via a LinkConfig on the `link`
+#       package (RFC 0005); cmd/main and cmd/roundtrip import that package
+#   [3] verify the callback link contract (definition/reference exactly once,
+#       C prototype matches abi.toml `[callback] params`)
+#   [4] run the headless round-trip test
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $GSys = Join-Path $Root 'gpui-sys'
@@ -35,7 +36,7 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
 }
 
 Write-Host "==> Preflight (Windows $env:PROCESSOR_ARCHITECTURE)"
-foreach ($command in 'moon', 'cargo', 'rustc', 'cl', 'link', 'dumpbin') {
+foreach ($command in 'moon', 'cargo', 'rustc', 'cl', 'link', 'dumpbin', 'python') {
   if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
     throw "required command not found: $command"
   }
@@ -62,6 +63,7 @@ $rustHost = $rustHostLine[0] -replace '^host:\s+', ''
 if ($rustHost -ne 'x86_64-pc-windows-msvc') {
   throw "unsupported Rust host target: $rustHost (supported: x86_64-pc-windows-msvc)"
 }
+# The verification step below reads gpui_sys.lib out of the cargo target dir.
 $cargoMetadata = (& cargo metadata --no-deps --format-version 1 --manifest-path (Join-Path $GSys 'Cargo.toml') |
                   Out-String | ConvertFrom-Json)
 $cargoTargetRoot = [string]$cargoMetadata.target_directory
@@ -91,17 +93,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
   }
 }
 
-function Write-MoonPkg([string]$template, [string]$destination, [string]$libs) {
-  $tmpl = Get-Content $template -Raw
-  $out  = $tmpl.Replace('@NATIVE_LIBS@', $libs)
-  if (-not (Test-Path $destination) -or (Get-Content $destination -Raw) -ne $out) {
-    Set-Content -NoNewline -Path $destination -Value $out
-    $rel = $destination.Substring($MB.Length + 1)
-    Write-Host "==> wrote $rel (windows)"
-  }
-}
-
-Write-Host '==> [0/5] Regenerate the C header, ABI constants, and C FFI bindings'
+Write-Host '==> [0/4] Regenerate the C header, ABI constants, and C FFI bindings'
 $abiPath = Join-Path $GSys 'abi.toml'
 $abiLines = Get-Content $abiPath
 $generated = New-Object System.Collections.Generic.List[string]
@@ -146,15 +138,10 @@ foreach ($abiLine in $abiLines) {
 }
 if (-not $callbackParams) { throw 'could not derive [callback] params from abi.toml' }
 
-# The MoonBit function whose mangled symbol Rust needs, derived from abi.toml
-# so `[callback] name` is the single source of truth for the link-time contract
-# too (issue #76, RFC 0004 §3.5). The callback lives in the library's root
-# package (`nakake/gpui-bindings`), so the name alone is enough to match the
-# symbol tail: a package component would add another `<len><component>` in front
-# of it.
-#
-# Mangling of one component: '_' -> '__', then '-' -> '_2d', length-prefixed with
-# the escaped length. `dispatch_entry` -> `15dispatch__entry`.
+# The MoonBit callback whose link contract step 3 verifies, derived from
+# abi.toml so `[callback] name` stays the single source of truth (issue #76,
+# RFC 0004 §3.5). build.py and gpui-sys/build.rs derive the full mangled
+# symbol from the same fields.
 $callbackSection = ''
 $CallbackName = ''
 foreach ($abiLine in $abiLines) {
@@ -170,8 +157,29 @@ foreach ($abiLine in $abiLines) {
   }
 }
 if (-not $CallbackName) { throw 'could not derive [callback] name from abi.toml' }
-$PkgFnSuffix = ($CallbackName -replace '_', '__' -replace '-', '_2d')
-$PkgFnSuffix = "$($PkgFnSuffix.Length)$PkgFnSuffix"
+$callbackSection = ''
+$CallbackModule = ''
+foreach ($abiLine in $abiLines) {
+  $trimmed = ($abiLine -replace '\s*#.*$', '').Trim()
+  if (-not $trimmed) { continue }
+  if ($trimmed -match '^\[([A-Za-z_][A-Za-z0-9_]*)\]$') { $callbackSection = $Matches[1]; continue }
+  if ($callbackSection -eq 'callback' -and $trimmed -match '^module\s*=\s*"([^"]*)"\s*$') {
+    $CallbackModule = $Matches[1]
+    break
+  }
+}
+# Mangled prefix of the module path (component: _ -> __ then - -> _2d, each
+# length-prefixed, count first). Used only to narrow link-failure diagnostics
+# to this module's symbols; function-name independent by construction.
+$ModulePrefix = ''
+if ($CallbackModule) {
+  $components = $CallbackModule -split '/'
+  $parts = ($components | ForEach-Object {
+    $esc = ($_ -replace '_', '__') -replace '-', '_2d'
+    "$($esc.Length)$esc"
+  }) -join ''
+  $ModulePrefix = "_M0FP$($components.Count)$parts"
+}
 
 $abiConstants = Join-Path $MB 'abi_constants.mbt'
 # UTF-8 without BOM and LF newlines matches awk output byte-for-byte.
@@ -201,121 +209,20 @@ $ec = $LASTEXITCODE
 Pop-Location
 if ($ec -ne 0) { throw 'moon fmt gpui-bindings-ffi.mbt failed' }
 
-# Generate the moon.pkg files BEFORE `moon check`, not after it (issue #121).
-# They are gitignored generated files, so a stale copy left by an older
-# template — a renamed import, changed cc-flags — makes 1a fail on something
-# this script already knows how to fix, and the fix used to live *after* the
-# gate: every rerun died in the same place until the files were deleted by hand.
-# Writing first also closes a coverage hole: on a cold clone neither file
-# exists, so moon does not treat cmd/main and cmd/roundtrip as packages and 1a
-# silently skips both mains.
-# Link flags stay empty here; step 4 rewrites both with $nativeLibs.
-Write-MoonPkg (Join-Path $MB 'cmd\main\moon.pkg.windows') (Join-Path $MB 'cmd\main\moon.pkg') ''
-Write-MoonPkg (Join-Path $MB 'cmd\roundtrip\moon.pkg.windows') (Join-Path $MB 'cmd\roundtrip\moon.pkg') ''
-
-Write-Host '==> [1a/5] MoonBit typecheck'
+Write-Host '==> [1/4] MoonBit typecheck'
 Push-Location $MB
 cmd /c "moon check 2>&1" | Out-Host
 $ec = $LASTEXITCODE
 Pop-Location
 if ($ec -ne 0) {
   Write-Host 'HINT: if you added a new Rust C export, the C header must be regenerated; run .\build.ps1 (it regenerates the header before bindgen).'
-  Write-Host 'HINT: cmd\main\moon.pkg and cmd\roundtrip\moon.pkg are generated from moon.pkg.windows just above; if an import path or link flag looks wrong there, edit the template, not the generated file.'
   throw 'MoonBit compilation failed'
 }
 
-Write-Host '==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)'
-Push-Location $MB
-$coldOutput = cmd /c "moon build 2>&1"
-$ec = $LASTEXITCODE
-Pop-Location
-if ($ec -eq 0) {
-  $coldOutput | Out-Host
-} else {
-  $coldText = $coldOutput -join "`n"
-  # MSVC reports a missing input lib as LNK1181 and an unresolved external as
-  # LNK2019/1120 (locale-independent codes; messages are localized).
-  if ($coldText -match "(?i)undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|$PkgFnSuffix|LNK1104|LNK1181|LNK2019|LNK1120") {
-    Write-Host '    Expected cold-link failure: gpui_sys.lib or callback is not available yet; continuing.'
-  } else {
-    $coldOutput | Out-Host
-    throw 'MoonBit build failed for a non-link reason'
-  }
-}
-
-Write-Host "==> [2/5] Extract the mangled symbol for $CallbackName"
-$mainC = Join-Path $MB '_build\native\debug\build\cmd\main\main.c'
-if (-not (Test-Path $mainC)) { throw "not found: $mainC; did MoonBit compile? (step 1 output above)" }
-$symbols = @(Select-String -Path $mainC -Pattern "_M0FP[A-Za-z0-9_]*$PkgFnSuffix" -AllMatches |
-       ForEach-Object { $_.Matches } | ForEach-Object { $_.Value } |
-       Sort-Object -Unique)
-if ($symbols.Count -ne 1) { throw "expected exactly 1 $CallbackName symbol ending in $PkgFnSuffix, found $($symbols.Count)" }
-$sym = $symbols[0]
-$normalizedC = (Get-Content $mainC -Raw) -replace '\s+', ' '
-$escapedSym = [regex]::Escape($sym)
-$prototypeMatches = [regex]::Matches($normalizedC, "int32_t\s+$escapedSym\s*\(([^)]*)\)")
-if ($prototypeMatches.Count -eq 0) { throw "could not find an int32_t prototype for $sym in main.c" }
-$signatures = @($prototypeMatches | ForEach-Object {
-  (($_.Groups[1].Value -replace '\s+', '') -replace 'int32_t[A-Za-z_][A-Za-z0-9_]*', 'int32_t')
-} | Sort-Object -Unique)
-if ($signatures.Count -ne 1 -or $signatures[0] -ne $callbackParams) {
-  throw "generated MoonBit callback must be int32_t($($callbackParams -replace ',', ', ')); found: $($signatures -join '; ')"
-}
-Set-Content -NoNewline -Path (Join-Path $GSys 'mb_symbol.txt') -Value "$sym`n"
-Write-Host "    symbol / link_name : $sym"
-Write-Host "    signature : int32_t($($callbackParams -replace ',', ', '))"
-
-Write-Host '==> [3/5] Build gpui-sys (cargo)'
-# Moon's native backend unconditionally compiles and links with /MT. Build the
-# Rust static library with the same static CRT instead of trying to override
-# Moon with /MD (Moon appends /MT after user cc-flags, so /MT always wins).
-if (-not $env:RUSTFLAGS) {
-  $env:RUSTFLAGS = '-C target-feature=+crt-static'
-} elseif ($env:RUSTFLAGS -notlike '*target-feature=+crt-static*') {
-  $env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static"
-}
-Push-Location $GSys
-# Capture native-static-libs FIRST: `cargo rustc -- --print` may invalidate
-# the previously built .lib (cargo cleans stale artifacts before invoking
-# rustc, and rustc exits after printing without producing output). Running
-# `cargo build` last guarantees gpui_sys.lib exists for the moon link step.
-# strip ANSI color escapes so they don't leak into moon.pkg's @NATIVE_LIBS@ (issue #106)
-$nativeLibs = (cmd /c "cargo rustc --target $rustHost --lib --crate-type staticlib -- --print native-static-libs 2>&1" |
-               Select-String 'native-static-libs:' | Select-Object -First 1).Line `
-               -replace "$([char]27)\[[0-9;]*m", '' `
-               -replace '.*native-static-libs:\s*', ''
-cmd /c "cargo build --target $rustHost 2>&1" | Out-Host
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
-$gpuiLib = Join-Path $rustTargetDir 'gpui_sys.lib'
-if (-not (Test-Path $gpuiLib)) { Pop-Location; throw "gpui_sys.lib not found at $gpuiLib after cargo build" }
-Pop-Location
-if (-not $nativeLibs) { throw 'could not capture native-static-libs' }
-# /MT already selects libcmt. Do not pass Cargo's CRT default directive before
-# Moon's trailing /link delimiter, and do not introduce a second CRT choice.
-$nativeLibTokens = @($nativeLibs -split '\s+' | Where-Object {
-  $_ -and $_ -notmatch '(?i)^/defaultlib:(libcmt|msvcrt)$'
-})
-$nativeLibs = $nativeLibTokens -join ' '
-Write-Host "    native libs (static CRT): $nativeLibs"
-
-# gpui's build.rs emits an extra static lib (gpui.lib) under the active
-# target/<host>/debug/build tree on Windows; add every such .lib dir to LIB.
-$extraDirs = @(Get-ChildItem (Join-Path $rustTargetDir 'build') -Recurse -Filter '*.lib' -ErrorAction SilentlyContinue |
-               ForEach-Object { $_.DirectoryName } | Sort-Object -Unique)
-# windows-rs ships its import libs (windows.0.5x.0.lib) inside the cargo
-# registry checkout; the linker needs those dirs on the search path too.
-$winLibDirs = @(Get-ChildItem "$env:USERPROFILE\.cargo\registry\src" -Directory -ErrorAction SilentlyContinue |
-                 ForEach-Object { Get-ChildItem $_.FullName -Directory -Filter 'windows_x86_64_msvc-*' -ErrorAction SilentlyContinue } |
-                 ForEach-Object { Join-Path $_.FullName 'lib' } |
-                 Where-Object { Test-Path $_ })
-$projectLibDirs = @($rustTargetDir) + $extraDirs + $winLibDirs
-$allLibDirs = $projectLibDirs + @($env:LIB -split ';')
-$env:LIB = ($allLibDirs | Where-Object { $_ } | Select-Object -Unique) -join ';'
-Write-Host "    extra LIB dirs: $($projectLibDirs -join ';')"
-
-Write-Host '==> [4/6] Final MoonBit build (real moon.pkg + forced relink)'
-Write-MoonPkg (Join-Path $MB 'cmd\main\moon.pkg.windows') (Join-Path $MB 'cmd\main\moon.pkg') $nativeLibs
-Write-MoonPkg (Join-Path $MB 'cmd\roundtrip\moon.pkg.windows') (Join-Path $MB 'cmd\roundtrip\moon.pkg') $nativeLibs
+Write-Host '==> [2/4] MoonBit build (build.py builds gpui-sys and supplies the link flags)'
+# moon does not track the external gpui_sys.lib, so a gpui-sys-only change
+# would NOT trigger a relink of the executables (it would silently keep stale
+# exes). Remove the linked outputs so moon re-links against the fresh .lib.
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $MB '_build\native\debug\build\cmd\main\main.exe')
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $MB '_build\native\debug\build\cmd\roundtrip\roundtrip.exe')
 Push-Location $MB
@@ -324,44 +231,113 @@ $ec = $LASTEXITCODE
 Pop-Location
 if ($ec -ne 0) {
   $finalOutput | Out-Host
-  throw 'final moon build failed'
+  $finalText = $finalOutput -join "`n"
+  # MSVC reports a missing input lib as LNK1104/LNK1181 and an unresolved
+  # external as LNK2019/LNK1120 (locale-independent codes).
+  if ($finalText -match '(?i)LNK1104|LNK1181|LNK2019|LNK1120|undefined (reference|symbol)|_M0FP') {
+    # Link failure on the callback symbol: the symbol gpui-sys referenced
+    # (gpui-sys/mb_symbol.txt) does not match what the MoonBit toolchain
+    # actually generated. Show the real candidates from the generated C so the
+    # mismatch is diagnosable even if the mangling scheme itself changed
+    # (a suffix-anchored scan would find nothing in that case).
+    Write-Host 'ERROR: MoonBit native link failed.'
+    $symbolFile = Join-Path $GSys 'mb_symbol.txt'
+    if (Test-Path $symbolFile) {
+      Write-Host "    expected callback symbol (gpui-sys/mb_symbol.txt): $((Get-Content $symbolFile -Raw).Trim())"
+    }
+    $unresolved = @($finalOutput | Where-Object { $_ -match '(?i)undefined (reference|symbol)|LNK2019|LNK1120' } |
+      Select-String -Pattern '_M0FP[A-Za-z0-9_]+' -AllMatches |
+      ForEach-Object { $_.Matches } | ForEach-Object { $_.Value } |
+      Sort-Object -Unique)
+    if ($unresolved.Count -gt 0) {
+      Write-Host '    unresolved symbols in the link output:'
+      $unresolved | ForEach-Object { Write-Host "      $_" }
+    }
+    $candidates = @(Get-ChildItem (Join-Path $MB '_build\native\debug\build\cmd') -Recurse -Filter '*.c' -ErrorAction SilentlyContinue |
+      Select-String -Pattern '_M0FP[A-Za-z0-9_]+' -AllMatches |
+      ForEach-Object { $_.Matches } | ForEach-Object { $_.Value } |
+      Sort-Object -Unique)
+    if ($candidates.Count -gt 0 -and $ModulePrefix) {
+      $filtered = @($candidates | Where-Object { $_.StartsWith($ModulePrefix) })
+      if ($filtered.Count -gt 0) { $candidates = $filtered }
+    }
+    if ($candidates.Count -gt 0) {
+      Write-Host "    mangled symbols found in the generated C (module $CallbackModule):"
+      $candidates | ForEach-Object { Write-Host "      $_" }
+    }
+    Write-Host 'HINT: if the expected symbol is stale, delete gpui-sys\mb_symbol.txt and re-run .\build.ps1 (build.py recomputes it).'
+    Write-Host 'HINT: if the recomputed symbol still mismatches the candidates above, the toolchain''s mangling scheme changed; update compute_callback_symbol() in moonbit-bindings\build.py (gpui-sys\build.rs derives the same value).'
+  }
+  throw 'moon build failed'
 }
-Write-Host '    Final MoonBit build succeeded.'
+Write-Host '    MoonBit build succeeded.'
 
-Write-Host '==> [5/6] Verify the callback definition/reference contract'
+Write-Host '==> [3/4] Verify the callback link contract'
 $exe = Join-Path $MB '_build\native\debug\build\cmd\main\main.exe'
 if (-not (Test-Path $exe)) { throw "final executable not found at $exe" }
-$mainObj = Join-Path $MB '_build\native\debug\build\cmd\main\main.obj'
-if (-not (Test-Path $mainObj)) { throw "MoonBit object not found at $mainObj" }
+# Verify the value actually in mb_symbol.txt, not a recomputation: the file is
+# what gpui-sys/build.rs consumed, and keeping it authoritative preserves the
+# manual-override escape hatch (write the file by hand, build.py leaves it).
+$symbolFile = Join-Path $GSys 'mb_symbol.txt'
+if (-not (Test-Path $symbolFile)) { throw "$symbolFile not found after moon build (build.py should have written it)" }
+$sym = (Get-Content $symbolFile -Raw).Trim()
+if (-not $sym) { throw "$symbolFile is empty" }
 $rustLib = Join-Path $rustTargetDir 'gpui_sys.lib'
 if (-not (Test-Path $rustLib)) { throw "Rust static library not found at $rustLib" }
 
 # Linked PE executables normally omit their COFF symbol table, so checking
-# dumpbin /SYMBOLS on main.exe produces a false zero. Verify instead that the
-# MoonBit object defines the callback exactly once and the Rust archive refers
-# to it exactly once. A successful final link above proves that reference was
-# resolved into main.exe; duplicate definitions would make link.exe fail.
-$definitionPattern = '^.*SECT[0-9]+.*External\s+\|\s+' + [regex]::Escape($sym) + '\s*$'
-$definitions = @(& dumpbin /SYMBOLS $mainObj 2>&1 | Where-Object { $_ -match $definitionPattern })
-if ($LASTEXITCODE -ne 0) { throw 'dumpbin /SYMBOLS main.obj failed' }
-if ($definitions.Count -ne 1) { throw "expected exactly 1 definition of $sym in main.obj, found $($definitions.Count)" }
-
+# dumpbin /SYMBOLS on main.exe produces a false zero. Verify instead on the
+# inputs of the link: the Rust archive must refer to the callback exactly once
+# (UNDEF), and the successful final link above proves that reference was
+# resolved — by the MoonBit object when it survives the prebuild flow, whose
+# single definition is then also checked directly.
 $referencePattern = '^.*UNDEF.*External\s+\|\s+' + [regex]::Escape($sym) + '\s*$'
 $references = @(& dumpbin /SYMBOLS $rustLib 2>&1 | Where-Object { $_ -match $referencePattern })
 if ($LASTEXITCODE -ne 0) { throw 'dumpbin /SYMBOLS gpui_sys.lib failed' }
 if ($references.Count -ne 1) { throw "expected exactly 1 reference to $sym in gpui_sys.lib, found $($references.Count)" }
-Write-Host "    Verified: main.obj defines $sym exactly once"
 Write-Host "    Verified: gpui_sys.lib references $sym exactly once and main.exe linked"
 
-Write-Host '==> [6/6] Run headless round-trip test (issue #34)'
+$mainObj = Join-Path $MB '_build\native\debug\build\cmd\main\main.obj'
+if (Test-Path $mainObj) {
+  $definitionPattern = '^.*SECT[0-9]+.*External\s+\|\s+' + [regex]::Escape($sym) + '\s*$'
+  $definitions = @(& dumpbin /SYMBOLS $mainObj 2>&1 | Where-Object { $_ -match $definitionPattern })
+  if ($LASTEXITCODE -ne 0) { throw 'dumpbin /SYMBOLS main.obj failed' }
+  if ($definitions.Count -ne 1) { throw "expected exactly 1 definition of $sym in main.obj, found $($definitions.Count)" }
+  Write-Host "    Verified: main.obj defines $sym exactly once"
+} else {
+  Write-Host '    main.obj not present under the prebuild flow; definition side is covered by the successful link'
+}
+
+# The mangled name does not encode types. Validate the actual generated C
+# declaration (the prebuild flow keeps main.c around after a successful link).
+$mainC = Join-Path $MB '_build\native\debug\build\cmd\main\main.c'
+if (Test-Path $mainC) {
+  $normalizedC = (Get-Content $mainC -Raw) -replace '\s+', ' '
+  $escapedSym = [regex]::Escape($sym)
+  $prototypeMatches = [regex]::Matches($normalizedC, "int32_t\s+$escapedSym\s*\(([^)]*)\)")
+  if ($prototypeMatches.Count -eq 0) { throw "could not find an int32_t prototype for $sym in main.c" }
+  $signatures = @($prototypeMatches | ForEach-Object {
+    (($_.Groups[1].Value -replace '\s+', '') -replace 'int32_t[A-Za-z_][A-Za-z0-9_]*', 'int32_t')
+  } | Sort-Object -Unique)
+  if ($signatures.Count -ne 1 -or $signatures[0] -ne $callbackParams) {
+    throw "generated MoonBit callback must be int32_t($($callbackParams -replace ',', ', ')); found: $($signatures -join '; ')"
+  }
+  Write-Host "    signature : int32_t($($callbackParams -replace ',', ', '))"
+} else {
+  Write-Host '    signature : skipped (generated main.c is unavailable)'
+}
+
+Write-Host '==> [4/4] Run headless round-trip test (issue #34)'
 $rtExe = Join-Path $MB '_build\native\debug\build\cmd\roundtrip\roundtrip.exe'
 if (-not (Test-Path $rtExe)) { throw "roundtrip executable not found at $rtExe" }
 & $rtExe
 if ($LASTEXITCODE -ne 0) { throw 'round-trip test failed' }
 Write-Host "Done. Run: $exe"
 
-# In CI, export the augmented LIB so subsequent steps (moon test) can find
-# gpui_sys.lib and the extra build-tree / registry .lib directories.
+# In CI, export the developer-shell LIB so a later `moon test` step that
+# happens to relink can still resolve Windows SDK import libs (kernel32.lib
+# etc.). Project libraries need no search path anymore: build.py's LinkConfig
+# carries them as absolute paths.
 if ($env:GITHUB_ENV) {
   Add-Content -Path $env:GITHUB_ENV -Value "LIB=$env:LIB"
 }

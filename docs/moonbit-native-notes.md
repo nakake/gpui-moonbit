@@ -51,7 +51,7 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
     - `3`(要素数) + `8username` + `15gpui_2dbindings` + `5spike` + `8mb__ping`(`mb_ping`→`mb__ping` で8字)。先頭の `38` は `3`+`8username`。
     - 旧観測(リネーム前、2026-07-15)。spike パッケージは現存しないため再測定不可。マングル規則の説明として旧 `username` 名のまま残す。
   - 例: `nakake/gpui-bindings`(ルートパッケージ) の `dispatch_entry` → `_M0FP26nakake15gpui_2dbindings15dispatch__entry`(ELF 実測。Mach-O なら先頭 `_` がもう1本付く)
-    - 要素数は 2(`nakake` / `gpui-bindings`)なので先頭は `26` = `2`+`6nakake`。関数名は `dispatch_entry` → `_` が `__` にエスケープされて `dispatch__entry`(15字)。観測日: 2026-08-06(`./build.sh` step 2 で再測定)
+    - 要素数は 2(`nakake` / `gpui-bindings`)なので先頭は `26` = `2`+`6nakake`。関数名は `dispatch_entry` → `_` が `__` にエスケープされて `dispatch__entry`(15字)。観測日: 2026-08-06(当時の `./build.sh` の抽出段で再測定。#126 以降は生成 C の `_M0FP…` を直接見る)
     - 旧観測: コールバックが Counter デモ所有だった頃は `nakake/gpui-bindings/app` の `dispatch` → `_M0FP36nakake15gpui_2dbindings3app8dispatch`(2026-08-01)。さらに前(リネーム前、2026-07-15)は `__M0FP38username15gpui_2dbindings3app8dispatch`。**パッケージが 1 段浅くなると先頭の要素数も変わる**(`36` → `26`)ことがこの 3 例で確認できる
   - 観測日: 2026-07-15
 - **Rust から MoonBit 関数をマングル名で参照する**(Rust→MoonBit コールバックの実用手段):
@@ -63,7 +63,7 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
   ```
   - **Mach-O は `link_name` に先頭 `_` を1本自動付与**する。nm 表示が `__M0FP…`(2本)なら、`link_name` には `_M0FP…`(1本)と書く。2本書くと参照が `___`(3本)になって未解決。
   - 脆さ: 関数/パッケージ改名・ツールチェーンのマングル変更で壊れるが**リンクエラーで即検知**でき、`nm` で新名に更新するだけ。
-  - **旧説明の補足 (現在は superseded)**: `build.sh` が MoonBit ビルド出力から callback(現在は `dispatch_entry`)の実マングル名を `nm` で抽出 → `gpui-sys/mb_symbol.txt` に書き、`gpui-sys/build.rs` がそれを読んで `extern`(`#[link_name]`)を生成する。これはマングル表記の抽出だけを自動化する。改名・引数数・型・ABI 方針への自動追従ではない(ただし suffix の導出元は `abi.toml` の `[callback] name` に一本化済み、RFC 0004)。
+  - **旧説明の補足 (現在は superseded)**: `build.sh` が MoonBit ビルド出力から callback(現在は `dispatch_entry`)の実マングル名を `nm` で抽出 → `gpui-sys/mb_symbol.txt` に書き、`gpui-sys/build.rs` がそれを読んで `extern`(`#[link_name]`)を生成する。これはマングル表記の抽出だけを自動化する。改名・引数数・型・ABI 方針への自動追従ではない(ただし suffix の導出元は `abi.toml` の `[callback] name` に一本化済み、RFC 0004)。**#126 以降はこの抽出も廃止**され、`build.py` と `gpui-sys/build.rs` が `abi.toml` から同じ値を計算する(build driver は事後検証に回る)。
   - 観測日: 2026-07-15
 - **マングル名が変わる/変わらない条件**(`#[link_name]` に直書きしているので重要):
   - **変わる**: 関数名の変更 / パッケージ名・場所(ディレクトリ)の変更 / モジュール名(`moon.mod` の `name`)の変更 / MoonBit ツールチェーンのマングル方式変更(version up)。→ いずれも**リンクエラーで即検知**でき、`nm … | grep <fn>` で得た新名を(先頭 `_` を1本にして)貼り直すだけ。
@@ -105,8 +105,8 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
 ## 7. リンク(gpui-sys のような重い Rust ライブラリ)
 
 - **静的 `.a` を MoonBit(moon)側の最終リンクに載せると、Rust の推移的ネイティブ依存を全部供給**する必要がある。moon は Rust の依存を知らない。
-  - 必要なフレームワーク/ライブラリ列は **`cargo rustc --lib --crate-type staticlib -- --print native-static-libs`** で出力できる。root build driver は毎回これを基礎列として捕捉し、選択した `moon.pkg.*` template の `@NATIVE_LIBS@` に投入する。
-  - Linux は `-lxcb` / `-lxkbcommon*` を versioned SONAME の `-l:` 形式へ正規化し、runtime-only / `.linux-libs` 環境との互換性のため `libxcb-xkb.so.1` を補う。この compatibility policy は Cargo 出力とは別に driver が管理する。
+  - 必要なフレームワーク/ライブラリ列は **`cargo rustc --lib --crate-type staticlib -- --print native-static-libs`** で出力できる。prebuild(`moonbit-bindings/build.py`)が毎回これを基礎列として捕捉し、`link` パッケージ向けの LinkConfig に載せる(#126 で per-OS template + `@NATIVE_LIBS@` 置換は廃止)。
+  - Linux は `-lxcb` / `-lxkbcommon*` を versioned SONAME の `-l:` 形式へ正規化し、runtime-only / `.linux-libs` 環境との互換性のため `libxcb-xkb.so.1` を補う。この compatibility policy は Cargo 出力とは別に build.py が管理する。
   - gpui 0.2.2 の macOS 実測列: `ApplicationServices CoreFoundation CoreVideo CoreText Carbon Security CoreGraphics AppKit QuartzCore Foundation Metal SystemConfiguration OpenGL` + `-lobjc -liconv`。これは観測記録であり、最終リンクの基礎列は現在の Cargo 出力。
 - **cdylib(`.dylib`)を消費**すると frameworks は焼き込み済みで楽だが、**cdylib は自ビルドで完結**するため「後からできる MoonBit のシンボル」を参照できない(Rust→MoonBit コールバック不可)。`-undefined dynamic_lookup` で無理に許すと**起動時 segfault**(未定義チェック全無効化が gpui のリンケージを壊す)。
   - → コールバックが要るなら staticlib + 上記フレームワーク列。
@@ -133,10 +133,11 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
 
 - **シンボル**: ELF には Mach-O の ABI アンダースコアが無い。nm 表示は `_M0FP…`(1本)で、`#[link_name]` にはそのまま書く(剥がさない)。マングル方式自体は macOS と完全同一(リネーム後の再測定: `_M0FP36nakake15gpui_2dbindings3app8dispatch`、moon 0.1.20260721 / 2026-08-01。旧観測 2026-07-18 は `_M0FP38username15gpui_2dbindings3app8dispatch`)。
   - 観測日: 2026-07-18
-- **ビルドフロー差**: Linux の moon は `moonc link-core` が `cmd/main/main.c` を直接生成し、cc がコンパイル+リンクを1段で行う → **リンク失敗時に .o が残らない**(`__moonbit_link_core__/*.o` も無い)。build.sh のシンボル抽出は「.o の nm → 生成 main.c の grep」のフォールバック2段構え(2026-07-18 実装)。step 4 の強制再リンクは `main.exe` の削除だけで足りる。
+- **ビルドフロー差**: Linux の moon は `moonc link-core` が `cmd/main/main.c` を直接生成し、cc がコンパイル+リンクを1段で行う → **リンク失敗時に .o が残らない**(`__moonbit_link_core__/*.o` も無い)。強制再リンクは `main.exe` の削除だけで足りる([2/4])。
   - 観測日: 2026-07-18
-- **moon.pkg は per-OS 分岐不可** → `cmd/main/moon.pkg.{macos,linux}` テンプレートを build.sh が uname で選択コピーする方式に変更。
-  - 観測日: 2026-07-18
+  - **更新 (#126, 2026-08-17)**: シンボル抽出そのものを廃止した(build.py が計算する)。生成 `main.c` の grep はリンク失敗時の候補提示と C プロトタイプ照合に残る。
+- **moon.pkg は per-OS 分岐不可**。当初は `cmd/main/moon.pkg.{macos,linux}` テンプレートを build.sh が uname で選択コピーする方式で回避していたが、#126 で prebuild へ移した: `moon.pkg` は tracked な 1 ファイルにして `nakake/gpui-bindings/link` を import するだけにし、OS 判定と出し分けは `build.py` が LinkConfig を組むときに行う。
+  - 観測日: 2026-07-18(方式変更は 2026-08-17)
 - **Linux のリンク列**(`cargo rustc -- --print native-static-libs`, gpui 0.2.2): `-lstdc++ -lxcb -ldl -lxkbcommon -lxkbcommon-x11 -lgcc_s -lutil -lrt -lpthread -lm -lc`。
   - `-dev` パッケージが無い環境では `-l:libxcb.so.1 -l:libxcb-xkb.so.1 -l:libxkbcommon.so.0 -l:libxkbcommon-x11.so.0` 形式(GNU ld の `-l:` 直指定)で回避できる。`libxkbcommon-x11.so.0` は `libxcb-xkb.so.1` に依存(リンク行への明示が必要)。
   - 未インストールの runtime lib は `apt-get download` + `dpkg -x` でプロジェクトローカル(`.linux-libs/`)に展開し、リンク時 `-L`、実行時 `LD_LIBRARY_PATH` で供給(sudo 不要の暫定策。正式には `sudo apt install libxkbcommon-x11-0 libxcb-xkb1`)。
@@ -153,14 +154,15 @@ MoonBit の native/低レベル挙動を新たに発見したら、**必ずこ�
 
 - **ビルドは `build.ps1`**(build.sh の PowerShell 版)。cl.exe が PATH に無ければ vswhere → `Enter-VsDevShell` で MSVC 環境に入る。moon は Windows でも Linux と同じく `moonc link-core` が `main.c` を直接生成する → シンボル抽出は main.c の grep(Select-String)で共通化できる。
 - **x64 COFF は C シンボルに ABI アンダースコアを付けない** → `#[link_name]` は nm/main.c の名前をそのまま(ELF と同じ扱い)。マングル名は3プラットフォームで完全同一だった(moon 0.1.20260713)。
-- **リンクフラグの順序**: moon はユーザーの `cc-link-flags` の**後ろ**に自前の `/link /LIBPATH:$MOON_HOME/lib` を付ける。追加の探索ディレクトリは `build.ps1` が `LIB` 環境変数へ登録し、`cc-link-flags` にはライブラリ名だけを置く。これにより、先頭にも `/link` を置いたときの LNK4044 と、`/link` を置かず `/LIBPATH:` を渡したときの D9002 の両方を避ける。
-- **リンクに必要な追加 LIB ディレクトリ**(build.ps1 が自動収集):
+- **リンクフラグの渡し方**: リンクフラグは prebuild の LinkConfig(`link_flags`)で供給する。moon はこれを `link` ではなく `cl` に渡すため `/LIBPATH:` は「unknown option」として捨てられる(D9002)。したがって探索パスは使わず、プロジェクト側の `.lib`(`gpui_sys.lib` / `gpui.lib` / windows-rs の import lib)は **build.py が絶対パスで渡す**。Windows SDK の import lib(`kernel32.lib` 等)だけは素の名前のままにして、developer shell の `LIB` で解決させる(`build.ps1` は CI 向けにその `LIB` を `GITHUB_ENV` へ書き出す)。
+  - 旧方式(#126 以前): `cc-link-flags` にライブラリ名だけを置き、探索ディレクトリは `build.ps1` が `LIB` へ登録していた。moon がユーザーの `cc-link-flags` の**後ろ**に自前の `/link /LIBPATH:$MOON_HOME/lib` を付けるため、先頭にも `/link` を置くと LNK4044、`/link` なしで `/LIBPATH:` を渡すと D9002 になるという制約への対応だった。
+- **リンクに必要な追加ライブラリ**(build.py が自動収集する。1 は Windows SDK 側なので素の名前のまま、2・3 は絶対パスで渡す):
   1. `cargo rustc -- --print native-static-libs` のライブラリ列(user32.lib, d3d系等)
   2. **gpui の build.rs が生成する `gpui.lib`**: Cargo metadata が示す target directory 配下の `<host>\debug\build\gpui-<hash>\out\`(macOS/Linux には無い Windows 固有の産物)
   3. **windows-rs のインポートライブラリ** `windows.0.5x.0.lib`: cargo レジストリ内 `windows_x86_64_msvc-*/lib/`
-- **CRT は静的 `/MT` に統一**: moon の native backend はユーザー `cc-flags` の後ろに `/MT` を追加するため、`/MD` では上書きできない。`build.ps1` は Rust に `-C target-feature=+crt-static` を渡して MoonBit 側へ合わせ、Cargo が出す重複CRTの `/defaultlib:` 指定を除く。これにより D9025 と LNK4098 を避ける。
-- **文字コード**: 生成 `main.c` は `/utf-8` でコンパイルする。`build.ps1` は `VSLANG=1033` を要求しつつ、ローカライズ済みMSVCが日本語を出す場合に備えてコンソールとPowerShellのnative-command pipelineもUTF-8へ切り替える。これによりログ捕捉時のCP932文字化けとC4819を避ける。
-- **リンク後検証**: PEの最終exeは通常COFFシンボル表を保持しないため、`dumpbin /SYMBOLS main.exe` ではコールバックが0件になる。`main.obj` の定義1件と `gpui_sys.lib` の未解決参照1件を検証し、最終リンク成功を解決済みの根拠とする。
+- **CRT は静的 `/MT` に統一**: moon の native backend はユーザー `cc-flags` の後ろに `/MT` を追加するため、`/MD` では上書きできない。`build.py` は Rust に `-C target-feature=+crt-static`(`RUSTFLAGS`)を渡して MoonBit 側へ合わせ、Cargo が出す重複CRTの `/defaultlib:` 指定を除く。これにより D9025 と LNK4098 を避ける。
+- **文字コード**: `build.ps1` は `VSLANG=1033` を要求しつつ、ローカライズ済みMSVCが日本語を出す場合に備えてコンソールとPowerShellのnative-command pipelineをUTF-8へ切り替える（ログ捕捉時のCP932文字化け対策）。旧方式では生成 `main.c` を `cc-flags` の `/utf-8` でコンパイルしていたが、#126 で cc-flags ごと廃止した（tests/consumer・examples が `/utf-8` なしで windows-latest 緑であることを確認済み。C4819 が再発する場合はここが容疑者）。
+- **リンク後検証**: PEの最終exeは通常COFFシンボル表を保持しないため、`dumpbin /SYMBOLS main.exe` ではコールバックが0件になる。`gpui_sys.lib` の未解決参照1件と最終リンク成功を解決済みの根拠とし、`main.obj` が残っている場合はその定義1件も直接検証する(prebuild 経路では残らないことがある)。
 - **動作確認済み**(2026-07-18、2026-07-19再確認): DirectX 11 レンダリングでウィンドウ表示、クリックとキー `j`/`k`/`r`、Rust→MoonBit dispatch、再描画が動作。**キーボードは素の exe で動く**(macOS の .app バンドル要件のようなものは無い)。ルートレイアウトもウィンドウ全体を埋める。
 - 観測日: 2026-07-19
 
