@@ -85,9 +85,7 @@ fn build_tree(view : Int) -> Result[Unit, Int] {
     on_click: btn_hit,
   })
   cb.add_child()
-  cb.text(
-    "the demo app lives in examples/counter", 130, 135, 148, 14.0,
-  )
+  cb.text("the demo app lives in examples/counter", 130, 135, 148, 14.0)
   cb.add_child()
   cb.set_root()
   @nakake/gpui-bindings.build_tree(view, cb)
@@ -112,7 +110,9 @@ fn dispatch(
     fn(v) {
       match
         @nakake/gpui-bindings.update_text(
-          v, HITS_KEY, hits_label(hits.get(store)),
+          v,
+          HITS_KEY,
+          hits_label(hits.get(store)),
         ) {
         Ok(_) => Ok(())
         Err(_) => build_tree(v)

@@ -152,7 +152,7 @@ opcode・`BUFFER_VERSION`・enum 定数（`[align_items]` 等の各セクショ�
 - `EVENT_SCROLL`（`8`）はスクロール位置の変化通知を運ぶ（issue #89）。envelope は `(4, EVENT_SCROLL, view, scroll_id, 0)` で、`EVENT_INPUT_*` と同じ **notify-then-pull**: 通知はペイロードを運ばず、現在値は `gpui_scroll_copy_state`（ラッパー `scroll_state`）で明示的に pull する。**push でなく pull を選んだ理由**（issue #89 の記録）: (1) dispatch envelope は i32 ×2 slot しかなく、`(scroll_id, offset_x, offset_y)` の 3 値が乗らない、(2) スクロール状態は gpui が所有し複数フレームにまたがって変化するため、イベントに値を焼き込むと coalescing や取りこぼしで古い値に基づく描画が起きる — pull は常に現在値を返すのでこの事故が構造的に消える、(3) #90 の手動仮想化は offset に加えて max_offset / viewport も必要で、pull なら 1 回の FFI で 6 値まとめて返せる。発火は Rust 側の `ScrollFeedback` ラッパー要素が paint ごとにクランプ済みオフセットを観測して差分検出し（gpui の wheel ハンドラは Rust 側にフックが無いため paint 観測が唯一の commit point）、`App::defer` で draw の外から dispatch する。初回観測は無通知でシードされる（何もスクロールしていない）。購読は `OP_SET_SCROLL_ID` を持つ div のうち実際にスクロールするもの（`OP_SET_OVERFLOW` の SCROLL 軸）だけで、位置の保持には従来どおり `OP_SET_KEY` が必要。新しい種別の追加なので `ABI_VERSION` は据え置き。
 - **消費者側の `_keep` は不要**（RFC 0004 §3.4）。`register_dispatch` の内部が `dispatch_entry` を参照するため、登録するだけで dead-code elimination から retain される。別モジュール + path 依存（`tests/consumer`）で `_keep` なしにリンク・実行できることを確認済み。
 
-ドライバは固定の `dispatch_entry` に対する実際の現在のマングル名を抽出するため、ツールチェーンのマングル方式の変更にも追従する。これはパッケージ/関数名の自動リネームサポートではない。関数名を変更する場合は `gpui-sys/abi.toml` の `[callback] name` が単一情報源で、`build.sh` の `PKG_FN_SUFFIX` と `build.ps1` の `$PkgFnSuffix` はそこから導出する。MoonBit のマングル名には型が含まれないため、ドライバは `main.c` が利用可能な場合、生成された C から `int32_t` の戻り値と 5 つの `int32_t` パラメータを別途検証する。
+固定の `dispatch_entry` に対するマングル名は、`gpui-sys/abi.toml` の `[callback]`（`name` / `module`）から `moonbit-bindings/build.py`（prebuild）と `gpui-sys/build.rs` がそれぞれ**決定的に計算**する。build.py は計算値を `gpui-sys/mb_symbol.txt` へ書き出し（既存ファイルは上書きせず、値が食い違う場合だけ警告する = 手動 override の escape hatch）、ドライバは書かれた値をビルド後に**検証する**側に回る。したがってツールチェーンのマングル方式が変わった場合は、抽出による自動追従ではなくリンク失敗として顕在化し、ドライバが実シンボル候補を提示する（§6）。関数名を変更する場合は `[callback] name` が単一情報源である。MoonBit のマングル名には型が含まれないため、ドライバは `main.c` が利用可能な場合、生成された C から `int32_t` の戻り値と 5 つの `int32_t` パラメータを別途検証する。
 
 ## 5. データフロー
 
@@ -192,25 +192,23 @@ Tab / Shift+Tab は外側コンテナの `on_key_down` が消費してフォー�
 
 ## 6. ビルドと実行のパイプライン
 
-ルートのビルドドライバを使用すること。素の `cargo build` にはローカルで生成される `gpui-sys/mb_symbol.txt` が欠ける。素の `moon build` は、MoonBit が変更された外部静的アーカイブを追跡しないため、古い実行ファイルを残すことがある。
+ルートのビルドドライバを使用すること。素の `moon build` は、MoonBit が変更された外部静的アーカイブを追跡しないため古い実行ファイルを残すことがあり、リンク契約の事後検証も行われない。
 
-`build.sh` は macOS arm64/x86_64 と Linux x86_64 をサポートし、`build.ps1` は Windows MSVC x64 をサポートする。各ドライバは、生成ファイルを変更する前に前提条件/アーキテクチャの事前チェック（preflight）を実行する。選択された `moon.pkg.*` テンプレートは、Cargo のネイティブ静的ライブラリ一覧をそのベースとして受け取る。Linux は XCB/XKB のフラグを、ランタイム専用環境および `.linux-libs` 環境向けにバージョン付き SONAME へ正規化し、必要な `libxcb-xkb` 互換依存を追加する。
+`build.sh` は macOS arm64/x86_64 と Linux x86_64 をサポートし、`build.ps1` は Windows MSVC x64 をサポートする。各ドライバは、生成ファイルを変更する前に前提条件/アーキテクチャの事前チェック（preflight）を実行する。リンクフラグは prebuild（`moonbit-bindings/build.py`、§6.1）が Cargo のネイティブ静的ライブラリ一覧を基礎列として組み立て、`link` パッケージ向けの LinkConfig として供給する唯一の経路である。Linux は XCB/XKB のフラグを、ランタイム専用環境および `.linux-libs` 環境向けにバージョン付き SONAME へ正規化し、必要な `libxcb-xkb` 互換依存を追加する。
 
 両ドライバとも次の順序で処理する:
 
-1. ネイティブのホスト/ターゲットと、必要な MoonBit、Rust、コンパイラ/リンカ、シンボルツールを検証する。ツールチェーンのバージョンを表示し、診断とリンクのためにネイティブの Rust ホストと実際の Cargo ターゲットディレクトリを導出する。
-2. `gpui-sys/abi.toml` から MoonBit の ABI 定数を生成する。`gen-header`（cbindgen のみ依存の小クレート）で `gpui-sys/include/gpui_sys.h` を再生成してから、そのヘッダーに対して `bindgen-moonbit` を実行し、生成された MoonBit ファイルをフォーマットする。ヘッダー再生成が bindgen より前にあることが重要である: bindgen の出力は `moon check` でゲートされ、`moon check` はヘッダーを再生成する唯一の `cargo build` より前に走るため、順序が逆だと新しい Rust の C エクスポートがビルドをデッドロックさせる（issue #71）。
-3. fatal な `moon check` を実行し、その後 Cargo 由来のネイティブライブラリをまだ持たない状態でコールドな `moon build` を行う。このブートストラップ段階ではネイティブリンクの失敗が想定される。完全な Cargo 一覧を用いる後のビルドが厳密なリンクのゲートである。
-4. `dispatch_entry` のマングルされたシンボルをちょうど 1 つ抽出する（suffix は `abi.toml` の `[callback] name` から導出）。`main.c` が存在する場所では、生成された C のプロトタイプを `int32_t` の戻り値と 5 つの `int32_t` パラメータとして検証する。シグネチャのアンカーはライブラリ側の `dispatch_entry` の定義そのものであり、消費者の `_keep` に依存しない。
-5. 検出されたネイティブの Rust ホスト向けに `gpui-sys` をビルドし、`cargo rustc --lib --crate-type staticlib -- --print native-static-libs` を捕捉し、Cargo metadata が報告するターゲットディレクトリを使って最終的なプラットフォーム用 `moon.pkg` を生成する。`build.rs` は `mb_symbol.txt` を読み取り、コールバックの extern を生成し、Rust の ABI 定数を再生成する。cbindgen による `include/gpui_sys.h` の再生成も残っているが、ステップ 2 の `gen-header` と同じ呼び出しの冪等なバックストップである（素の `cargo build` 用）。
-6. MoonBit のリンク済み出力を削除して再度ビルドし、新しい Rust 静的ライブラリと Cargo 由来のネイティブ依存に対して強制的に再リンクする。
-7. リンケージを検証する。macOS/Linux は最終バイナリを調べ、コールバック定義がちょうど 1 つであることを確認する。Windows は、MoonBit の `main.obj` にコールバック定義が 1 つ、`gpui_sys.lib` に未解決参照が 1 つあること、および最終リンクが成功することを検証する（リンク済み PE は通常 COFF シンボルテーブルを省略するため）。
-8. ヘッドレス往復テスト（`cmd/roundtrip`）を実行する。MoonBit がエッジケースのテキスト（NUL バイト・多バイト UTF-8・4 バイト絵文字）を含むツリーを `gpui_build_tree` で送信し、`gpui_debug_dump_text` で読み戻してバイト単位で比較する。さらに `gpui_abi_probe` で `i32` 境界値（`i32::MAX` / `i32::MIN` / 0 / -1）の往復を検証する（issue #54 G23）。GUI なしで MoonBit→C→Rust→C→MoonBit の完全な FFI 往復を検証する（issue #34）。
-9. macOS のみ: `bundle.sh` を呼び出して実行ファイルを `dist/Runner.app` にバンドルする（デフォルト。`--no-bundle` で省略）。素の Mach-O バイナリには macOS がキーボードイベントを配送しないため、キーボード入力に必要である。
+1. **preflight**: ネイティブのホスト/ターゲットと、必要な MoonBit、Rust、コンパイラ/リンカ、シンボルツールを検証し、ツールチェーンのバージョンを表示する（Windows は事後検証で `gpui_sys.lib` を読むため、Rust ホストと実際の Cargo ターゲットディレクトリもここで導出する）。
+2. **[0/4] codegen**: `gpui-sys/abi.toml` から MoonBit の ABI 定数を生成する。`gen-header`（cbindgen のみ依存の小クレート）で `gpui-sys/include/gpui_sys.h` を再生成してから、そのヘッダーに対して `bindgen-moonbit` を実行し、生成された MoonBit ファイルをフォーマットする。ヘッダー再生成が bindgen より前にあることが重要である: bindgen の出力は `moon check` でゲートされ、`moon check` はヘッダーを再生成する唯一の `cargo build` より前に走るため、順序が逆だと新しい Rust の C エクスポートがビルドをデッドロックさせる（issue #71）。
+3. **[1/4]** fatal な `moon check` を実行する。
+4. **[2/4] `moon build`**: 先に `cmd/main` / `cmd/roundtrip` のリンク済み実行ファイルを削除する。MoonBit は外部の Rust 静的アーカイブを追跡しないため、削除が強制再リンクの手段である。`gpui-sys` のビルドと `cargo rustc --lib --crate-type staticlib -- --print native-static-libs` によるリンクフラグ捕捉は prebuild（§6.1）が内包するので、ドライバ自身は cargo を呼ばない。`build.rs` は `mb_symbol.txt`（無ければ `abi.toml` からの計算値）でコールバックの extern を生成し、Rust の ABI 定数を再生成する。cbindgen による `include/gpui_sys.h` の再生成も残っているが、ステップ 2 の `gen-header` と同じ呼び出しの冪等なバックストップである（素の `cargo build` 用）。リンクに失敗した場合は、期待シンボル（`mb_symbol.txt` の値）と、生成 C から suffix 非依存のパターン（`_M0FP…`）で拾った実シンボル候補を並べ、`gpui-sys/mb_symbol.txt` を削除して再実行するヒントを表示する。
+5. **[3/4] リンク契約の事後検証**: 判定に使うのは `gpui-sys/mb_symbol.txt` の**実ファイルの値**である（再計算値ではない。手動 override の escape hatch を保つため）。macOS/Linux は最終バイナリを `nm` で調べ、コールバック定義がちょうど 1 つであることを確認する（macOS は先頭 `_` を付けて照合）。Windows は、リンク済み PE が通常 COFF シンボルテーブルを省略するため、`gpui_sys.lib` の未解決参照 1 件と最終リンクの成功を定義側の根拠とし、prebuild 経路で `main.obj` が残る場合はその定義 1 件も直接検証する。加えて `main.c` が存在する場所では、生成された C のプロトタイプを `int32_t` の戻り値と 5 つの `int32_t` パラメータとして検証する。シグネチャのアンカーはライブラリ側の `dispatch_entry` の定義そのものであり、消費者の `_keep` に依存しない。
+6. **[4/4]** ヘッドレス往復テスト（`cmd/roundtrip`）を実行する。MoonBit がエッジケースのテキスト（NUL バイト・多バイト UTF-8・4 バイト絵文字）を含むツリーを `gpui_build_tree` で送信し、`gpui_debug_dump_text` で読み戻してバイト単位で比較する。さらに `gpui_abi_probe` で `i32` 境界値（`i32::MAX` / `i32::MIN` / 0 / -1）の往復を検証する（issue #54 G23）。GUI なしで MoonBit→C→Rust→C→MoonBit の完全な FFI 往復を検証する（issue #34）。
+7. macOS のみ: `bundle.sh` を呼び出して実行ファイルを `dist/Runner.app` にバンドルする（デフォルト。`--no-bundle` で省略）。素の Mach-O バイナリには macOS がキーボードイベントを配送しないため、キーボード入力に必要である。
 
 bindgen ステップは、同じドライバ実行内で直前に `gen-header` が再生成したヘッダーを消費する。したがって、Rust の C エクスポートを追加/変更した後はドライバを 1 回実行するだけで、ヘッダーと追跡対象の `gpui-bindings-ffi.mbt` が同期する（issue #71 でデッドロックだった旧順序を修正済み）。`gen-header` は cbindgen のみに依存し gpui をビルドしないため、この前段階は軽い。`gpui-sys/build.rs` も同じ cbindgen 呼び出しを残しており、素の `cargo build` でのヘッダー再生成を担う（冪等）。
 
-`gpui-sys` は `staticlib` である。その未解決の `mb_dispatch` 参照は、最終的な MoonBit 実行ファイルのリンク時にのみ解決される。プラットフォームのテンプレートには、検出された Rust ライブラリディレクトリと Cargo 由来のネイティブリンクフラグ用のプレースホルダが含まれる。Linux は上述の SONAME 互換正規化を適用する。macOS ではドライバが最後に `bundle.sh` を呼び出して `dist/Runner.app` を作成する（デフォルト。`--no-bundle` で省略）。キーボードの配送にはこのバンドルが必要である。Linux では実行ファイルを直接使う。`.linux-libs` は、利用できないシステムの XCB/XKB ランタイムライブラリ用の、無視されるローカルフォールバックである。WSLg では `env -u WAYLAND_DISPLAY` が確実な明示的 X11 起動方法である。Rust は Wayland 起動時の panic を捕捉し、その変数を除去して 1 度だけ再試行する。Windows は `build.ps1` が用意する MSVC x64 セットアップを使う。
+`gpui-sys` は `staticlib` である。その未解決の `mb_dispatch` 参照は、最終的な MoonBit 実行ファイルのリンク時にのみ解決される。`cmd/main` / `cmd/roundtrip` の `moon.pkg` は `nakake/gpui-bindings` と `nakake/gpui-bindings/link` を import するだけで、Rust ライブラリの絶対パスとネイティブリンクフラグは prebuild の LinkConfig が運ぶ（#126）。Linux は上述の SONAME 互換正規化を適用する。macOS ではドライバが最後に `bundle.sh` を呼び出して `dist/Runner.app` を作成する（デフォルト。`--no-bundle` で省略）。キーボードの配送にはこのバンドルが必要である。Linux では実行ファイルを直接使う。`.linux-libs` は、利用できないシステムの XCB/XKB ランタイムライブラリ用の、無視されるローカルフォールバックである。WSLg では `env -u WAYLAND_DISPLAY` が確実な明示的 X11 起動方法である。Rust は Wayland 起動時の panic を捕捉し、その変数を除去して 1 度だけ再試行する。Windows は `build.ps1` が用意する MSVC x64 セットアップを使う。
 
 ### 6.1 prebuild パイプライン（依存として消費、#93 / G2）
 
@@ -264,7 +262,7 @@ exe の `main` では、自前の dispatch を `@nakake/gpui-bindings.register_d
 ## 7. 不変条件と落とし穴
 
 - **テキスト:** 借用した UTF-8 の `Bytes` と長さを渡す。MoonBit の `String` を C ポインタとして渡したり、NUL 終端の C 文字列契約を用いたりしてはならない。
-- **コールバック:** 現在のマングル名は抽出されるが、固定の `dispatch_entry(version, kind, view, data_a, data_b) -> i32`、その 5 つの `i32` パラメータ（slot 0 = ABI_VERSION、slot 2 = view id）、および `0`/`1` の結果ポリシーはチェックされる。関数名を変える場合は `abi.toml` の `[callback] name` を更新すれば両ドライバの suffix はそこから導出される。
+- **コールバック:** 現在のマングル名は `abi.toml` から計算されるが、固定の `dispatch_entry(version, kind, view, data_a, data_b) -> i32`、その 5 つの `i32` パラメータ（slot 0 = ABI_VERSION、slot 2 = view id）、および `0`/`1` の結果ポリシーはチェックされる。関数名を変える場合は `abi.toml` の `[callback] name` を更新すれば両ドライバの suffix はそこから導出される。
 - **再リンク:** `gpui-sys` を変更した後は、ルートのドライバを使うか、`moon build` の前に MoonBit のリンク済み出力を明示的にクリーンすること。
 - **ロック:** render は、リスナーが MoonBit コールバックを呼び出し得る前に、`VIEWS` をスナップショットして解放しなければならない。
 - **キーボード:** macOS では `.app` を実行すること。フォーカスは `render` 中ではなく、GPUI ビュー構築時に割り当てられる。
@@ -279,11 +277,10 @@ exe の `main` では、自前の dispatch を `@nakake/gpui-bindings.register_d
 | 区分 | ファイル |
 |---|---|
 | 手編集の ABI ソース | `gpui-sys/abi.toml` |
-| 手編集の実装・ビルドツール | `gpui-sys/src/lib.rs`、`gen-header/src/main.rs`、`bindgen-moonbit/src/main.rs`、`moonbit-bindings/gpui-bindings.mbt`、`moonbit-bindings/widgets.mbt`、`moonbit-bindings/components.mbt`、`store.mbt`、`signal.mbt`、`event.mbt`、`handlers.mbt`、`framework.mbt`、`moonbit-bindings/dispatch.mbt` |
+| 手編集の実装・ビルドツール | `gpui-sys/src/lib.rs`、`gen-header/src/main.rs`、`bindgen-moonbit/src/main.rs`、`moonbit-bindings/gpui-bindings.mbt`、`moonbit-bindings/widgets.mbt`、`moonbit-bindings/components.mbt`、`store.mbt`、`signal.mbt`、`event.mbt`、`handlers.mbt`、`framework.mbt`、`moonbit-bindings/dispatch.mbt`、`moonbit-bindings/cmd/main/moon.pkg`、`moonbit-bindings/cmd/roundtrip/moon.pkg` |
 | 手編集のテスト・ベンチ・サンプル | `gpui-sys/src/headless.rs`、`headless_tests.rs`、`fuzz_tests.rs`、`gpui-sys/benches/decode_bench.rs`、`gpui-sys/fuzz/`（cargo-fuzz scaffold）、`examples/counter/`、`examples/hello/`、`examples/stream/`、`tests/consumer/`、`*_wbtest.mbt` / `*_test.mbt` |
 | 追跡対象の生成ソース | `gpui-sys/include/gpui_sys.h`、`gpui-sys/src/abi_constants.rs`、`moonbit-bindings/abi_constants.mbt`、`moonbit-bindings/gpui-bindings-ffi.mbt` |
-| 手編集の OS テンプレート | `moonbit-bindings/cmd/main/moon.pkg.macos`、`.linux`、`.windows`、`moonbit-bindings/cmd/roundtrip/moon.pkg.*` |
-| 無視されるビルド生成物 | `moonbit-bindings/cmd/main/moon.pkg`、`moonbit-bindings/cmd/roundtrip/moon.pkg`、`gpui-sys/mb_symbol.txt`、`_build/`、`target/`、`dist/` |
+| 無視されるビルド生成物 | `gpui-sys/mb_symbol.txt`、`_build/`、`target/`、`dist/` |
 | 無視される手動配置フォールバック | `.linux-libs/` |
 
 ## 9. 検証の範囲
@@ -307,7 +304,7 @@ MoonBit 側のテストは 2 層に分かれる（issue #80）。**whitebox**（
 - dispatch の登録とライブラリ所有のエントリポイント（RFC 0004）: `moonbit-bindings/dispatch.mbt`（`register_dispatch` / `dispatch_entry`）
 - Counter の状態（signal）・コンポーネント列・dispatch 委譲: `examples/counter/counter/counter.mbt`（path 依存の別モジュール）
 - build driver 用の最小ランナー（dispatch を登録してウィンドウを開く）: `moonbit-bindings/cmd/main/main.mbt`
-- OS ネイティブのリンクテンプレート: `moonbit-bindings/cmd/main/moon.pkg.*`
+- cmd 実行ファイルのリンク経路（`link` パッケージの import。フラグ自体は prebuild の LinkConfig）: `moonbit-bindings/cmd/main/moon.pkg`、`moonbit-bindings/cmd/roundtrip/moon.pkg`
 - ビルド/バンドルの orchestration: `build.sh`、`build.ps1`、`bundle.sh`
 - ヘッドレス往復テスト（issue #34）: `moonbit-bindings/cmd/roundtrip/main.mbt`
 - デバッグ用テキスト読み戻し export: `gpui-sys/src/lib.rs`（`gpui_debug_dump_text`）

@@ -12,7 +12,7 @@ MoonBit native から Rust/GPUI を C FFI 越しに呼ぶ、ローカル向け�
 │   ├── abi.toml                       # ABI 定数の手編集する正本
 │   ├── src/lib.rs                     # ノード保持、描画、イベント、C export
 │   ├── include/gpui_sys.h             # cbindgen による tracked な生成ヘッダー
-│   └── mb_symbol.txt                  # build driver がローカル生成（ignored）
+│   └── mb_symbol.txt                  # prebuild（build.py）がローカル生成（ignored）
 ├── bindgen-moonbit/                   # C ヘッダーから MoonBit FFI 宣言を生成
 ├── gen-header/                        # cbindgen のみで C ヘッダーを再生成（bindgen 前に実行）
 ├── moonbit-bindings/                  # native 専用 MoonBit モジュール
@@ -32,9 +32,7 @@ MoonBit native から Rust/GPUI を C FFI 越しに呼ぶ、ローカル向け�
 └── docs/architecture.md               # 現行実装の詳細
 ```
 
-`moonbit-bindings/cmd/main/moon.pkg` は OS 別の `moon.pkg.macos` /
-`moon.pkg.linux` /
-`moon.pkg.windows` テンプレートから build driver が作る ignored なローカルファイルです。`_build/`、`target/`、`dist/` もローカル生成物です。`.linux-libs/` は、システムにない Linux runtime library を手動で展開する場合の ignored な fallback です。C ABI を変えた場合は、正本を更新して root の build driver を実行し、生成済みの tracked ファイルを確認してください。生成物を手編集しません。
+`moonbit-bindings/cmd/main/moon.pkg` と `moonbit-bindings/cmd/roundtrip/moon.pkg` は手編集の tracked ファイルです。どちらも `nakake/gpui-bindings` と `nakake/gpui-bindings/link` を import するだけで、link flags は prebuild（`moonbit-bindings/build.py`）が出力する LinkConfig が供給します（examples・`tests/consumer` と同形）。`_build/`、`target/`、`dist/` はローカル生成物です。`.linux-libs/` は、システムにない Linux runtime library を手動で展開する場合の ignored な fallback です。C ABI を変えた場合は、正本を更新して root の build driver を実行し、生成済みの tracked ファイルを確認してください。生成物を手編集しません。
 
 ## 必要条件
 
@@ -49,7 +47,7 @@ build driver は生成物を書き換える前に OS / architecture と必要コ
 
 ## ビルドと実行
 
-build driver を使用してください。裸の `cargo build` は `gpui-sys/mb_symbol.txt` がないと失敗し、裸の `moon build` は Rust static library 更新後に実行ファイルを再リンクしないことがあります。
+build driver を使用してください。裸の `moon build` は Rust static library 更新後に実行ファイルを再リンクしないことがあり、リンク契約の事後検証も行いません。
 
 ### macOS
 
@@ -90,17 +88,17 @@ PowerShell を MSVC x64 環境で開く（または build driver に検出させ
 
 ## build driver が行うこと
 
-`build.sh` と `build.ps1` は OS ごとの link template を選んだうえで、次を実行します。
+`build.sh` と `build.ps1` は preflight（OS / architecture と必要コマンドの検査）のあとに次を実行します。
 
-1. `gpui-sys/abi.toml` から ABI 定数を生成し、`gen-header`（cbindgen のみ依存の小クレート、gpui はビルドしない）で C ヘッダーを再生成してから、そのヘッダーから MoonBit FFI 宣言を生成する。ヘッダーが bindgen より前に再生成されるため、新しい Rust の C export を追加してもビルドはデッドロックしない（issue #71）。
-2. `moon check` を必須ゲートとして実行し、MoonBit を一度 build する。この段階では callback/static library 未解決による想定内の cold-link failure だけを許容する。
-3. `dispatch_entry` の実マングルシンボルを抽出し、生成 C がある環境では callback が `int32_t` を返し、`abi.toml` の `[callback] params` から導出した個数の `int32_t` 引数を取ることも検証する。
-4. `mb_symbol.txt` を読む `gpui-sys` を Rust で build し、Cargo の `native-static-libs` 出力から OS 固有 link flags を生成して MoonBit を強制再リンクする。
-5. callback の最終リンクを検証する。macOS/Linux は最終バイナリ上で定義を検査し、Windows は COFF の事情から MoonBit object の定義、Rust archive の未解決参照、最終リンク成功を検査する。
+1. **[0/4] codegen**: `gpui-sys/abi.toml` から ABI 定数を生成し、`gen-header`（cbindgen のみ依存の小クレート、gpui はビルドしない）で C ヘッダーを再生成してから、そのヘッダーから MoonBit FFI 宣言を生成する。ヘッダーが bindgen より前に再生成されるため、新しい Rust の C export を追加してもビルドはデッドロックしない（issue #71）。
+2. **[1/4] `moon check`** を必須ゲートとして実行する。
+3. **[2/4] `moon build`**: 先に `cmd/main` / `cmd/roundtrip` の実行ファイルを削除してから build する。moon は外部の Rust static library を追跡しないため、削除が強制再リンクの手段になる。`gpui-sys` の build と link flags の供給は prebuild（`moonbit-bindings/build.py`）が内包する。リンクに失敗した場合は、期待していたシンボル（`gpui-sys/mb_symbol.txt`）と生成 C 内の実シンボル候補を並べて表示する。
+4. **[3/4] 事後検証**: `mb_symbol.txt` のシンボルが最終実行ファイルにちょうど 1 つ定義されていることを確認し（macOS は先頭 `_` を付けて照合）、生成 C がある環境では callback が `int32_t` を返し `abi.toml` の `[callback] params` から導出した個数の `int32_t` 引数を取ることも検証する。Windows は COFF の事情から、`gpui_sys.lib` の未解決参照 1 件とリンク成功で定義側を担保する（`main.obj` が残っていれば定義も直接検査する）。
+5. **[4/4] ヘッドレス往復テスト**（`cmd/roundtrip`）を実行する。macOS ではその後 `dist/Runner.app` をバンドルする（`--no-bundle` で省略）。
 
 callback は**ライブラリ所有**の `dispatch_entry`（ルートパッケージ `nakake/gpui-bindings`）、5 個の `i32` 引数という固定契約です。5 スロットは **バージョニング済みイベントエンベロープ** `(abi_version, event_kind, view, data_a, data_b)` を運びます。slot 0 は常に `ABI_VERSION` で、古い Rust バイナリをランタイムに拒否します。slot 2 は view id で、再構築対象のビューをルーティングします。`EVENT_TEXT` は Rust 所有のイベントキューから `gpui_event_copy_text(token, buf, len)` で UTF-8 ペイロードをコピーします。
 
-Rust が解決するシンボルはこの 1 本に固定されており、**アプリ側では動きません**（RFC 0004）。消費者は自分の dispatch を書いて `register_dispatch(...)` で登録し、`dispatch_entry` がそれへ委譲します（下記「消費者の書き方」）。現在の実マングル表記は抽出により追従します。関数名を変える場合は `abi.toml` の `[callback] name` が単一情報源で、両 build driver の `PKG_FN_SUFFIX` / `$PkgFnSuffix` はそこから導出されます。**引数の個数**も同様に `[callback] params` が単一情報源で、build driver・`gpui-sys/build.rs` はいずれもそこから導出するため、スロット数を変えても build driver 側の手直しは不要です（#76）。
+Rust が解決するシンボルはこの 1 本に固定されており、**アプリ側では動きません**（RFC 0004）。消費者は自分の dispatch を書いて `register_dispatch(...)` で登録し、`dispatch_entry` がそれへ委譲します（下記「消費者の書き方」）。実マングル名は `abi.toml` の `[callback]` の `name` / `module` から prebuild（`build.py`）と `gpui-sys/build.rs` が決定的に計算し、`gpui-sys/mb_symbol.txt` に書き出します（既存ファイルは上書きせず、手動 override を残します）。build driver はその値を事後検証します。関数名を変える場合は `[callback] name` が単一情報源です。**引数の個数**も同様に `[callback] params` が単一情報源で、build driver・`gpui-sys/build.rs` はいずれもそこから導出するため、スロット数を変えても build driver 側の手直しは不要です（#76）。
 
 ### 消費者の書き方
 

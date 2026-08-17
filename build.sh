@@ -4,12 +4,23 @@
 #
 # The Rust side (gpui-sys) calls back into MoonBit's `dispatch_entry` (the
 # library-owned entry point apps register into, RFC 0004) by its compiled
-# (mangled) symbol. That symbol only exists after MoonBit is compiled,
-# and Rust needs it at *its* compile time (for `#[link_name]`) — a chicken/egg.
-# We resolve it by extracting the *real* mangled symbol from MoonBit's build
-# output and injecting it into gpui-sys's build. This tracks the actual symbol,
-# so a MoonBit rename or a toolchain mangling change is picked up automatically
-# (no hand-edited name). See docs/moonbit-native-notes.md §3.
+# (mangled) symbol. That symbol is deterministic, and the prebuild script
+# (moonbit-bindings/build.py, run by `moon build` via
+# `--moonbit-unstable-prebuild`) computes it from gpui-sys/abi.toml, writes
+# gpui-sys/mb_symbol.txt, builds the Rust staticlib, and propagates the link
+# flags through a LinkConfig on the `link` package (RFC 0005). cmd/main and
+# cmd/roundtrip import that package like any consumer would, so a plain
+# `moon build` inside moonbit-bindings is a full build.
+#
+# What this script adds on top of `moon build`:
+#   - codegen (ABI constants, C header, MoonBit FFI bindings) and `moon check`
+#   - a forced relink of the cmd executables (moon does not track the external
+#     libgpui_sys.a, so a Rust-only change would otherwise keep a stale exe)
+#   - post-build verification of the callback link contract (symbol present
+#     exactly once, C prototype matches abi.toml `[callback] params`)
+#   - the headless round-trip test and (macOS) the Runner.app bundle
+#
+# See docs/moonbit-native-notes.md §3 and docs/rfc/0005-build-driver-redesign.md.
 #
 set -euo pipefail
 
@@ -33,18 +44,16 @@ for arg in "$@"; do
 done
 
 # --- Platform differences ---
-# Mach-O prepends one ABI underscore to every C symbol: nm shows `__M0FP…` and
-# `#[link_name]` must be written with a single `_` (the linker adds the other).
-# ELF has no ABI underscore: nm shows `_M0FP…` and link_name takes it verbatim.
-# moon.pkg cannot branch per-OS, so cmd/main keeps per-OS templates
-# (moon.pkg.macos / moon.pkg.linux) and generates the active package from one.
+# Mach-O prepends one ABI underscore to every C symbol: nm shows `__M0FP…`
+# while mb_symbol.txt stores the `#[link_name]` form with a single `_` (the
+# linker adds the other). ELF has no ABI underscore: nm output and the stored
+# name match verbatim.
 case "$(uname -s)" in
   Darwin)
     if [ "$(uname -m)" != "arm64" ] && [ "$(uname -m)" != "x86_64" ]; then
       echo "ERROR: unsupported macOS architecture: $(uname -m) (supported: arm64, x86_64)" >&2
       exit 1
     fi
-    SYM_RE='^__M0FP'
     OS_PKG=macos
     ;;
   Linux)
@@ -52,7 +61,6 @@ case "$(uname -s)" in
       echo "ERROR: unsupported Linux architecture: $(uname -m) (supported: x86_64)" >&2
       exit 1
     fi
-    SYM_RE='^_M0FP'
     OS_PKG=linux
     ;;
   *) echo "ERROR: unsupported OS: $(uname -s)" >&2; exit 1 ;;
@@ -61,8 +69,6 @@ if [ "$OS_PKG" != macos ] && [ "$BUNDLE" = yes ]; then
   echo "ERROR: --bundle is only supported on macOS (.app bundles are macOS-specific)" >&2
   exit 1
 fi
-PKG_TMPL="$MB/cmd/main/moon.pkg.$OS_PKG"
-RT_PKG_TMPL="$MB/cmd/roundtrip/moon.pkg.$OS_PKG"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -71,68 +77,12 @@ require_command() {
   fi
 }
 
-normalize_native_libs() {
-  local native_libs="$1"
-  local lib
-  local normalized=""
-
-  for lib in $native_libs; do
-    # Drop libc: the cc driver links it implicitly, and passing -lc
-    # explicitly fails in moon's native link on some environments
-    # (CI ubuntu-latest reports "cannot find -lc").
-    case "$lib" in
-      -lc) continue ;;
-    esac
-    # macOS has no standalone libm (math lives in libSystem); drop it there.
-    # Linux needs -lm: the Rust staticlib references exp/log2/log directly.
-    if [ "$OS_PKG" = macos ] && [ "$lib" = "-lm" ]; then
-      continue
-    fi
-    if [ "$OS_PKG" = linux ]; then
-      case "$lib" in
-        -lxcb)          lib=-l:libxcb.so.1 ;;
-        -lxcb-xkb)      lib=-l:libxcb-xkb.so.1 ;;
-        -lxkbcommon)    lib=-l:libxkbcommon.so.0 ;;
-        -lxkbcommon-x11) lib=-l:libxkbcommon-x11.so.0 ;;
-      esac
-      if [ "$lib" = -l:libxcb-xkb.so.1 ] && [[ " $normalized " == *" $lib "* ]]; then
-        continue
-      fi
-    fi
-    normalized="${normalized:+$normalized }$lib"
-  done
-  if [ "$OS_PKG" = linux ]; then
-    case " $normalized " in
-      *' -l:libxcb-xkb.so.1 '*) ;;
-      *) normalized="$normalized -l:libxcb-xkb.so.1" ;;
-    esac
-  fi
-  printf '%s\n' "$normalized"
-}
-
-write_moon_pkg() {
-  local template="$1"
-  local destination="$2"
-  local native_libs="$3"
-  local output
-  output="$(while IFS= read -r line || [ -n "$line" ]; do
-    line="${line//@RUST_LIB_DIR@/$RUST_LIB_DIR}"
-    printf '%s\n' "${line//@NATIVE_LIBS@/$native_libs}"
-  done < "$template")"
-  if [ ! -f "$destination" ] || grep -q '@NATIVE_LIBS@' "$destination" ||
-     [ "$(cat "$destination")" != "$output" ]; then
-    printf '%s\n' "$output" > "$destination"
-    echo "==> wrote ${destination#"$MB"/} ($OS_PKG)"
-  fi
-}
-
-# Do this before writing generated files so unsupported hosts fail without
-# modifying the checkout.
 echo "==> Preflight ($OS_PKG $(uname -m))"
 require_command moon
 require_command cargo
 require_command rustc
 require_command nm
+require_command python3   # runs moonbit-bindings/build.py (the prebuild script)
 case "$OS_PKG" in
   macos)
     require_command xcrun
@@ -171,16 +121,6 @@ rustc --version
 if command -v rustup >/dev/null 2>&1; then
   rustup show active-toolchain
 fi
-RUST_TARGET="$(rustc -vV | awk '/^host:/ { print $2 }')"
-CARGO_TARGET_ROOT="$(cd "$GSYS" && cargo metadata --no-deps --format-version 1 \
-  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
-if [ -z "$RUST_TARGET" ] || [ -z "$CARGO_TARGET_ROOT" ]; then
-  echo "ERROR: could not determine the native Rust target or Cargo target directory." >&2
-  exit 1
-fi
-RUST_LIB_DIR="$CARGO_TARGET_ROOT/$RUST_TARGET/debug"
-echo "    Rust target: $RUST_TARGET"
-echo "    Rust library dir: $RUST_LIB_DIR"
 
 # The pre-commit hook is opt-in: `core.hooksPath` is a local git setting that a
 # clone does not inherit, so it is easy to never notice the hook exists (issue
@@ -192,14 +132,10 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && \
   echo "          git config core.hooksPath moonbit-bindings/.githooks"
 fi
 
-# The MoonBit function whose mangled symbol Rust needs, derived from abi.toml so
-# `[callback] name` is the single source of truth for the link-time contract too
-# (issue #76, RFC 0004 §3.5). The callback lives in the library's root package
-# (`nakake/gpui-bindings`), so the name alone is enough to match the symbol tail:
-# a package component would add another `<len><component>` in front of it.
-#
-# Mangling of one component: '_' -> '__', then '-' -> '_2d', length-prefixed with
-# the escaped length. `dispatch_entry` -> `15dispatch__entry`.
+# The MoonBit callback whose link contract this script verifies after the
+# build, derived from abi.toml so `[callback] name` stays the single source of
+# truth (issue #76, RFC 0004 §3.5). build.py and gpui-sys/build.rs derive the
+# full mangled symbol from the same fields.
 CALLBACK_NAME="$(awk '
   { sub(/[[:space:]]*#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
   /^\[[A-Za-z_][A-Za-z0-9_]*\]$/ { section=$0; next }
@@ -218,8 +154,33 @@ if [ -z "$CALLBACK_NAME" ]; then
   echo "ERROR: could not derive [callback] name from $GSYS/abi.toml" >&2
   exit 1
 fi
-PKG_FN_SUFFIX="$(printf '%s' "$CALLBACK_NAME" | sed -e 's/_/__/g' -e 's/-/_2d/g')"
-PKG_FN_SUFFIX="${#PKG_FN_SUFFIX}${PKG_FN_SUFFIX}"
+CALLBACK_MODULE="$(awk '
+  { sub(/[[:space:]]*#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+  /^\[[A-Za-z_][A-Za-z0-9_]*\]$/ { section=$0; next }
+  section == "[callback]" && /^module[[:space:]]*=/ {
+    sub(/^module[[:space:]]*=[[:space:]]*/, "")
+    gsub(/["[:space:]]/, "")
+    print $0
+    exit
+  }
+' "$GSYS/abi.toml")"
+# Mangled prefix of the module path (component: _ -> __ then - -> _2d, each
+# length-prefixed, count first). Used only to narrow link-failure diagnostics
+# to this module's symbols; function-name independent by construction.
+# Keep in sync with compute_callback_symbol() in moonbit-bindings/build.py
+# (the authoritative copy; a drift here only widens the diagnostic list).
+MODULE_PREFIX=""
+if [ -n "$CALLBACK_MODULE" ]; then
+  N=0
+  PARTS=""
+  IFS='/' read -ra COMPONENTS <<< "$CALLBACK_MODULE"
+  for comp in "${COMPONENTS[@]}"; do
+    esc="$(printf '%s' "$comp" | sed -e 's/_/__/g' -e 's/-/_2d/g')"
+    PARTS="${PARTS}${#esc}${esc}"
+    N=$((N + 1))
+  done
+  MODULE_PREFIX="_M0FP${N}${PARTS}"
+fi
 
 # Expected C parameter list for the MoonBit callback, derived from abi.toml so
 # `[callback] params` stays the single source of truth (issue #76).
@@ -249,7 +210,7 @@ if [ -z "$CALLBACK_PARAMS" ]; then
   exit 1
 fi
 
-echo "==> [0/5] Regenerate the C header, ABI constants, and C FFI bindings"
+echo "==> [0/4] Regenerate the C header, ABI constants, and C FFI bindings"
 awk '
   BEGIN { print "// Auto-generated from gpui-sys/abi.toml. Do not edit manually." }
   # Grammar: [section] headers or key = non-negative-integer, with whitespace/comments.
@@ -289,177 +250,72 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && \
   echo "WARNING: generated MoonBit bindings changed. Commit the update if intentional."
 fi
 
-# Generate the per-OS moon.pkg files BEFORE `moon check`, not after it (issue
-# #121). They are gitignored generated files, so a stale copy left by an older
-# template — a renamed import, changed cc-flags — makes 1a fail on something
-# this script already knows how to fix, and the fix used to live *after* the
-# gate: every rerun died in the same place until the files were deleted by hand.
-# Writing first also closes a coverage hole: on a cold clone neither file
-# exists, so moon does not treat cmd/main and cmd/roundtrip as packages and 1a
-# silently skips both mains.
-# Link flags stay empty here; step 4 rewrites both with $NATIVE_LIBS.
-write_moon_pkg "$PKG_TMPL" "$MB/cmd/main/moon.pkg" ""
-write_moon_pkg "$RT_PKG_TMPL" "$MB/cmd/roundtrip/moon.pkg" ""
-
-echo "==> [1a/5] MoonBit typecheck"
+echo "==> [1/4] MoonBit typecheck"
 ( cd "$MB" && moon check ) || {
   echo "ERROR: MoonBit compilation failed" >&2
   echo "HINT: if you added a new Rust C export, the C header must be regenerated; run ./build.sh (it regenerates the header before bindgen)." >&2
-  echo "HINT: cmd/{main,roundtrip}/moon.pkg are generated from moon.pkg.$OS_PKG just above; if an import path or link flag looks wrong there, edit the template, not the generated file." >&2
   exit 1
 }
 
-echo "==> [1b/5] MoonBit bootstrap build (native-link failure is expected before Cargo flags)"
-if ! ( cd "$MB" && moon build ) 2>&1 | tee "$BUILD_OUTPUT"; then
-  if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library not found.*gpui_sys|library.*gpui_sys.*not found|${PKG_FN_SUFFIX}" "$BUILD_OUTPUT"; then
-    echo "    (expected bootstrap native-link failure — final link remains strict)"
-  else
-    echo "ERROR: MoonBit build failed for a non-link reason." >&2
-    exit 1
-  fi
-fi
-
-echo "==> [2/5] Extract the real mangled symbol for ${CALLBACK_NAME}"
-# Prefer nm over compiled objects (macOS flow leaves per-pkg .o files). Fall back
-# to scanning the C source that `moonc link-core` generates: the Linux flow
-# compiles+links it in a single cc step, so no .o survives a failed cold link.
-SYM="$(find "$MB/_build/native" -path '*/build/cmd/main/*' -name '*.o' -exec nm {} \; 2>/dev/null \
-        | awk '$(NF-1) == "T" {print $NF}' \
-        | grep -E "${SYM_RE}.*${PKG_FN_SUFFIX}\$" \
-        | sort -u || true)"
-if [ -z "${SYM}" ]; then
-  SYM="$(find "$MB/_build/native" -path '*/build/cmd/main/*' -name 'main.c' \
-          -exec grep -ohE "_M0FP[A-Za-z0-9_]*${PKG_FN_SUFFIX}" {} \; 2>/dev/null \
-          | sort -u || true)"
-fi
-SYM_COUNT="$(printf '%s\n' "$SYM" | sed '/^$/d' | wc -l)"
-if [ "$SYM_COUNT" -ne 1 ]; then
-  echo "ERROR: expected exactly 1 ${CALLBACK_NAME} symbol (…${PKG_FN_SUFFIX}), found $SYM_COUNT." >&2
-  exit 1
-fi
-# The mangled name does not encode types. Validate the actual generated C
-# declaration when it is available (Linux/Windows generate main.c; macOS may not).
-MAIN_C="$(find "$MB/_build/native" -path '*/build/cmd/main/*' -name 'main.c' -print -quit)"
-if [ -n "$MAIN_C" ]; then
-  PROTOTYPES="$(tr '\r\n\t' '   ' < "$MAIN_C" \
-    | grep -oE "int32_t[[:space:]]+${SYM}[[:space:]]*\([^)]*\)" \
-    | sed -E 's/^[^(]*\((.*)\)$/\1/; s/[[:space:]]+//g' \
-    | sed -E 's/int32_t[A-Za-z_][A-Za-z0-9_]*/int32_t/g' \
-    | sort -u || true)"
-  PROTOTYPE_COUNT="$(printf '%s\n' "$PROTOTYPES" | sed '/^$/d' | wc -l)"
-  if [ "$PROTOTYPE_COUNT" -ne 1 ] || [ "$PROTOTYPES" != "$CALLBACK_PARAMS" ]; then
-    echo "ERROR: generated MoonBit callback must be int32_t ${SYM}(${CALLBACK_PARAMS//,/, }); found: ${PROTOTYPES:-none}" >&2
-    exit 1
-  fi
-  echo "    signature : int32_t(${CALLBACK_PARAMS//,/, })"
-else
-  echo "    signature : skipped (generated main.c is unavailable on this platform)"
-fi
-# `#[link_name]` on Mach-O gets one leading underscore added by the linker, so we
-# store the symbol with one underscore stripped. ELF nm output and names taken
-# from the generated C source have no ABI underscore — use them verbatim.
-case "$SYM" in
-  __M0FP*) LINK_NAME="${SYM#_}" ;;
-  *)       LINK_NAME="$SYM" ;;
-esac
-printf '%s\n' "${LINK_NAME}" > "${GSYS}/mb_symbol.txt"
-echo "    nm symbol : ${SYM}"
-echo "    link_name : ${LINK_NAME}  -> ${GSYS}/mb_symbol.txt"
-
-echo "==> [3/5] Build gpui-sys (build.rs reads mb_symbol.txt and generates the extern)"
-( cd "$GSYS" && cargo build --target "$RUST_TARGET" )
-NATIVE_LIBS="$(cd "$GSYS" && CARGO_TERM_COLOR=never cargo rustc --target "$RUST_TARGET" --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
-  | tr -d '\r' \
-  | awk 'BEGIN { esc = sprintf("%c", 27) }
-    { gsub(esc "\\[[0-9;]*m", "") }
-    /native-static-libs:/ && !found {
-      line=$0
-      sub(/^.*native-static-libs:[[:space:]]*/, "", line)
-      gsub(/[[:space:]]+/, " ", line)
-      sub(/^ /, "", line)
-      sub(/ $/, "", line)
-      found=1
-    }
-    END { if (found) print line }')"
-if [ -z "$NATIVE_LIBS" ]; then
-  echo "ERROR: cargo rustc did not report native-static-libs." >&2
-  exit 1
-fi
-NATIVE_LIBS="$(normalize_native_libs "$NATIVE_LIBS")"
-# Belt-and-suspenders: strip -lc (all platforms) and -lm (macOS).
-# Use regex match to tolerate any invisible characters that may survive
-# from cargo output despite ANSI stripping above.
-NATIVE_LIBS="$(printf '%s\n' "$NATIVE_LIBS" | awk -v os="$OS_PKG" '{
-  for (i = 1; i <= NF; i++) {
-    if ($i ~ /-lc/) continue
-    if (os == "macos" && $i ~ /-lm/) continue
-    printf "%s%s", (n++ ? " " : ""), $i
-  }
-  print ""
-}')"
-echo "    native libs: $NATIVE_LIBS"
-# moon's native linker appends -lc (Linux) and -lm (macOS) itself. In
-# environments where the linker does not inherit cc's default search paths
-# (observed on GitHub Actions ubuntu-latest and macos-latest), those implicit
-# flags fail with "cannot find -lc" / "library 'm' not found".
-#
-# moon invokes ld directly (not via cc), so LIBRARY_PATH and compiler default
-# search paths do not apply. Prepend -L into NATIVE_LIBS so it reaches ld
-# through the generated moon.pkg cc-link-flags BEFORE any -l flags.
-case "$OS_PKG" in
-  linux)
-    SYS_LIB_DIR="$(cd "$(dirname "$(cc -print-file-name=libc.so)")" && pwd)"
-    if [ -d "$SYS_LIB_DIR" ]; then
-      NATIVE_LIBS="-L$SYS_LIB_DIR $NATIVE_LIBS"
-      echo "    system lib dir: $SYS_LIB_DIR"
-    fi
-    ;;
-  macos)
-    SDK_LIB_DIR="$(xcrun --show-sdk-path)/usr/lib"
-    if [ -d "$SDK_LIB_DIR" ]; then
-      NATIVE_LIBS="-L$SDK_LIB_DIR $NATIVE_LIBS"
-      echo "    SDK lib dir: $SDK_LIB_DIR"
-    fi
-    # Always create a libm shim: new macOS SDKs may not ship standalone
-    # libm (math lives in libSystem), and even when libm.tbd exists the
-    # linker invoked by moon may not find it through -L alone.
-    if [ -d "$SDK_LIB_DIR" ]; then
-      SHIM_DIR="$(mktemp -d)"
-      if [ -e "$SDK_LIB_DIR/libSystem.tbd" ]; then
-        ln -s "$SDK_LIB_DIR/libSystem.tbd" "$SHIM_DIR/libm.tbd"
-      elif [ -e /usr/lib/libSystem.B.dylib ]; then
-        ln -s /usr/lib/libSystem.B.dylib "$SHIM_DIR/libm.dylib"
-      fi
-      NATIVE_LIBS="-L$SHIM_DIR $NATIVE_LIBS"
-      echo "    libm shim: $SHIM_DIR"
-      ls "$SDK_LIB_DIR"/libm* 2>/dev/null | sed 's/^/      SDK libm: /' || true
-    fi
-    # The io_surface crate links IOSurface but cargo's native-static-libs
-    # does not always report it. Add it explicitly.
-    NATIVE_LIBS="$NATIVE_LIBS -framework IOSurface"
-    ;;
-esac
-rm -f "$RUST_LIB_DIR/libgpui_sys.dylib" \
-      "$RUST_LIB_DIR/libgpui_sys.so" 2>/dev/null || true  # staticlib only; drop any stale dylib/so
-
-echo "==> [4/6] Final MoonBit build (links libgpui_sys.a + resolves the callback)"
-write_moon_pkg "$PKG_TMPL" "$MB/cmd/main/moon.pkg" "$NATIVE_LIBS"
-write_moon_pkg "$RT_PKG_TMPL" "$MB/cmd/roundtrip/moon.pkg" "$NATIVE_LIBS"
-echo "    moon.pkg link flags:"
-grep 'cc-link-flags' "$MB/cmd/main/moon.pkg" | sed 's/^/      /'
-# moon does not track the external libgpui_sys.a, so a gpui-sys-only change would
-# NOT trigger a relink of the executable (it would silently keep a stale exe).
-# Remove the linked outputs so moon re-links against the freshly built .a.
+echo "==> [2/4] MoonBit build (build.py builds gpui-sys and supplies the link flags)"
+# moon does not track the external libgpui_sys.a, so a gpui-sys-only change
+# would NOT trigger a relink of the executables (it would silently keep stale
+# exes). Remove the linked outputs so moon re-links against the fresh .a.
 rm -f "$MB"/_build/native/debug/build/cmd/main/main.exe \
-      "$MB"/_build/native/debug/build/cmd/main/__moonbit_link_core__/main.o \
-      "$MB"/_build/native/debug/build/cmd/roundtrip/roundtrip.exe \
-      "$MB"/_build/native/debug/build/cmd/roundtrip/__moonbit_link_core__/roundtrip.o 2>/dev/null || true
-( cd "$MB" && moon build )
+      "$MB"/_build/native/debug/build/cmd/roundtrip/roundtrip.exe 2>/dev/null || true
+if ! ( cd "$MB" && moon build ) 2>&1 | tee "$BUILD_OUTPUT"; then
+  if grep -Eqi "undefined (reference|symbol)|cannot find .*gpui_sys|library.*gpui_sys|_M0FP" "$BUILD_OUTPUT"; then
+    # Link failure on the callback symbol: the symbol gpui-sys referenced
+    # (gpui-sys/mb_symbol.txt) does not match what the MoonBit toolchain
+    # actually generated. Show the real candidates from the generated C so the
+    # mismatch is diagnosable even if the mangling scheme itself changed
+    # (a suffix-anchored grep would find nothing in that case).
+    echo "ERROR: MoonBit native link failed." >&2
+    if [ -f "$GSYS/mb_symbol.txt" ]; then
+      echo "    expected callback symbol (gpui-sys/mb_symbol.txt): $(cat "$GSYS/mb_symbol.txt")" >&2
+    fi
+    UNRESOLVED="$(grep -Ei "undefined (reference|symbol)" "$BUILD_OUTPUT" \
+        | grep -oE '_M0FP[A-Za-z0-9_]+' | sort -u || true)"
+    if [ -n "$UNRESOLVED" ]; then
+      echo "    unresolved symbols in the link output:" >&2
+      printf '%s\n' "$UNRESOLVED" | sed 's/^/      /' >&2
+    fi
+    CANDIDATES="$(find "$MB/_build/native" -path '*/build/cmd/*' -name '*.c' \
+        -exec grep -ohE '_M0FP[A-Za-z0-9_]+' {} \; 2>/dev/null | sort -u || true)"
+    if [ -n "$CANDIDATES" ] && [ -n "$MODULE_PREFIX" ]; then
+      FILTERED="$(printf '%s\n' "$CANDIDATES" | grep -E "^${MODULE_PREFIX}" || true)"
+      if [ -n "$FILTERED" ]; then
+        CANDIDATES="$FILTERED"
+      fi
+    fi
+    if [ -n "$CANDIDATES" ]; then
+      echo "    mangled symbols found in the generated C (module ${CALLBACK_MODULE:-?}):" >&2
+      printf '%s\n' "$CANDIDATES" | sed 's/^/      /' >&2
+    fi
+    echo "HINT: if the expected symbol is stale, delete gpui-sys/mb_symbol.txt and re-run ./build.sh (build.py recomputes it)." >&2
+    echo "HINT: if the recomputed symbol still mismatches the candidates above, the toolchain's mangling scheme changed; update compute_callback_symbol() in moonbit-bindings/build.py (gpui-sys/build.rs derives the same value)." >&2
+  else
+    echo "ERROR: MoonBit build failed (see output above)." >&2
+  fi
+  exit 1
+fi
 
-echo "==> [5/6] Verify exactly one callback definition in the final binary"
+echo "==> [3/4] Verify the callback link contract in the final binary"
 EXE="$MB/_build/native/debug/build/cmd/main/main.exe"
 if [ ! -f "$EXE" ]; then
   echo "ERROR: final executable not found at $EXE" >&2
+  exit 1
+fi
+# Verify the value actually in mb_symbol.txt, not a recomputation: the file is
+# what gpui-sys/build.rs consumed, and keeping it authoritative preserves the
+# manual-override escape hatch (write the file by hand, build.py leaves it).
+if [ ! -f "$GSYS/mb_symbol.txt" ]; then
+  echo "ERROR: $GSYS/mb_symbol.txt not found after moon build (build.py should have written it)" >&2
+  exit 1
+fi
+LINK_NAME="$(head -n1 "$GSYS/mb_symbol.txt" | tr -d '[:space:]')"
+if [ -z "$LINK_NAME" ]; then
+  echo "ERROR: $GSYS/mb_symbol.txt is empty" >&2
   exit 1
 fi
 case "$OS_PKG" in
@@ -468,12 +324,30 @@ case "$OS_PKG" in
 esac
 CALLBACK_MATCHES="$(nm "$EXE" 2>/dev/null | awk -v symbol="$EXE_SYMBOL" '$(NF-1) == "T" && $NF == symbol { count++ } END { print count + 0 }')"
 if [ "$CALLBACK_MATCHES" -ne 1 ]; then
-  echo "ERROR: expected exactly 1 definition of ${LINK_NAME} in final binary, found ${CALLBACK_MATCHES}" >&2
+  echo "ERROR: expected exactly 1 definition of ${LINK_NAME} (${CALLBACK_NAME}) in final binary, found ${CALLBACK_MATCHES}" >&2
   exit 1
 fi
 echo "    Verified: ${LINK_NAME} is defined exactly once"
+# The mangled name does not encode types. Validate the actual generated C
+# declaration when it is available (Linux generates main.c; macOS may not).
+MAIN_C="$(find "$MB/_build/native" -path '*/build/cmd/main/*' -name 'main.c' -print -quit)"
+if [ -n "$MAIN_C" ]; then
+  PROTOTYPES="$(tr '\r\n\t' '   ' < "$MAIN_C" \
+    | grep -oE "int32_t[[:space:]]+${LINK_NAME}[[:space:]]*\([^)]*\)" \
+    | sed -E 's/^[^(]*\((.*)\)$/\1/; s/[[:space:]]+//g' \
+    | sed -E 's/int32_t[A-Za-z_][A-Za-z0-9_]*/int32_t/g' \
+    | sort -u || true)"
+  PROTOTYPE_COUNT="$(printf '%s\n' "$PROTOTYPES" | sed '/^$/d' | wc -l)"
+  if [ "$PROTOTYPE_COUNT" -ne 1 ] || [ "$PROTOTYPES" != "$CALLBACK_PARAMS" ]; then
+    echo "ERROR: generated MoonBit callback must be int32_t ${LINK_NAME}(${CALLBACK_PARAMS//,/, }); found: ${PROTOTYPES:-none}" >&2
+    exit 1
+  fi
+  echo "    signature : int32_t(${CALLBACK_PARAMS//,/, })"
+else
+  echo "    signature : skipped (generated main.c is unavailable on this platform)"
+fi
 
-echo "==> [6/6] Run headless round-trip test (issue #34)"
+echo "==> [4/4] Run headless round-trip test (issue #34)"
 RT_EXE="$MB/_build/native/debug/build/cmd/roundtrip/roundtrip.exe"
 if [ ! -f "$RT_EXE" ]; then
   echo "ERROR: roundtrip executable not found at $RT_EXE" >&2
@@ -485,7 +359,7 @@ case "$OS_PKG" in
 esac
 
 if [ "$OS_PKG" = macos ] && [ "$BUNDLE" != no ]; then
-  echo "==> [7/7] Bundle Runner.app (keyboard delivery needs the bundle)"
+  echo "==> Bundle Runner.app (keyboard delivery needs the bundle)"
   "$ROOT/bundle.sh"
 fi
 
@@ -500,8 +374,9 @@ case "$OS_PKG" in
     ;;
   linux) echo 'Done. Run:  (cd moonbit-bindings && env -u WAYLAND_DISPLAY LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug/build/cmd/main/main.exe)' ;;
 esac
-# cmd/main is the minimal runner the driver needs (it is where the callback
-# symbol is extracted from). The demo apps are separate modules under examples/
-# that consume this one the way a third party would (issue #125).
+# cmd/main is the minimal runner the driver needs (a real app that registers a
+# dispatch and links the staticlib end to end). The demo apps are separate
+# modules under examples/ that consume this one the way a third party would
+# (issue #125).
 echo "Demos:      (cd examples/counter && moon build && ./_build/native/debug/build/main/main.exe)"
-echo "            examples/hello and examples/stream build and run the same way." 
+echo "            examples/hello and examples/stream build and run the same way."

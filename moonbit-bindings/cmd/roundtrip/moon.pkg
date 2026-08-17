@@ -1,0 +1,10 @@
+import {
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/encoding/utf8",
+  "nakake/gpui-bindings",
+  "nakake/gpui-bindings/link",
+}
+
+pkgtype(kind: "executable")
+
+warnings = "-29"

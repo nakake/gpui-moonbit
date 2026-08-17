@@ -336,7 +336,7 @@
       <text class="lbl" x="862" y="118" text-anchor="middle">build.rs</text>
       <text class="lbl" x="644" y="248" text-anchor="start">cbindgen</text>
       <text class="lbl" x="644" y="458" text-anchor="start">FFI import を生成</text>
-      <text class="lbl" x="232" y="352" text-anchor="start">nm でシンボル抽出</text>
+      <text class="lbl" x="232" y="352" text-anchor="start">build.py が計算して書出</text>
       <text class="lbl" x="392" y="352" text-anchor="end">#[link_name] 注入</text>
       <text class="lbl" x="866" y="316" text-anchor="start">cargo build</text>
       <text class="lbl" x="930" y="606" text-anchor="middle">静的リンク</text>
@@ -366,10 +366,10 @@
     <div class="t">gpui-bindings-ffi.mbt（生成）</div><div class="d">手編集禁止。追跡対象の生成ソース</div></div>
 
   <div class="node mb" style="left:60px;top:266px;width:310px;height:62px">
-    <div class="t">moon build（コールド）</div><div class="d">まだ Rust ライブラリが無いのでリンクは失敗する想定</div></div>
+    <div class="t">moon build（prebuild 起動）</div><div class="d">build.py が gpui-sys をビルドしリンクフラグを供給する</div></div>
 
   <div class="node gn" style="left:60px;top:372px;width:310px;height:62px">
-    <div class="t">mb_symbol.txt（生成・非追跡）</div><div class="d">dispatch_entry のマングル名をちょうど 1 つ抽出（suffix は abi.toml の [callback] name から導出）</div></div>
+    <div class="t">mb_symbol.txt（生成・非追跡）</div><div class="d">dispatch_entry のマングル名。abi.toml の [callback] から build.py が決定的に計算する（build.rs も同値を自己計算）</div></div>
 
   <div class="node rs" style="left:890px;top:372px;width:310px;height:70px">
     <div class="t">cargo → libgpui_sys.a</div><div class="d">staticlib。未解決の <code>mb_dispatch</code> 参照を残したまま出力される</div></div>
@@ -394,9 +394,9 @@
 
 <h3>なぜ素の <code>cargo build</code> / <code>moon build</code> ではダメなのか</h3>
 <ul>
-  <li>素の <code>cargo build</code> には、ローカル生成される <code>mb_symbol.txt</code> が無い（＝コールバックの extern を出せない）</li>
+  <li>素の <code>cargo build</code> は Rust 側しか作らない（MoonBit の実行ファイルは出来ない）</li>
   <li>素の <code>moon build</code> は、MoonBit が<b>外部静的アーカイブの変更を追跡しない</b>ため古い実行ファイルを残すことがある</li>
-  <li>だから必ずルートの <code>build.sh</code> / <code>build.ps1</code> を使う。ドライバは前提チェック → 生成 → ビルド → <b>リンケージ検証</b>（コールバック定義がちょうど 1 つ）→ 往復テスト、まで一気にやる</li>
+  <li>だから必ずルートの <code>build.sh</code> / <code>build.ps1</code> を使う。ドライバは前提チェック → 生成 → <code>moon check</code> → ビルド → <b>リンケージ検証</b>（コールバック定義がちょうど 1 つ + C プロトタイプ照合）→ 往復テスト、まで一気にやる</li>
 </ul>
 
 <div class="note">

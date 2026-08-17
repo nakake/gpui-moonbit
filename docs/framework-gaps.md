@@ -16,7 +16,7 @@
 |---|---|---|---|
 | ABI 不一致・stale/wrong callback 選択 | P0 | ✅ `abi.toml` からの定数生成 + drift guard + 最終バイナリの nm 検証 | — |
 | C export の panic-safe 化・handle 検証 | P0 | ✅ status code 体系（`GPUI_STATUS_*`）・checked access・atomic commit | — |
-| 絶対ビルドパスの除去 | P0 | ✅ 生成 `moon.pkg` + `native-static-libs` 自動取得・正規化 | — |
+| 絶対ビルドパスの除去 | P0 | ✅ prebuild の LinkConfig + `native-static-libs` 自動取得・正規化 | — |
 | builder transaction と明示 root | P1 | ✅ コマンドバッファ + `OP_SET_ROOT` + view 別 `VIEWS` | #5 |
 | property-per-call → バッチ化ノード記述 | P1 | ✅ コマンドバッファ（1 FFI でツリー全体） | #5 |
 | バージョン付きイベント envelope | P1 | ✅ slot 0 = `ABI_VERSION`、`EVENT_TEXT` は token+copy、named key 対応 | #39 |

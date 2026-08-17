@@ -8,7 +8,7 @@
 
 ### 実装済み
 - retained UI と MoonBit 側の Counter (`-1` / `Reset` / `+1` / `+10`)。
-- click/key callback。コールバック ABI は固定の `dispatch_entry(version, kind, view, data_a, data_b)`（ライブラリ所有、5 × `i32` のバージョニング済みイベントエンベロープ、`ABI_VERSION` = 4）で、実マングル表記のみを build driver が自動検出する。アプリの dispatch は消費者が書いて `register_dispatch` で登録する（RFC 0004）。
+- click/key callback。コールバック ABI は固定の `dispatch_entry(version, kind, view, data_a, data_b)`（ライブラリ所有、5 × `i32` のバージョニング済みイベントエンベロープ、`ABI_VERSION` = 4）で、実マングル表記は `abi.toml` から決定的に計算し、build driver がビルド後に検証する（#126）。アプリの dispatch は消費者が書いて `register_dispatch` で登録する（RFC 0004）。
 - `abi.toml` からの共有 ABI 定数生成、C ヘッダーからの MoonBit FFI 生成・検証、および macOS/Linux/Windows の build 経路。
 - Windows と WSL/Linux は 2026-07-19 に手動検証済み。macOS は 2026-07-23 に再検証済み（`build.sh` のバンドル統合後、ウィンドウ表示と `j`/`k`/`r` キー操作を実機確認）。
 - アクティブな root CI（`.github/workflows/ci.yml`）: ubuntu/macos/windows の 3 OS でコールドビルド・テスト・Rust 単独変更後の再ビルドを自動検証（#33、`0f5ce3b`）。
@@ -119,7 +119,7 @@ MoonBit から GPUI を呼び出して、ネイティブ GPU アクセラレー�
   - 対話ロジックは MoonBit 側 (`app` パッケージ) に実装
   - **イベントは単一 dispatch + スカラ payload** (`dispatch(kind, id, a, b)`、当時の設計。現行は 5 スロットのバージョニング済みエンベロープ `dispatch(version, kind, view, data_a, data_b)`、`ABI_VERSION` = 4、#49): FFI 表面を1シンボルに固定し、種別/ボタンは MoonBit 側だけで拡張。`Event` enum で型付き分岐
   - **クリックカウンタ (複数ボタン)**: `-1 / Reset / +1 / +10` の4ボタン。ボタン追加は MoonBit のみ(Rust/FFI 変更なし)
-  - **旧説明の注記**: `build.sh` は MoonBit のマングル名を `nm` で抽出し、`build.rs` が `#[link_name]` extern を生成する。現行で自動追従するのは実マングル表記だけであり、改名・引数数・型・ABI 方針には自動追従しない。
+  - **旧説明の注記**: 当時の `build.sh` は MoonBit のマングル名を `nm` で抽出し、`build.rs` がそれを読んで `#[link_name]` extern を生成していた（現行は `build.py` / `build.rs` が `abi.toml` から計算し、`build.sh` は事後検証のみ。#126）。
   - 低レベル仕様の観測は `moonbit-native-notes.md` に蓄積
 - 2026-07-16: **キーイベント対応 完成!** — k / j / r で +1 / -1 / reset(実機確認済み)
   - `FfiView` に `FocusHandle`、ルートに `track_focus` + `on_key_down`、**ビュー構築時に `window.focus`**(render 内フォーカスでは OS の first-responder が立たない)

@@ -224,7 +224,7 @@ env -u WAYLAND_DISPLAY LD_LIBRARY_PATH=$PWD/../.linux-libs ./_build/native/debug
 
 ## 4. build driver が preflight で終了する
 
-root の `build.sh` / `build.ps1` は、生成済み ABI や `moon.pkg` を書き換える前に native host/target と必要ツールを検査する。対応範囲は macOS arm64・x86_64、Linux x86_64、Windows MSVC x64 で、cross compile は対象外。
+root の `build.sh` / `build.ps1` は、生成済み ABI や C ヘッダーを書き換える前に native host/target と必要ツールを検査する。対応範囲は macOS arm64・x86_64、Linux x86_64、Windows MSVC x64 で、cross compile は対象外。
 
 まず driver が表示する `moon` / `cargo` / `rustc` のバージョンと、最初の `ERROR` を確認する。最低バージョンは固定していないため、version 表示自体は診断情報であり、コマンド不在・architecture 不一致・compiler/linker 不在が停止条件になる。
 

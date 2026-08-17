@@ -15,7 +15,7 @@ native build のみ対応です。対応 OS/architecture は macOS arm64・x86_6
 
 ## クイックスタート
 
-このディレクトリ単独の `moon build` は完全な最終 build 手順ではありません。Rust static library、OS 別 link flags、Rust→MoonBit callback symbol はリポジトリ root の build driver が準備します。
+このディレクトリ単独の `moon build` でも prebuild（`build.py`）が Rust static library・OS 別 link flags・Rust→MoonBit callback symbol を準備しますが、それだけでは完全な最終 build 手順ではありません。生成物（ABI 定数 / C ヘッダー / FFI 宣言）の再生成、Rust static library 更新後の強制再リンク、リンク契約の検証はリポジトリ root の build driver が行います。
 
 ```bash
 git clone https://github.com/nakake/gpui-moonbit.git

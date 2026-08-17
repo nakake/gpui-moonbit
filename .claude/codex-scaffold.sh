@@ -4,8 +4,6 @@
 set -euo pipefail
 WT="$1"; REPO="$2"
 
-# moon.pkg is a build product; place the Linux template so moon check/build works
-cp "$WT/moonbit-bindings/cmd/main/moon.pkg.linux" "$WT/moonbit-bindings/cmd/main/moon.pkg"
 
 # Share the heavy cargo cache (5G+) and runtime libs from the main checkout.
 # Concurrent cargo builds are safe (cargo file-locks the target dir).

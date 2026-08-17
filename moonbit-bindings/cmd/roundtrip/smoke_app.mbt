@@ -154,7 +154,9 @@ fn app_dispatch(
       // updates the now-present label in place.
       match
         @nakake/gpui-bindings.update_text(
-          v, COUNT_KEY, count_label(count.get(store)),
+          v,
+          COUNT_KEY,
+          count_label(count.get(store)),
         ) {
         Ok(_) => Ok(())
         Err(_) => app_build_tree(v)

@@ -6,6 +6,7 @@
 // Normal completion = pass (exit 0); abort = non-zero exit.
 
 // Direct FFI declarations (not in root package → moon test unaffected).
+
 ///|
 #borrow(ptr)
 extern "C" fn gpui_build_tree_ffi(view : Int, ptr : Bytes, len : Int) -> Int = "gpui_build_tree"
