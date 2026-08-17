@@ -92,7 +92,7 @@ registry 消費(#132)は build.py に「sibling が無い環境で gpui-sys を�
 ### PR-0: 本 RFC + D0 観測
 §4 のとおり完了。`docs/rfc/0004-dispatch-registration.md`(0005 への参照)と `docs/roadmap.md` も同期。
 
-### PR-A(#126): cmd の prebuild + link import 移行
+### PR-A(#126): cmd の prebuild + link import 移行 — 実装済み(PR #135、3 OS CI 緑 2026-08-17)
 - 追加コミット: `cmd/main/moon.pkg`、`cmd/roundtrip/moon.pkg`(現行 toolchain 正規形、D5)
 - 削除: per-OS テンプレート 6 ファイル、`.gitignore` の該当 2 行
 - `build.sh` / `build.ps1`: D6 の形へ縮約(事後検証は D5 の OS 別仕様。検証値は実ファイル `mb_symbol.txt` を読む)
@@ -107,6 +107,29 @@ registry 消費(#132)は build.py に「sibling が無い環境で gpui-sys を�
 - `ci.yml`: D4 の 2 ステップ + 再リンク probe(Linux)
 - docs: README(キャッシュ位置・容量・削除手順・初回コールドビルド警告・異バージョン併用時の再ビルド往復)、troubleshooting、本 RFC 実測追記、CHANGELOG
 - 検証: (1) `GPUI_BINDINGS_ROUTE=wrapper-path` でスパイク再現 PASS + キャッシュ位置・`CARGO_TARGET_DIR` 尊重確認 (2) route 切替後の wrapper Cargo.toml 書き換え + 同時 2 ビルド無競合の実証 (3) `cargo package` → 展開 → `chmod -R a-w` → ビルド成功 + `cargo package --list` で abi.toml・include/gpui_sys.h・src/abi_constants.rs 含有 / mb_symbol.txt 非含有 (4) 3 OS CI で D4-(1) 緑 (5) 再リンク probe の結果記録
+
+#### PR-B 実測(2026-08-17、Linux x86_64)
+
+- **wrapper-path e2e PASS**: `GPUI_BINDINGS_ROUTE=wrapper-path` で tests/consumer をビルド・実行(イベント注入 8 ステップ、5 rebuilds)。リンクは `-lgpui_sys_wrapper`、final exe に `dispatch_entry` シンボルが exactly-once(スパイクの恒久化)
+- **キャッシュ配置**: wrapper は `~/.cache/nakake-gpui-bindings/wrapper/0.1.0/`(Cargo.toml + src/lib.rs の 2 ファイル)、cargo target は `CARGO_TARGET_DIR` 未設定時 `~/.cache/nakake-gpui-bindings/target`。`CARGO_TARGET_DIR` 指定時はそれを尊重(gpui-sys/target 共有で warm ビルド確認)
+- **route 切替**: wrapper-path → wrapper-registry で wrapper の Cargo.toml が原子的に書き換わる(`gpui-sys = "0.1.0"`)。未 publish のため cargo は「no matching package named `gpui-sys`」で停止 — 想定どおりの pre-publish 挙動で、この同一コマンドが PR-C ゲート 1 後の実 registry e2e になる
+- **並行ビルド**: wrapper dir + target dir を共有する 2 つの `moon build`(tests/consumer と examples/hello)を同時実行して双方成功(cargo の target ロック + 原子的 rename)
+- **読み取り専用の梱包済み crate 消費 PASS**(D4-(2) のローカル前倒し): `cargo package --no-verify` → 展開 → `chmod -R a-w` → `GPUI_BINDINGS_GPUI_SYS_PATH` で wrapper-path ビルド → consumer 実行 PASS。`cargo package --list` で abi.toml・include/gpui_sys.h・src/abi_constants.rs の同梱と mb_symbol.txt の非同梱を確認。§2 の「build.rs が registry checkout で panic し得る」潜在バグは build.rs の書き込み冪等化(内容一致で skip、書き込み不能は cargo:warning で続行)で閉じ、このテストが再発を封じる
+- **pin drift assert**: build.py の `GPUI_SYS_VERSION` を一時的に 0.2.0 へ変えると build.sh preflight が即エラー、0.1.0 で緑(negative/positive 両方向を実測)
+- checkout 経路は無回帰(tests/consumer・build.sh フル PASS)
+
+#### PR-B レビュー反映(2026-08-17、/code-review 8 観点 + critic 反証)
+
+critic の必須 3 件 + 推奨/finder 指摘を反映し、D1/D2/D4 を次のとおり精緻化した:
+
+1. **wrapper の置き場は依存元ごとにバケット化**(D2 精緻化): `wrapper/<pin>/<bucket>/`。bucket = route 接頭辞 + 依存行の sha256 先頭 12 桁。同一 dir を registry / 各 path 依存で共有すると、切替のたびに Cargo.toml 書き換え → cargo の path-identity fingerprint 無効化で gpui-sys 再ビルドが起き(CI の D4-(1)→(2) で毎回)、検証専用 env の並行異 route ビルドに TOCTOU もあった。分離で両方消える。
+2. **wrapper-path は依存先の Cargo.lock をシード**(D4 精緻化、critic 必須 2): wrapper は lockfile を持たず gpui と約 740 推移依存を毎回最新解決するため、上流リリース 1 回で「rust-cache に保存されない cold build を毎 CI 実行で払い、timeout 超過で全 PR ブロック」になり得た。build.py が依存先 gpui-sys/Cargo.lock を wrapper へコピーし(`.seeded-from` マーカーで lock 変更時のみ再シード)、CI/検証の解決を repo lock に固定する。**wrapper-registry(実消費)は lock 供給源が無いため従来どおり浮動**(割り切りは不変。troubleshooting に反映)。
+3. **sibling 判定は realpath**(critic 必須 3): normpath の字句的 `..` 解決は symlink 経由の path 依存で実在する sibling を不在と誤判定し、fail-loud だった旧挙動を「無言で crates.io を使う」に変えてしまう(critic が実測再現)。realpath で実体解決に変更。auto 判定が registry 経路へ落ちる際は stderr に理由と復帰手段(`GPUI_BINDINGS_ROUTE=checkout`)を明示するログも追加(壊れた checkout のマスキング対策)。
+4. **ci.yml の `! grep` は set -e 下で死んでいた**(critic 必須 1、実測再現済み): mb_symbol.txt 非同梱アサートが常に素通りだった。明示的な if/exit 1 に修正。`cargo package` には `--allow-dirty` を付与(このステップは梱包構造の検証であり git 衛生は別段の守備範囲。生成物ドリフトで無関係な赤にしない)。
+5. **caret 判定は build.py `--check-pin` に一本化**: bash/PowerShell の二重実装は cargo の `^0.0.z`(= 完全一致)を誤許容しており、将来の意味論修正も片側に漏れる。Python 1 実装を両ドライバが呼ぶ。
+6. **build.rs の write_generated は「書き込み可能 dir での書き込み失敗」を fail-loud に**: 警告続行は読み取り専用 checkout(内容一致が通常)限定。書き込み可能なのに失敗した場合は stale な生成物での静かなビルド = 言語間 ABI 不一致(ビルド時シグナルなし)につながるため panic を維持。親 dir の create_dir_all も cbindgen 従来挙動に合わせて復元。
+7. **cargo 成功時も build.rs の warning を prebuild ログへ転送**(critic 推奨): 冪等化ガードレールの cargo:warning が consumer に見えなかった。
+8. **mb_symbol.txt の rerun-if-changed はファイル存在時のみ発行**: 不在パスの登録は build script を常時 dirty にし、registry 消費の warm ビルドに毎回 build.rs 実行(cbindgen 解析込み)の税を課していた。
 
 ### PR-C(#132 中盤): publish 準備 → 【ユーザゲート 1】crates.io へ gpui-sys 0.1.0
 - 前提条件: §4 の D0 観測で赤信号なし(満了)
@@ -136,7 +159,7 @@ registry 消費(#132)は build.py に「sibling が無い環境で gpui-sys を�
 
 ## 7. 未決事項
 
-1. **Windows の main.obj 存否**(D5-(i) の Windows 検証仕様を左右)— PR-A の CI で確定する。
+1. ~~**Windows の main.obj 存否**~~ **確定(2026-08-17、PR-A の windows-latest CI)**: prebuild 経路でも `main.obj` は残る。したがって D5-(i) Windows 仕様は強い側 = 「main.obj の定義 exactly-once + gpui_sys.lib の UNDEF 参照 exactly-once + リンク成功」で運用される(build.ps1 は main.obj が無い環境でも UNDEF + リンク成功へ自動縮退する適応分岐を保持)。cold build と Rust-only rebuild の両方で全検証 PASS。
 2. **consumer の Rust-only 変更後再リンク**(stale exe か否か)— PR-B の CI probe で確定する。
 3. **registry 消費者ビルドにおける依存側 cmd(is-main)の扱い**(§4-1)— PR-A で tracked 化した moon.pkg が tarball に入った状態での消費者ビルド挙動を確認する。問題があれば cmd の tarball 除外(moon package の除外機構の有無調査)か cmd の設計見直しをこの RFC に追記する。
 4. **mooncakes 0.0.1 公開の最終要否** — ユーザゲート 2(§5 PR-D)。既定の推奨は省略。

@@ -118,6 +118,12 @@ esac
 moon --version
 cargo --version
 rustc --version
+# RFC 0005 D1: build.py pins gpui-sys for the wrapper (registry) routes with a
+# cargo caret requirement. The comparison lives in build.py (--check-pin, the
+# single implementation both drivers share); it exits non-zero on drift.
+if ! python3 "$MB/build.py" --check-pin; then
+  exit 1
+fi
 if command -v rustup >/dev/null 2>&1; then
   rustup show active-toolchain
 fi

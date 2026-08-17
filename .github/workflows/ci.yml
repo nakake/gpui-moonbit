@@ -19,7 +19,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # 30 was the pre-RFC-0005 budget; the wrapper-route consumer steps add a
+    # few minutes of cargo work per OS (warm via the shared target dir).
+    timeout-minutes: 40
 
     env:
       # 90% of the bytes in a dev-profile rlib here are `.debug*` sections
@@ -175,6 +177,98 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'moon build failed' }
           & .\_build\native\debug\build\main\main.exe
           if ($LASTEXITCODE -ne 0) { throw 'consumer smoke test failed' }
+
+      # RFC 0005 D4-(1): the same consumer, but through the wrapper route
+      # build.py uses for registry consumption (a generated staticlib wrapper
+      # crate over gpui-sys). The dependency form (path here, crates.io for
+      # real consumers) does not affect codegen or linking, so this is the
+      # standing pre-publish verification of the wrapper mechanism on all
+      # three OSes. CARGO_TARGET_DIR points into the rust-cache'd gpui-sys
+      # target so the wrapper build is warm.
+      - name: Consumer smoke test, wrapper-path route (Unix)
+        if: runner.os != 'Windows'
+        working-directory: tests/consumer
+        env:
+          GPUI_BINDINGS_ROUTE: wrapper-path
+          CARGO_TARGET_DIR: ${{ github.workspace }}/gpui-sys/target
+        run: |
+          rm -f _build/native/debug/build/main/main.exe
+          moon build
+          ./_build/native/debug/build/main/main.exe
+
+      - name: Consumer smoke test, wrapper-path route (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: tests/consumer
+        env:
+          GPUI_BINDINGS_ROUTE: wrapper-path
+          CARGO_TARGET_DIR: ${{ github.workspace }}\gpui-sys\target
+        run: |
+          Remove-Item -Force -ErrorAction SilentlyContinue _build\native\debug\build\main\main.exe
+          moon build
+          if ($LASTEXITCODE -ne 0) { throw 'moon build failed (wrapper-path)' }
+          & .\_build\native\debug\build\main\main.exe
+          if ($LASTEXITCODE -ne 0) { throw 'consumer smoke test failed (wrapper-path)' }
+
+      # RFC 0005 D4-(2): consume gpui-sys from the exact file set `cargo
+      # package` would publish, made read-only — the closest approximation of
+      # a crates.io registry checkout without publishing. Catches
+      # build-script-writes-to-the-crate-dir bugs that `cargo publish`'s own
+      # verify build does not (it runs in a writable copy).
+      - name: Packaged gpui-sys consumption, read-only (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          # --allow-dirty: this step tests structural consumption of the
+          # packaged file set, not git hygiene (generation drift is guarded
+          # by build.sh's diff warning and the pre-commit hook); without it a
+          # future toolchain-induced regeneration diff would fail here with a
+          # misleading error.
+          (cd gpui-sys && cargo package --no-verify --allow-dirty)
+          (cd gpui-sys && cargo package --list --allow-dirty) > /tmp/crate-list.txt
+          grep -qx 'abi.toml' /tmp/crate-list.txt
+          grep -qx 'include/gpui_sys.h' /tmp/crate-list.txt
+          grep -qx 'src/abi_constants.rs' /tmp/crate-list.txt
+          # NOTE: `! grep` alone is dead under set -e (a negated pipeline
+          # never triggers errexit) — gate explicitly.
+          if grep -qx 'mb_symbol.txt' /tmp/crate-list.txt; then
+            echo "ERROR: mb_symbol.txt must not be part of the published crate" >&2
+            exit 1
+          fi
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' gpui-sys/Cargo.toml | head -n1)
+          mkdir -p /tmp/pkgtest
+          tar -xzf "gpui-sys/target/package/gpui-sys-$VERSION.crate" -C /tmp/pkgtest
+          chmod -R a-w "/tmp/pkgtest/gpui-sys-$VERSION"
+          rm -f tests/consumer/_build/native/debug/build/main/main.exe
+          (cd tests/consumer && \
+            GPUI_BINDINGS_ROUTE=wrapper-path \
+            GPUI_BINDINGS_GPUI_SYS_PATH="/tmp/pkgtest/gpui-sys-$VERSION" \
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/gpui-sys/target" moon build)
+          tests/consumer/_build/native/debug/build/main/main.exe
+          chmod -R u+w /tmp/pkgtest
+
+      # RFC 0005 D6: does a consumer's `moon build` relink after a Rust-only
+      # change (the driver-side rm is cmd-only)? Probe, don't gate: a stale
+      # exe here is a documented upstream limitation, not a regression in
+      # this repo, so report it as a warning annotation.
+      - name: Consumer relink probe after Rust-only change (Linux)
+        if: runner.os == 'Linux'
+        working-directory: tests/consumer
+        run: |
+          set -euo pipefail
+          exe=_build/native/debug/build/main/main.exe
+          rm -f "$exe"
+          moon build
+          before=$(stat -c %Y "$exe")
+          sleep 1
+          touch ../../gpui-sys/src/lib.rs
+          moon build
+          after=$(stat -c %Y "$exe")
+          if [ "$after" -eq "$before" ]; then
+            echo "::warning title=consumer relink probe::consumer exe was NOT relinked after a Rust-only change (stale-exe risk, RFC 0005 D6)"
+          else
+            echo "relink probe: exe was relinked after the Rust-only change"
+          fi
 
       # The examples are separate modules that path-depend on the library
       # (#125, RFC 0004), so building them is the standing regression test for

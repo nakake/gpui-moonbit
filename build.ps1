@@ -54,6 +54,11 @@ if ($clBanner -notmatch '(?i)\bfor x64\b') {
 & moon --version
 & cargo --version
 & rustc --version
+# RFC 0005 D1: build.py pins gpui-sys for the wrapper (registry) routes with a
+# cargo caret requirement. The comparison lives in build.py (--check-pin, the
+# single implementation both drivers share); it exits non-zero on drift.
+cmd /c "python `"$MB\build.py`" --check-pin 2>&1" | Out-Host
+if ($LASTEXITCODE -ne 0) { throw 'gpui-sys version pin drift (see message above)' }
 if (Get-Command rustup -ErrorAction SilentlyContinue) {
   & rustup show active-toolchain
 }

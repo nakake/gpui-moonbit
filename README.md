@@ -125,6 +125,12 @@ fn main {
 
 動く実例は `examples/counter/`（アプリ本体 + main の 2 パッケージ構成）と `tests/consumer/` です。
 
+### registry 消費と wrapper キャッシュ
+
+mooncakes からの registry 依存（`.mooncakes/` への展開）にはモジュールの隣に `gpui-sys/` が無いため、prebuild（`moonbit-bindings/build.py`）は sibling の有無で消費経路を自動判定し、無い場合はユーザキャッシュに wrapper crate（`extern crate gpui_sys;` だけの staticlib で、crates.io の `gpui-sys` に依存する）を生成してビルドします（#132、[RFC 0005](docs/rfc/0005-build-driver-redesign.md)）。このリポジトリ・`examples/`・`tests/consumer` はいずれも sibling のある経路なので挙動は変わりません。`gpui-sys` は crates.io 未公開のため、wrapper 経路が実際に使えるのは公開後です。
+
+wrapper と cargo 成果物は OS 慣例のユーザキャッシュに置かれます。初回は gpui の全依存のコールドビルドになるため数十分かかり（ネットワーク必須）、容量は約 1.2 GB で、丸ごと削除して構いません。キャッシュの正確な位置（3 OS）と削除手順は [`moonbit-bindings/README.md`](moonbit-bindings/README.md) の「registry 消費（wrapper 経路、#132）」節が正本です（[`docs/troubleshooting.md`](docs/troubleshooting.md) §5 にも対処付きで再掲）。
+
 ## FFI と実行モデル
 
 MoonBit は Rust 側に retained node tree を組み立て、GPUI が描画します。ツリーは **コマンドバッファ**（length-delimited な opcode ストリーム）として記述され、`build_tree(view, cb)` 1 回の FFI 呼び出しで送信・コミットされます（issue #5 で property-per-call から集約）。opcode と `BUFFER_VERSION` は `gpui-sys/abi.toml` から両言語へ生成され、drift guard テストが食い違いを検出します。クリック・キー・テキストイベントは Rust から MoonBit の `dispatch_entry(version, kind, view, data_a, data_b)` に戻り、そこから登録済みのアプリの dispatch へ委譲されます。`EVENT_CLICK` は `(4, 1, view, click_id, 0)`、`EVENT_KEY` は `(4, 2, view, codepoint, mods)`、`EVENT_TEXT` は `(4, 3, view, token, byte_len)`、`EVENT_NAMED_KEY` は `(4, 4, view, named_key_id, mods)` を送り（Enter/Escape/矢印などの名前付きキー）、MoonBit は `EVENT_TEXT` のペイロードを `gpui_event_copy_text` でコピーします。callback は状態が変わった場合に `1`、変わらない場合に `0` を返し、`1` のときだけ tree 全体を再構築して Rust が `cx.notify()` を呼びます。未知のイベントや reset 済みの値を再度 reset する操作では再描画しません。
