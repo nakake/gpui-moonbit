@@ -96,7 +96,7 @@ pub fn register_dispatch(f : (Int, Int, Int, Int, Int) -> Int) -> Unit
 
 1. **tests/consumer の昇格**: Counter import を廃し、自前の最小アプリ(state + dispatch)を register → `dispatch_entry` 経由でイベントを流す → 自前 state の遷移を assert。3 OS CI で実行し、「消費者がアプリを書ける」ことを smoke でなく実証する。
 2. **DCE リンクテスト**: §3.4(consumer で `_keep` なしリンク)。
-3. **registry 依存スパイク(並行)**: 0.0.x を mooncakes へ試験公開し、`.mooncakes/` にフェッチされた依存でも prebuild(`--moonbit-unstable-prebuild`)が走るかを確認する。実績は path 依存のみのため、公開段階で設計に跳ね返る前に潰す。結果は本 RFC に追記する。
+3. **registry 依存スパイク(並行)**: 0.0.x を mooncakes へ試験公開し、`.mooncakes/` にフェッチされた依存でも prebuild(`--moonbit-unstable-prebuild`)が走るかを確認する。実績は path 依存のみのため、公開段階で設計に跳ね返る前に潰す。結果は本 RFC に追記する。→ **YES で決着(2026-08-17)**: 公開なしの手置きシミュレーション(tarball + ローカル index エントリ)で、prebuild は `.mooncakes/` 展開から起動することを実測確認した([RFC 0005 §4](0005-build-driver-redesign.md) D0 観測)。試験公開自体は不要となり、実施要否はユーザゲート 2(RFC 0005 PR-D)の判断に委ねた。
 
 ### 6-3 の結果(2026-08-06)
 

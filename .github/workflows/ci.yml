@@ -247,6 +247,54 @@ jobs:
           tests/consumer/_build/native/debug/build/main/main.exe
           chmod -R u+w /tmp/pkgtest
 
+      # RFC 0005 PR-D: the real registry route — the consumer built against
+      # gpui-sys resolved from crates.io. Guarded: when the pinned version is
+      # not published (yet), skip with a warning instead of failing, so a
+      # version-bump PR is never deadlocked on its own unpublished pin
+      # (publish-before-merge is the documented order; this guard is the
+      # safety net). The sparse index (index.crates.io) is a static CDN, so
+      # no API rate limits apply.
+      - name: Consumer smoke test, wrapper-registry route (Unix)
+        if: runner.os != 'Windows'
+        working-directory: tests/consumer
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/gpui-sys/target
+        run: |
+          set -euo pipefail
+          PIN=$(sed -n 's/^GPUI_SYS_VERSION = "\(.*\)"$/\1/p' ../../moonbit-bindings/build.py)
+          if ! curl -fsS "https://index.crates.io/gp/ui/gpui-sys" 2>/dev/null | grep -q "\"vers\":\"$PIN\""; then
+            echo "::warning title=wrapper-registry skipped::gpui-sys $PIN is not on crates.io (yet); skipping the registry-route e2e"
+            exit 0
+          fi
+          rm -f _build/native/debug/build/main/main.exe
+          GPUI_BINDINGS_ROUTE=wrapper-registry moon build
+          ./_build/native/debug/build/main/main.exe
+
+      - name: Consumer smoke test, wrapper-registry route (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: tests/consumer
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\gpui-sys\target
+        run: |
+          $pinMatch = Select-String -Path ..\..\moonbit-bindings\build.py -Pattern '^GPUI_SYS_VERSION = "(.*)"$'
+          $pin = $pinMatch.Matches[0].Groups[1].Value
+          $published = $false
+          try {
+            $index = (Invoke-WebRequest -UseBasicParsing 'https://index.crates.io/gp/ui/gpui-sys').Content
+            if ($index -match ('"vers":"' + [regex]::Escape($pin) + '"')) { $published = $true }
+          } catch { $published = $false }
+          if (-not $published) {
+            Write-Host "::warning title=wrapper-registry skipped::gpui-sys $pin is not on crates.io (yet); skipping the registry-route e2e"
+            exit 0
+          }
+          Remove-Item -Force -ErrorAction SilentlyContinue _build\native\debug\build\main\main.exe
+          $env:GPUI_BINDINGS_ROUTE = 'wrapper-registry'
+          moon build
+          if ($LASTEXITCODE -ne 0) { throw 'moon build failed (wrapper-registry)' }
+          & .\_build\native\debug\build\main\main.exe
+          if ($LASTEXITCODE -ne 0) { throw 'consumer smoke test failed (wrapper-registry)' }
+
       # RFC 0005 D6: does a consumer's `moon build` relink after a Rust-only
       # change (the driver-side rm is cmd-only)? Probe, don't gate: a stale
       # exe here is a documented upstream limitation, not a regression in

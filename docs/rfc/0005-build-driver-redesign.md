@@ -138,6 +138,8 @@ critic の必須 3 件 + 推奨/finder 指摘を反映し、D1/D2/D4 を次の�
 - 検証: crates.io 上の 0.1.0 に対し `GPUI_BINDINGS_ROUTE=wrapper-registry` で tests/consumer Linux PASS(実 registry 初 e2e)
 
 ### PR-D(#132 後半): mooncakes 検証 → 【ユーザゲート 2】+ CI 恒常化
+
+**実装済み(2026-08-17、CI 恒常化分)**: wrapper-registry の consumer smoke を 3 OS の恒常 CI ステップとして追加した。ガードは crates.io の sparse index(`index.crates.io`、静的 CDN で rate limit なし)に pin バージョンが存在するかの確認で、未存在なら **skip + warning**(バンプ PR のデッドロック回避の安全網。正の手順は versioning.md の「publish → merge」順)。公開前の現在は 404(クレート名未取得も同時に確認)→ skip 経路が働くことを実測済み。ユーザゲート 1(crates.io publish)後、このステップが自動的に実 e2e になる。RFC 0004 §6 検証計画 3 は §4 の D0 観測で YES 決着(RFC 0004 に追記済み)。
 - ユーザゲート 2 の判断材料: §4-3 のとおり **0.0.1 実名公開の省略を既定の推奨**とする。実施する場合のみ: 公開用ブランチ(main に merge しない)で moon.mod を 0.0.1 + README 警告 → **ユーザが `moon publish`** → 公開コミットへタグ → 素の consumer で `.mooncakes/` からの prebuild → wrapper-registry で exe 実行 PASS、3 OS
 - 本体 PR: `ci.yml`(wrapper-registry 恒常ステップ — pin が crates.io に未存在なら skip + 警告のガード付き)、本 RFC へ結果追記、versioning.md 注記、CHANGELOG
 - 完了条件: RFC 0004 §6 検証計画 3 が YES/NO で決着・記録(§4 で核心は YES 済み)、3 OS で wrapper-registry 緑
