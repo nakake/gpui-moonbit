@@ -52,6 +52,8 @@
 
 `ABI_VERSION` の bump とモジュール/クレートのバージョン bump は同じコミットで行う。
 
+**PATCH リリースの規律(RFC 0005 D1)**: 配布済みモジュール内の `build.py` は crates.io の `gpui-sys` を caret(`^0.x.y` = 同一 MINOR 内の PATCH 追従)で引くため、**PATCH は ABI・コールバックシンボル・リンク契約を一切壊してはならない**。これらに触れる変更は必ず MINOR 以上とし、`moonbit-bindings/build.py` の `GPUI_SYS_VERSION` を同じコミットで更新する(ロックステップ + pin。乖離は build driver の preflight `--check-pin` が検出する)。
+
 ## Changelog 方針
 
 - リポジトリルートの [`CHANGELOG.md`](../CHANGELOG.md) を [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) 1.1.0 形式で維持する。
@@ -62,8 +64,9 @@
 ## リリースチェックリスト
 
 1. **CI 緑**: `main` の GitHub Actions が 3 OS（ubuntu / macos / windows）で成功していること。CI にはコールドビルド、Rust 単体テスト、`moon test`、Rust 単独変更後の再ビルドが含まれる。`abi.toml` 由来の定数が両言語で一致していること（drift guard、#8 で導入）は build driver の検証とテストが担保する。
-2. **バージョン決定**: 上のバンプ規則に従い次のバージョンを決め、`moonbit-bindings/moon.mod` と `gpui-sys/Cargo.toml` を同時に更新する。
+2. **バージョン決定**: 上のバンプ規則に従い次のバージョンを決め、`moonbit-bindings/moon.mod`・`gpui-sys/Cargo.toml`・`moonbit-bindings/build.py` の `GPUI_SYS_VERSION`(wrapper 経路の caret pin、RFC 0005 D1)を同じコミットで更新する。
 3. **ABI 整合性**: ABI 変更がある場合、`abi.toml` の `ABI_VERSION` が bump 済みであること、build driver（`build.sh` / `build.ps1`）で定数を再生成済みであること、`architecture.md` の envelope 記述が一致していることを確認する。
 4. **Changelog 確定**: `CHANGELOG.md` の `Unreleased` を `[X.Y.Z] - YYYY-MM-DD` に書き換え、エントリがコミットと突き合わせ可能であることを確認する。
 5. **タグ**: `vX.Y.Z` を打って push する。
-6. **配布**（将来）: mooncakes 公開は `--moonbit-unstable-prebuild` の API 安定性を見極めてから判断する（#93 で prebuild パイプラインは実装済みだが、実験的機能への依存を公開パッケージに固定するのは時期尚早と判断）。macOS 配布署名は `G5` 完了後。それまでは path/git 依存（prebuild 方式、[`spikes/2026-07-24-packaging-feasibility.md`](spikes/2026-07-24-packaging-feasibility.md) の方式 A）またはテンプレートリポジトリ方式（`build.sh` / `build.ps1` を含むリポジトリの fork/clone、方式 B）で配布する。
+6. **crates.io publish の順序**(RFC 0005 D7。`gpui-sys` を公開している場合): バージョンバンプを含む PR は、**先に `cargo publish` で新しい `gpui-sys` を crates.io に上げてから merge する**。逆順にすると、CI の wrapper-registry ステップが「pin が crates.io に未存在」でリリース PR 自体を赤にするデッドロックになる(同ステップは未存在 version を skip + 警告するガード付きだが、順序を守るのが正)。publish は `cargo publish --dry-run` でファイル一覧を確認してから行い、**verify ビルドを省略しない**(`--no-verify` 禁止 — 読み取り専用 checkout での build.rs 挙動の最終防波堤)。
+7. **配布**（将来）: mooncakes 公開は `--moonbit-unstable-prebuild` の API 安定性を見極めてから判断する（#93 で prebuild パイプラインは実装済みだが、実験的機能への依存を公開パッケージに固定するのは時期尚早と判断）。macOS 配布署名は `G5` 完了後。それまでは path/git 依存（prebuild 方式、[`spikes/2026-07-24-packaging-feasibility.md`](spikes/2026-07-24-packaging-feasibility.md) の方式 A）またはテンプレートリポジトリ方式（`build.sh` / `build.ps1` を含むリポジトリの fork/clone、方式 B）で配布する。
