@@ -162,6 +162,6 @@ critic の必須 3 件 + 推奨/finder 指摘を反映し、D1/D2/D4 を次の�
 ## 7. 未決事項
 
 1. ~~**Windows の main.obj 存否**~~ **確定(2026-08-17、PR-A の windows-latest CI)**: prebuild 経路でも `main.obj` は残る。したがって D5-(i) Windows 仕様は強い側 = 「main.obj の定義 exactly-once + gpui_sys.lib の UNDEF 参照 exactly-once + リンク成功」で運用される(build.ps1 は main.obj が無い環境でも UNDEF + リンク成功へ自動縮退する適応分岐を保持)。cold build と Rust-only rebuild の両方で全検証 PASS。
-2. **consumer の Rust-only 変更後再リンク**(stale exe か否か)— PR-B の CI probe で確定する。
+2. ~~**consumer の Rust-only 変更後再リンク**~~ **確定(2026-08-17、PR-B の ubuntu-latest CI probe)**: **stale**。`touch gpui-sys/src/lib.rs` → `moon build` では consumer の exe は再リンクされない(mtime 不変を実測。probe は warning annotation として毎 CI 実行で観測継続)。「moon が外部 staticlib を追跡しない」制約は consumer 経路にもそのまま当たる。手当ては D6 どおり文書化(troubleshooting に消費者向け回避策: exe を削除して `moon build`)+ upstream issue 起票(未起票。moonbitlang/moon への報告はユーザ判断)。cmd 側は build driver の rm で回避済み。
 3. **registry 消費者ビルドにおける依存側 cmd(is-main)の扱い**(§4-1)— PR-A で tracked 化した moon.pkg が tarball に入った状態での消費者ビルド挙動を確認する。問題があれば cmd の tarball 除外(moon package の除外機構の有無調査)か cmd の設計見直しをこの RFC に追記する。
 4. **mooncakes 0.0.1 公開の最終要否** — ユーザゲート 2(§5 PR-D)。既定の推奨は省略。

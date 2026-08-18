@@ -266,6 +266,14 @@ wrapper と cargo の成果物は 1 環境あたり約 1.2 GB になる。次の
 
 `CARGO_TARGET_DIR` を設定している場合、cargo の成果物はそちらにあり、キャッシュ配下に残るのは wrapper の manifest 類だけである(依存元ごとに `wrapper/<pin>/<bucket>/` へ分かれる。bucket は依存行のハッシュで、異なる gpui-sys ソースを行き来しても互いの cargo fingerprint を壊さないための分離)。
 
+### Rust(gpui-sys)だけ変えたのに挙動が変わらない(stale exe)
+
+moon は外部 staticlib の変更を追跡しないため、gpui-sys の Rust コードだけを変更して consumer 側で `moon build` しても**実行ファイルは再リンクされない**(CI の relink probe で実測、RFC 0005 §7-2)。prebuild は新しい .a を作るが、リンク済み exe は古いまま残る。回避策: exe を削除してから build する(リポジトリ内の cmd はルートの build driver が自動でこれを行う)。
+
+```bash
+rm -f _build/native/debug/build/main/main.exe && moon build
+```
+
 ### wrapper 経路だけがビルドに失敗する(上流 gpui の浮動)
 
 `gpui-sys/Cargo.lock` は wrapper crate に自動では効かない。ただし **wrapper-path 経路**(検証・CI)では、build.py が依存先 gpui-sys の `Cargo.lock` を wrapper へシード(コピー)するため、解決は checkout と揃う(シードは依存先 lock が変わったときだけ更新される。`.seeded-from` マーカー)。**wrapper-registry 経路**(実際の registry 消費)には lock の供給源が無く、上流 gpui の 0.2.x 系で新しい patch が出ればそれを引き得る。したがって「checkout 経路と wrapper-path が緑のまま、registry 消費だけが赤い」ことが起こり得る。
